@@ -6,19 +6,26 @@ Generated from `web/src/session.ts` by `node scripts/session-diagram.mjs`. Do no
 ```mermaid
 flowchart LR
   start(( )) --> lobby
+  lobby -->|"wait for host"| waitingForHost
   lobby -->|"join mid-game: player<br/>join mid-game: player, streamed<br/>join mid-game: spectator, streamed"| lateJoinStarting
   lobby -->|"join mid-game: spectator<br/>gameStarted"| running
+  waitingForHost -->|"host returned"| lobby
+  waitingForHost -->|"gameStarted"| running
+  lateJoinStarting -->|"rejoined: game ended while away<br/>rejoined: match replaced while away"| lobby
   lateJoinStarting -->|"lateJoinRomNeeded"| lateJoinAwaitingRom
   lateJoinStarting -->|"engineStarted: needs state"| lateJoinSyncing
   lateJoinStarting -->|"engineStarted: no state needed<br/>lateJoinSynced"| running
+  running -->|"rejoined: game ended while away<br/>rejoined: match replaced while away"| lobby
   running -->|"lateJoinRomNeeded"| lateJoinAwaitingRom
   running -->|"leftOutOfStart"| lateJoinStarting
+  lateJoinAwaitingRom -->|"rejoined: game ended while away<br/>rejoined: match replaced while away"| lobby
   lateJoinAwaitingRom -->|"lateJoinRomReady"| lateJoinStarting
+  lateJoinSyncing -->|"rejoined: game ended while away<br/>rejoined: match replaced while away"| lobby
   lateJoinSyncing -->|"leftOutOfStart"| lateJoinStarting
   lateJoinSyncing -->|"lateJoinSynced<br/>admittedToStart"| running
 ```
 
-Not drawn, because every state goes to `lobby` on them: `gameEnded`, `roomClosed`, `rejoinRefused`, `rejoined: game ended while away`, `rejoined: match replaced while away`.
+Not drawn, because every state goes to `lobby` on them: `gameEnded`, `roomClosed`, `rejoinRefused`.
 Events that leave a state unchanged are not drawn either.
 
 What `play.js` reads from each state (`sessionFlag`):
@@ -26,6 +33,7 @@ What `play.js` reads from each state (`sessionFlag`):
 | State | A game is on | Waiting for a ROM | Next engine start is the late join |
 |---|---|---|---|
 | `lobby` | no | no | no |
+| `waitingForHost` | no | no | no |
 | `lateJoinStarting` | yes | no | yes |
 | `running` | yes | no | no |
 | `lateJoinAwaitingRom` | yes | yes | yes |

@@ -73,6 +73,8 @@ import { startVirtualGamepad } from './page/virtual-gamepad/gamepad.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
 import * as connect from './play/connect.ts';
 import * as hostReturn from './play/host-return.ts';
+import { matchSave } from './match-save.ts';
+import { MatchReturn } from './play/match-return.ts';
 import * as connectionNotices from './play/connection-notices.ts';
 import { installShared } from './page/shared.ts';
 import * as delay from './play/delay.ts';
@@ -110,6 +112,7 @@ import {
   followUpIsUnneeded,
 } from './sync-follow-up.ts';
 import { recoveryStep } from './recovery-resync.ts';
+import { hostGameConnected } from './host-game-link.ts';
 import { rosterKey } from './peer-identity.ts';
 import { createPeerConnection, PEER_TIMING, peerFacts } from './peer-connection.ts';
 import { isOlderAttempt, newPageId, readAttemptId } from './attempt-id.ts';
@@ -337,6 +340,7 @@ export const createSession = (
 };
 
 export const KNCore = {
+  matchSave,
   checkpoint: { CheckpointRecovery, CHECKPOINT_CAP, CHECKPOINT_MESSAGE },
   analogScale,
   audioTransition,
@@ -485,6 +489,7 @@ export const KNCore = {
     resyncDeadlineStep,
   },
   rosterKey,
+  hostGameConnected,
   screenshotCrop,
   shouldInitiate,
   signalDisposition,
@@ -542,6 +547,7 @@ export const KNCore = {
     delay,
     connect,
     hostReturn,
+    MatchReturn,
     connectionNotices,
     joinPlan,
     canRetryRoomIce,

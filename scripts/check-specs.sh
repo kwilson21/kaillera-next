@@ -129,7 +129,7 @@ done
 $QUINT run "$DISCONNECT" --main=room_disconnect_cleanup_fixed --invariant=allHold \
   --max-samples=1000 --max-steps=10 --backend="$BACKEND"
 
-for model in room_expiry reconnect_attempt spectator_publication; do
+for model in room_expiry room_member_return reconnect_attempt spectator_publication; do
   file="specs/${model}.qnt"
   $QUINT typecheck "$file"
   for variant in before fixed; do
@@ -138,6 +138,15 @@ for model in room_expiry reconnect_attempt spectator_publication; do
   $QUINT run "$file" --main="${model}_fixed" --invariant=allHold \
     --max-samples=5000 --max-steps=15 --backend="$BACKEND"
 done
+for variant in before fixed; do
+  $QUINT test specs/room_member_return.qnt --main="room_return_match_${variant}" --backend="$BACKEND"
+  $QUINT test specs/room_member_return.qnt --main="room_host_traffic_${variant}" --backend="$BACKEND"
+done
+$QUINT run specs/room_member_return.qnt --main=room_host_traffic_fixed --invariant=staleHostCannotAdvance \
+  --max-steps=15 --max-samples=5000 --backend="$BACKEND"
+$QUINT test specs/room_member_return.qnt --main=room_saved_fight --backend="$BACKEND"
+$QUINT run specs/room_member_return.qnt --main=room_saved_fight --invariant=everyoneInstalled \
+  --max-steps=12 --max-samples=5000 --backend="$BACKEND"
 
 # ── Peer identity: which connection a rejoining player keeps ────────────────
 PEERS=specs/peer_identity.qnt

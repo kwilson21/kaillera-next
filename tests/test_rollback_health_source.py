@@ -950,7 +950,7 @@ def test_a_state_behind_the_guest_is_caught_up_from_not_rewound_to():
     # Inputs it runs on stay until it reaches its target, and the peers'
     # inputs for the frame it goes back to are taken in meanwhile.
     assert "const keepThrough = Math.max(_frameNum, _catchUpTo) + DELAY_FRAMES;" in apply
-    packet = src[src.index("const _processInputPacket = (remoteSid, peer, data) => {") :]
+    packet = src[src.index("const _processInputPacket = (") :]
     packet = packet[: packet.index("INPUT-OOR slot=")]
     assert "const recvBound = Math.max(_frameNum, _catchUpTo);" in packet
     assert "recvFrame > recvBound + DELAY_FRAMES + INPUT_FUTURE_MARGIN_FRAMES" in packet

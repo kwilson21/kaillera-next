@@ -266,6 +266,33 @@ def test_reserved_room_exposes_its_server_deadline_and_disappears_at_expiry(clie
     assert client.get("/room/ROOM1").status_code == 404
 
 
+def test_room_lookup_discloses_only_the_callers_saved_seat(client, sig, monkeypatch):
+    room, _ = sig
+    assert _join("guest", "p-guest")[0] is None
+    monkeypatch.setattr(signaling, "_now_ms", lambda: 100_000)
+    auth = {"Authorization": "Bearer " + signaling.make_reconnect_token("ROOM1", "p-guest")}
+    public = client.get("/room/ROOM1").json()
+    assert public["room_name"] == "r" and "returnDeadline" not in public and "role" not in public
+    active = client.get("/room/ROOM1", headers=auth)
+    assert "no-store" in active.headers["Cache-Control"]
+    assert active.json()["returnDeadline"] is None and active.json()["role"] == "player"
+    assert active.json()["player_name"] == "Friend" and active.json()["slot"] == 1
+    del signaling._sid_host["guest"]
+    room.players["p-guest"]["returnDeadline"] = 220_000
+    assert client.get("/room/ROOM1", headers=auth).json()["returnDeadline"] == 220_000
+    room.host_return_deadline = 150_000
+    assert client.get("/room/ROOM1", headers=auth).json()["returnDeadline"] == 150_000
+    for invalid in [
+        "bad",
+        signaling.make_reconnect_token("OTHER", "p-guest"),
+        signaling.make_reconnect_token("ROOM1", "absent"),
+    ]:
+        assert client.get("/room/ROOM1", headers={"Authorization": "Bearer " + invalid}).status_code == 404
+    monkeypatch.setattr(signaling, "_now_ms", lambda: 220_000)
+    room.host_return_deadline = None
+    assert client.get("/room/ROOM1", headers=auth).status_code == 404
+
+
 def test_room_lookup_reports_host_listed_and_closed(client, sig):
     body = client.get("/room/ROOM1").json()
     assert body["host_name"] == "Kaz" and body["listed"] is False and body["closed"] is False

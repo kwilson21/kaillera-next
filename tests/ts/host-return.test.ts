@@ -5,6 +5,7 @@ import {
   hostReturnClock,
   hostReturnDuration,
   hostReturnKey,
+  playerReturnKey,
   hostReturnSeconds,
   readHostReturn,
   RoomIdentity,
@@ -102,4 +103,41 @@ test('a declined return gets a separate seat, and a refused older credential can
   assert.equal(seat.reconnectToken, renewed);
   seat.forgetHost();
   assert.equal(seat.savedHost(), null);
+});
+
+test('a player can return from a new tab without claiming another guest’s seat or a spectator seat', () => {
+  const stores = storage();
+  const first = new RoomIdentity('RoomA', stores);
+  const firstToken = credential(first.persistentId, first.room);
+  first.receiveToken(firstToken, null, false, true);
+  stores.remove('sessionStorage', 'kn-player-id');
+  const second = new RoomIdentity(first.room, stores);
+  const secondToken = credential(second.persistentId, second.room);
+  second.receiveToken(secondToken, null, false);
+  assert.equal(second.savedPlayer(second.persistentId), null);
+  second.rememberPlayer(second.persistentId);
+  assert.equal(second.savedPlayer(second.persistentId)?.token, secondToken);
+  assert.equal(second.savedHost(), null);
+  assert.equal(second.savedPlayer(first.persistentId)?.token, firstToken);
+  second.rememberHost(second.persistentId);
+  assert.equal(second.savedPlayer(second.persistentId), null);
+  assert.equal(second.savedHost()?.token, secondToken);
+  first.leaveRoom();
+  assert.equal(stores.get('localStorage', playerReturnKey(first.room, first.persistentId)), null);
+  assert.equal(second.savedHost()?.token, secondToken);
+  assert.equal(second.savedPlayer(first.persistentId), null);
+});
+
+test('refusing a signed guest entry does not discard a newer credential or a promoted host seat', () => {
+  const stores = storage();
+  const seat = new RoomIdentity('RoomA', stores);
+  const older = credential(seat.persistentId, seat.room, 50);
+  const newer = credential(seat.persistentId, seat.room);
+  seat.receiveToken(older, null, false, true);
+  seat.receiveToken(newer, null, false, true);
+  seat.discardPlayer(older);
+  assert.equal(seat.savedPlayer(seat.persistentId)?.token, newer);
+  seat.rememberHost(seat.persistentId);
+  seat.discardPlayer(newer);
+  assert.equal(seat.savedHost()?.token, newer);
 });

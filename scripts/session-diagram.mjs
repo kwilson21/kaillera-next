@@ -26,6 +26,8 @@ const joined = (over) => ({
 });
 // One sample of each event the page sends, labelled the way a reader would say it.
 const EVENTS = [
+  ['wait for host', { type: 'waitForHost' }],
+  ['host returned', { type: 'hostReturned' }],
   ['join: room in lobby', joined({ status: 'lobby', matchId: null })],
   ['join mid-game: player', joined({})],
   ['join mid-game: player, streamed', joined({ streaming: true })],

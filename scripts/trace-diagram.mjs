@@ -37,6 +37,34 @@ const OUT = path.join(ROOT, 'docs/spec-traces.md');
 // the only runs of the spec that are drawn; otherwise every run is.
 const SPECS = [
   {
+    file: 'specs/room_member_return.qnt',
+    main: 'room_member_return_fixed',
+    hub: 'Room',
+    runs: ['guestReturnsToEmptyRoomTest'],
+    about: 'A player returning to a room whose host disconnected keeps their seat until the original host deadline.',
+  },
+  {
+    file: 'specs/room_member_return.qnt',
+    main: 'room_return_match_fixed',
+    hub: 'Room',
+    runs: ['freshGuestBeforeHostTest'],
+    about: 'A player reopening their tab while the host is missing brings the original group back to the lobby.',
+  },
+  {
+    file: 'specs/room_member_return.qnt',
+    main: 'room_saved_fight',
+    hub: 'Room',
+    runs: ['unanimousRestoreTest'],
+    about: 'A saved fight can run once each original player has installed its state in the new match.',
+  },
+  {
+    file: 'specs/room_member_return.qnt',
+    main: 'room_host_traffic_fixed',
+    hub: 'Guest',
+    runs: ['silentOpenTransportTest'],
+    about: 'A guest waits when the host is absent and its direct game connection stops delivering input.',
+  },
+  {
     file: 'specs/game_end.qnt',
     main: 'game_end_fixed',
     hub: 'Room',

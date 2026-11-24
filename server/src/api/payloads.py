@@ -67,6 +67,8 @@ class OpenRoomExtra(BaseModel):
     sessionid: str = ""
     persistentId: str = ""
     reconnectToken: str = ""
+    supportsMatchReturn: bool = False
+    recoverMatchId: str = Field(default="", max_length=64)
     player_name: str = Field(default="Player", max_length=32)
     room_name: str = Field(default="Room", max_length=64)
     game_id: str = Field(default="", max_length=32)
@@ -97,10 +99,13 @@ class JoinRoomExtra(BaseModel):
     sessionid: str = ""
     persistentId: str = ""
     reconnectToken: str = ""
+    supportsMatchReturn: bool = False
+    recoverMatchId: str = Field(default="", max_length=64)
     player_name: str = Field(default="Player", max_length=32)
     spectate: bool = False
     # Explicitly reclaim the offline owner seat from a new browser tab.
     returnHost: bool = False
+    returnPlayer: bool = False
     # `resume` is true when the page still has a game running and is taking
     # its place in the room back after a socket drop; `slot` and `matchId`
     # are the slot it plays and the match it is in. A member is taken back as
@@ -158,6 +163,12 @@ class MatchJoinedPayload(BaseModel):
 
 
 # ── match-recovery-unverified ────────────────────────────────────────────────
+
+
+class MatchReturnReadyPayload(BaseModel):
+    model_config = ConfigDict(strict=True)
+    matchId: str = Field(min_length=1, max_length=64)
+    ready: bool
 
 
 class MatchRecoveryUnverifiedPayload(BaseModel):
@@ -287,6 +298,7 @@ class RoomPlayer(_ServerMessage):
     # None while the player holds no slot.
     slot: int | None
     romReady: bool
+    away: bool = False
     # The player's page shows the ROM prompt: it said it has no ROM and asks
     # for one (rom-ready {ready: false, prompt: true}). A page that has not
     # said rom-ready yet shows romReady false without it.
@@ -337,6 +349,9 @@ class UsersUpdated(_ServerMessage):
     matchId: str | None = None
     # Sticky for the named match. Absent from older servers.
     recoveryUnverifiedMatchId: str | None = None
+    resumeFromMatchId: str | None = None
+    resumePending: bool = False
+    resyncEnabled: bool = True
     hostReturnDeadline: int | None = None
     serverTime: int | None = None
 
@@ -362,6 +377,12 @@ class GameStarted(_ServerMessage):
     rom_size: int | None
     hostRom: HostRom
     gameId: str
+    matchId: str
+
+    resumeFromMatchId: str | None = None
+
+
+class MatchReturnGo(_ServerMessage):
     matchId: str
 
 
@@ -433,6 +454,7 @@ RELAY_SENDER_KEY = "knFrom"
 SERVER_EVENTS: dict[str, type[BaseModel]] = {
     "users-updated": UsersUpdated,
     "game-started": GameStarted,
+    "match-return-go": MatchReturnGo,
     "game-ended": GameEnded,
     "room-closed": RoomClosed,
     "rom-sharing-updated": RomSharingUpdated,

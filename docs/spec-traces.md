@@ -6,6 +6,82 @@ replayed by the model checker and drawn from the trace that produced. Do not edi
 
 To draw a counterexample instead, see the top of `scripts/trace-diagram.mjs`.
 
+## `specs/room_member_return.qnt` (`room_member_return_fixed`)
+
+A player returning to a room whose host disconnected keeps their seat until the original host deadline.
+
+### guestReturnsToEmptyRoomTest
+
+```mermaid
+sequenceDiagram
+  participant Room
+  Room->>Room: hostDrops
+  Note over Room: s = {hostUntil: 2, now: 0, open: true, player: online, playerUntil: 0}
+  Room->>Room: tick
+  Note over Room: s = {hostUntil: 2, now: 1, open: true, player: online, playerUntil: 0}
+  Room->>Room: playerDrops
+  Note over Room: s = {hostUntil: 2, now: 1, open: true, player: reserved, playerUntil: 3}
+  Room->>Room: playerReturns(false)
+  Room->>Room: playerReturns(true)
+  Note over Room: s = {hostUntil: 2, now: 1, open: true, player: online, playerUntil: 0}
+  Room->>Room: tick
+  Note over Room: s = {hostUntil: 0, now: 2, open: false, player: gone, playerUntil: 0}
+  Room->>Room: playerReturns(true)
+```
+
+## `specs/room_member_return.qnt` (`room_return_match_fixed`)
+
+A player reopening their tab while the host is missing brings the original group back to the lobby.
+
+### freshGuestBeforeHostTest
+
+```mermaid
+sequenceDiagram
+  participant Room
+  Room->>Room: disconnect("p2")
+  Note over Room: live = {p3}
+  Room->>Room: freshGuest("p2")
+  Note over Room: live = {p2, p3}<br/>originalTabs = {p3}<br/>playing = false
+  Room->>Room: hostReturns(true, false)
+  Note over Room: hostAway = false
+```
+
+## `specs/room_member_return.qnt` (`room_saved_fight`)
+
+A saved fight can run once each original player has installed its state in the new match.
+
+### unanimousRestoreTest
+
+```mermaid
+sequenceDiagram
+  participant Room
+  Room->>Room: installed("host", 2)
+  Note over Room: s = {epoch: 2, phase: restoring, ready: {host}, seats: {guest1, guest2, host}}
+  Room->>Room: installed("guest2", 2)
+  Note over Room: s = {epoch: 2, phase: restoring, ready: {guest2, host}, seats: {guest1, guest2, host}}
+  Room->>Room: installed("guest1", 1)
+  Room->>Room: installed("spectator", 2)
+  Room->>Room: installed("guest1", 2)
+  Note over Room: s = {epoch: 2, phase: playing, ready: {guest1, guest2, host}, seats: {guest1, guest2, host}}
+```
+
+## `specs/room_member_return.qnt` (`room_host_traffic_fixed`)
+
+A guest waits when the host is absent and its direct game connection stops delivering input.
+
+### silentOpenTransportTest
+
+```mermaid
+sequenceDiagram
+  participant Guest
+  Guest->>Guest: silence
+  Note over Guest: age = 1
+  Guest->>Guest: serverHold
+  Note over Guest: hostHeld = true
+  Guest->>Guest: silence
+  Note over Guest: age = 2
+```
+
 ## `specs/game_end.qnt` (`game_end_fixed`)
 
 A host end request waits for the server rather than ending only the host on timeout. The authoritative lobby roster repairs a lost end event, and a delayed request cannot end a rematch.

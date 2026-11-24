@@ -27,6 +27,7 @@ test('a page loading as host opens a fresh room', () => {
       game_id: 'ssb64',
       persistentId: 'pid-1',
       reconnectToken: 'tok',
+      supportsMatchReturn: true,
       fresh: true,
     },
     maxPlayers: 4,
@@ -43,6 +44,7 @@ test('a host coming back mid-game resumes its slot and match, and does not ask f
       game_id: 'ssb64',
       persistentId: 'pid-1',
       reconnectToken: 'tok',
+      supportsMatchReturn: true,
       resume: true,
       slot: 0,
       matchId: 'm1',
@@ -53,7 +55,14 @@ test('a host coming back mid-game resumes its slot and match, and does not ask f
 
 test('a guest joins to play or to watch, and resumes the same way as a host', () => {
   assert.deepEqual(joinRoomRequest(JOINER, false, null), {
-    extra: { sessionid: 'ROOM1', player_name: 'Ana', spectate: false, persistentId: 'pid-1', reconnectToken: 'tok' },
+    extra: {
+      sessionid: 'ROOM1',
+      player_name: 'Ana',
+      spectate: false,
+      persistentId: 'pid-1',
+      reconnectToken: 'tok',
+      supportsMatchReturn: true,
+    },
   });
   assert.equal(joinRoomRequest(JOINER, true, null).extra.spectate, true);
   assert.deepEqual(joinRoomRequest(JOINER, true, { slot: null, matchId: '' }).extra, {
@@ -62,10 +71,23 @@ test('a guest joins to play or to watch, and resumes the same way as a host', ()
     spectate: true,
     persistentId: 'pid-1',
     reconnectToken: 'tok',
+    supportsMatchReturn: true,
     resume: true,
     slot: null,
     matchId: '',
   });
+});
+
+test('a returning page asks for its own seat, and only a host offers a saved fight', () => {
+  const player = joinRoomRequest(JOINER, false, null, 'player').extra;
+  assert.ok('returnPlayer' in player);
+  assert.equal(player.returnPlayer, true);
+  assert.equal(player.returnHost, undefined);
+  assert.equal(player.recoverMatchId, undefined);
+  const host = joinRoomRequest(JOINER, false, null, 'host', 'previous').extra;
+  assert.ok('returnHost' in host);
+  assert.equal(host.returnHost, true);
+  assert.equal(host.recoverMatchId, 'previous');
 });
 
 test("every request is one the server's models accept", () => {

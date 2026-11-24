@@ -43,6 +43,8 @@ def _serialize_room(room) -> str:
     d = asdict(room)
     # Sets are not JSON-serializable — convert to lists
     d["rom_ready"] = list(d["rom_ready"])
+    # An unfinished rewind returns to the lobby on a server restart.
+    del d["resume_ready"]
     d["rom_prompt"] = list(d["rom_prompt"])
     d["waiting_for_state"] = list(d["waiting_for_state"])
     # Slot keys must be strings in JSON; we convert back on load
@@ -77,6 +79,10 @@ def _deserialize_room(d: dict):
         input_types=d.get("input_types", {}),
         device_types=d.get("device_types", {}),
         match_id=d.get("match_id"),
+        match_participants={int(k): v for k, v in d.get("match_participants", {}).items()},
+        resync_enabled=d.get("resync_enabled", True),
+        resume_from_match_id=d.get("resume_from_match_id"),
+        resume_deadline=d.get("resume_deadline"),
         recovery_unverified_match_id=(
             d.get("match_id")
             if d.get("status") == "playing"

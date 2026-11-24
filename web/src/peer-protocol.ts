@@ -26,6 +26,7 @@
  *
  * The per-frame input packet is binary and has its own codec, input-wire.ts.
  */
+import { MatchSaveMeta } from './match-save.ts';
 import { Result, Schema } from 'effect';
 import { GameMode, RenegotiateRequest } from './protocol.ts';
 import { issueFinder, type WirePayload } from './wire.ts';
@@ -173,6 +174,8 @@ const Encoded = Schema.String;
 const Sidecar = Schema.optional(Schema.NullOr(Schema.Unknown));
 
 const SaveState = Schema.Struct({
+  matchId: Schema.optional(Schema.String),
+  returnState: Schema.optional(Schema.Struct({ ...MatchSaveMeta.fields, seal: Schema.String })),
   frame: Schema.Number,
   data: Encoded,
   stateFormat: Schema.optional(Schema.String),

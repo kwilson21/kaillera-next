@@ -73,6 +73,7 @@ from src.api.signaling import (
     connected_players,
     host_return_expired,
     host_return_status,
+    member_return_status,
     room_frame,
     room_host_name,
     room_is_live,
@@ -976,8 +977,15 @@ def create_app(lifespan=None) -> FastAPI:
             if not check_ip(client_ip_val, "room-lookup-miss"):
                 raise HTTPException(status_code=429, detail="Rate limited")
             raise HTTPException(status_code=404, detail="Room not found")
+        private = {}
+        if authorization := request.headers.get("Authorization"):
+            scheme, _, token = authorization.partition(" ")
+            private = member_return_status(room_id, room, token) if scheme.lower() == "bearer" else None
+            if private is None:
+                raise HTTPException(status_code=404, detail="Room member not found")
         return {
             "status": room.status,
+            "room_name": room.room_name,
             "player_count": len(room.players),
             "max_players": room.max_players,
             "has_password": room.password is not None,
@@ -1004,6 +1012,7 @@ def create_app(lifespan=None) -> FastAPI:
             # refused with "Room closed"; its own members may still return.
             "closed": room.host_return_deadline is not None or not room_is_live(room),
             **host_return_status(room),
+            **private,
         }
 
     @app.get("/room/{room_id}/frame.jpg")

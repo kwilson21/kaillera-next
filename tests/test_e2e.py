@@ -74,7 +74,7 @@ def test_reopened_host_url_does_not_recreate_an_expired_room(browser, page, shor
             expect(guest.locator("#toolbar")).to_be_visible()
             page.once("dialog", lambda dialog: dialog.accept())
         page.goto(short_host_return_url)
-        expect(page.get_by_role("link", name=f"Return to room {room}")).to_be_visible()
+        expect(page.get_by_role("link", name="Return to room", exact=True)).to_be_visible()
         expect(page.get_by_role("timer")).to_contain_text("Room closes in")
         expect(guest.locator("#host-wait-banner [role=timer]")).to_be_visible()
         deadline = guest.request.get(f"{short_host_return_url}/room/{room}").json()
@@ -82,7 +82,7 @@ def test_reopened_host_url_does_not_recreate_an_expired_room(browser, page, shor
 
         expect(guest).to_have_url(f"{short_host_return_url}/?roomEnded=host-timeout", timeout=15000)
         expect(guest.get_by_role("status")).to_contain_text("The room closed because the host did not return in time.")
-        expect(page.get_by_role("link", name=f"Return to room {room}")).to_have_count(0)
+        expect(page.get_by_role("link", name="Return to room", exact=True)).to_have_count(0)
         assert page.request.get(f"{short_host_return_url}/room/{room}").status == 404
 
     # Even a browser with no history of the room can safely open the address the host bookmarked.
@@ -137,7 +137,7 @@ def test_intentional_lobby_leave_transfers_the_room_and_clears_the_return_offer(
         guest.wait_for_function("KNState.slot === 1")
         original.click("#leave-btn")
         expect(original).to_have_url(f"{server_url}/")
-        expect(original.get_by_role("link", name=f"Return to room {room}")).to_have_count(0)
+        expect(original.get_by_role("link", name="Return to room", exact=True)).to_have_count(0)
         guest.wait_for_function("KNState.isLocalHost && KNState.slot === 0", timeout=15000)
 
         original.goto(f"{url}&name=Original")
@@ -150,6 +150,90 @@ def test_intentional_lobby_leave_transfers_the_room_and_clears_the_return_offer(
     finally:
         original.close()
         guest.close()
+
+
+def test_host_countdown_tracks_the_game_link_between_roster_updates(page, server_url, room):
+    page.goto(f"{server_url}/play.html?room={room}&host=1")
+    expect(page.locator("#host-controls")).to_be_visible()
+    page.clock.install(time="2025-01-01T00:00:00Z")
+    page.clock.pause_at("2025-01-01T00:00:01Z")
+    page.evaluate("""() => {
+        window.gameLinkOpen = false;
+        window.showHostWait = KNCore.play.hostReturn.hostWaitNotice(() => window.gameLinkOpen);
+        window.showHostWait({
+            status: 'playing', hostReturnDeadline: 121000, serverTime: 1000,
+        });
+    }""")
+    assert page.locator("#toolbar-status").evaluate("element => element.hidden")
+    status = page.locator("#host-wait-banner [role=status]")
+    timer = page.locator("#host-wait-banner [role=timer]")
+    expect(status).to_contain_text("Waiting for them to return")
+    expect(timer).to_have_text("2:00")
+    page.evaluate("window.gameLinkOpen = true")
+    page.clock.run_for(1000)
+    expect(status).to_contain_text("game connection is still active")
+    expect(timer).to_have_text("1:59")
+    page.evaluate("window.gameLinkOpen = false")
+    page.clock.run_for(1000)
+    expect(status).to_contain_text("Waiting for them to return")
+    expect(timer).to_have_text("1:58")
+    page.evaluate("() => window.showHostWait(null)")
+    expect(status).to_be_hidden()
+    assert not page.locator("#toolbar-status").evaluate("element => element.hidden")
+
+
+def test_guest_returns_first_to_empty_fight_then_leaves_their_seat(browser, server_url, room):
+    play_url = f"{server_url}/play.html?room={room}"
+    lookup = f"{server_url}/room/{room}"
+    with browser.new_context() as host_device, browser.new_context() as guest_device:
+        host = host_device.new_page()
+        guest = guest_device.new_page()
+        host.goto(f"{play_url}&host=1&name=Original")
+        expect(host.locator("#host-controls")).to_be_visible()
+        guest.goto(f"{play_url}&name=Guest")
+        guest.wait_for_function("KNState.slot === 1")
+        for page in (host, guest):
+            _mark_rom_ready(page)
+        expect(host.locator("#start-btn")).to_be_enabled()
+        host.click("#start-btn")
+        expect(guest.locator("#toolbar")).to_be_visible()
+        guest_id = guest.evaluate("sessionStorage.getItem('kn-player-id')")
+        ticket = guest.evaluate("room => sessionStorage.getItem('kn-reconnect-token:' + room)", room)
+        assert guest_id and ticket
+        host.close()
+        guest.close()
+
+        guest = guest_device.new_page()
+        guest.goto(f"{server_url}/join?room={room}")
+        offer = guest.get_by_role("link", name="Return to room", exact=True)
+        expect(offer).to_be_visible()
+        before = guest.request.get(lookup).json()
+        assert before["status"] == "playing" and before["hostReturnDeadline"] > before["serverTime"]
+        offer.click()
+        guest.wait_for_function("window.KNState?.slot === 1 && !KNState.isLocalHost")
+        assert guest.evaluate("sessionStorage.getItem('kn-player-id')") == guest_id
+        expect(guest.locator("#overlay")).to_be_visible()
+        expect(guest.locator("#host-wait-banner [role=timer]")).to_be_visible()
+        returned = guest.request.get(lookup).json()
+        assert returned["status"] == "lobby" and returned["hostReturnDeadline"] == before["hostReturnDeadline"]
+
+        host = host_device.new_page()
+        host.goto(server_url)
+        host.get_by_role("link", name="Return to room", exact=True).click()
+        host.wait_for_function("window.KNState?.slot === 0 && KNState.isLocalHost")
+        expect(host.locator("#host-controls")).to_be_visible()
+        expect(guest.locator("#host-wait-banner")).to_be_hidden()
+        after = host.request.get(lookup).json()
+        assert after["status"] == "lobby" and after["player_count"] == 2 and "hostReturnDeadline" not in after
+
+        guest.click("#leave-btn")
+        expect(guest).to_have_url(f"{server_url}/")
+        assert guest.request.get(lookup, headers={"Authorization": f"Bearer {ticket}"}).status == 404
+        expect(guest.get_by_role("link", name="Return to room", exact=True)).to_have_count(0)
+        guest.goto(f"{server_url}/join?room={room}")
+        expect(guest.locator("#inv-loading")).to_be_hidden()
+        expect(guest.get_by_role("link", name="Return to room", exact=True)).to_have_count(0)
+        assert host.request.get(lookup).json()["player_count"] == 1
 
 
 def test_host_guest_start_end(browser, server_url):

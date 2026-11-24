@@ -104,6 +104,10 @@ room_disconnect_cleanup() {
   verify "$expiry" room_expiry_fixed allHold init 4
   expect_violation "$expiry" room_expiry_before liveRoomSurvives 3
   expect_violation "$expiry" room_expiry_before freshRoomHasGrace 3
+  verify specs/room_member_return.qnt room_member_return_fixed allHold init 5
+  verify specs/room_member_return.qnt room_saved_fight everyoneInstalled init 5
+  verify specs/room_member_return.qnt room_host_traffic_fixed staleHostCannotAdvance init 4
+  expect_violation specs/room_member_return.qnt room_host_traffic_before staleHostCannotAdvance 3
   local spec=specs/room_disconnect_cleanup.qnt
   verify "$spec" room_disconnect_cleanup_fixed allHold
   expect_violation "$spec" room_disconnect_cleanup_before callbackCanReturn

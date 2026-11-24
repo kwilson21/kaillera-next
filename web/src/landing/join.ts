@@ -18,7 +18,6 @@ import {
   WAKE_POLL_MS,
   apiBase,
   elapsedText,
-  hostReturnUrl,
   hostUrl,
   isSlowWake,
   nextPingTimeout,
@@ -30,14 +29,9 @@ import {
   type CodeHost,
   type WakeHost,
 } from './wake.ts';
+import { roomReturnLinks } from './return-rooms.ts';
 import type { SafeStorage } from '../kn-state.ts';
-import {
-  hostReturnClock,
-  hostReturnDuration,
-  hostReturnKey,
-  hostReturnSeconds,
-  readHostReturn,
-} from '../play/host-return.ts';
+import { hostReturnClock, hostReturnDuration, hostReturnSeconds } from '../play/host-return.ts';
 import { getJSONIfThere, isHealthAnswer, isRoomAnswer, type RoomAnswer } from './wire.ts';
 
 /** How often a room on screen is looked up again. */
@@ -220,7 +214,8 @@ export const looksUpOnReturn = (hidden: boolean, section: Section, closedRecord:
 export interface JoinHost extends WakeHost, CodeHost {
   readonly location: Location;
   readonly navigator: Navigator;
-  readonly KNStorage?: Pick<SafeStorage, 'get'>;
+  readonly KNStorage?: SafeStorage;
+  addEventListener(type: 'storage', listener: (event: StorageEvent) => void): void;
   setInterval(handler: () => void, ms: number): number;
   clearInterval(id: number): void;
   readonly RTCPeerConnection?: unknown;
@@ -291,48 +286,38 @@ export const startJoinPage = (host: JoinHost): void => {
     host.location.href = hostUrl(API, randomRoomCode(host));
   });
 
-  const offersHostReturn = (now: number): boolean => {
-    if (spectate || !canPlay) return false;
-    try {
-      const token = host.KNStorage?.get('localStorage', hostReturnKey(code)) ?? null;
-      return readHostReturn(code, token, now) !== null;
-    } catch {
-      return false;
-    }
-  };
-
   const showClosed = (hostName: string): void => {
     const view = closedView(hostName);
     $('closed-title').textContent = view.title;
     $('closed-line').textContent = view.line;
-    $('closed-return').hidden = true;
     openOwn.className = 'btn primary big';
     doc.title = 'Room closed · kaillera-next';
     show('inv-closed');
   };
 
   let holdClock: number | null = null;
-  let holdDeadline = 0;
-  let holdPlaying = false;
+  const returns = $('room-returns');
   let holdTimer = 0;
   const showHold = (): void => {
     const seconds = hostReturnSeconds(holdClock);
-    const returning = seconds > 0 && offersHostReturn(holdDeadline - seconds * 1000);
+    const returning = seconds > 0 && !returns.hidden;
     $('closed-title').textContent = returning ? 'Return to your room' : 'Waiting for the host';
-    $('closed-line').textContent = !seconds
-      ? 'The time to return has ended.'
-      : returning && holdPlaying
-        ? 'Return before the timer ends to start a rematch with your players.'
-        : 'The host disconnected. The room is reserved until the timer ends.';
+    $('closed-line').textContent = seconds
+      ? 'The host disconnected. The room is reserved until the timer ends.'
+      : 'The time to return has ended.';
     $('closed-timer').textContent = hostReturnDuration(seconds);
-    $('closed-timer').hidden = false;
-    const link = $<HTMLAnchorElement>('closed-return');
-    link.hidden = !returning;
-    if (returning) link.href = hostReturnUrl(API, code);
+    $('closed-timer').hidden = returning;
     openOwn.className = returning ? 'btn big' : 'btn primary big';
     doc.title = $('closed-title').textContent + ' · kaillera-next';
     show('inv-closed');
   };
+
+  const checkReturns =
+    canPlay && !spectate && code
+      ? roomReturnLinks(host, API, returns, code, () => {
+          if (holdClock !== null) showHold();
+        })
+      : () => {};
 
   let slotsShown = false;
   const factsEl = (room: RoomAnswer): DocumentFragment => {
@@ -421,6 +406,7 @@ export const startJoinPage = (host: JoinHost): void => {
   const lookup = async (): Promise<void> => {
     host.clearTimeout(refreshTimer);
     const seq = ++lookupSeq;
+    checkReturns();
     let room: RoomAnswer | null;
     try {
       room = await getJSONIfThere(host, `${API}/room/${encodeURIComponent(code)}`, LOOKUP_TIMEOUT_MS, isRoomAnswer);
@@ -439,8 +425,6 @@ export const startJoinPage = (host: JoinHost): void => {
     stopClock();
     const elapsedHold = holdClock !== null && !hostReturnSeconds(holdClock);
     holdClock = hostReturnClock(room);
-    holdDeadline = room?.hostReturnDeadline ?? 0;
-    holdPlaying = room?.status === 'playing';
     host.clearInterval(holdTimer);
     $('closed-timer').hidden = true;
     closedRecord = false;

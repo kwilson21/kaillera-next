@@ -210,6 +210,7 @@ test('serverEvents maps each server-authored event to its schema, relays left ou
   assert.deepEqual(Object.keys(serverEvents).sort(), [
     'game-ended',
     'game-started',
+    'match-return-go',
     'reconnect-token',
     'rom-sharing-updated',
     'room-closed',

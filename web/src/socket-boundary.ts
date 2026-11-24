@@ -79,6 +79,7 @@ const serverDecoders = {
   'users-updated': decoder(roomFromNewerServer),
   'game-started': decoder(serverEvents['game-started']),
   'game-ended': decoder(serverEvents['game-ended']),
+  'match-return-go': decoder(serverEvents['match-return-go']),
   'room-closed': decoder(serverEvents['room-closed']),
   'rom-sharing-updated': decoder(serverEvents['rom-sharing-updated']),
   'upload-token': decoder(serverEvents['upload-token']),

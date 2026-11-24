@@ -455,6 +455,7 @@
         }
       }
       _noteDelayChange(prev);
+      if (_config?.resumeFromMatchId && _savedGame) maxDelay = _savedGame.delay;
       DELAY_FRAMES = maxDelay;
       if (window.showEffectiveDelay) window.showEffectiveDelay(ownDelay, maxDelay);
       _syncLog(
@@ -6719,7 +6720,7 @@
     if (_rngPatched || !_isSmashRemix()) return false;
     const base = _getRdramBase(mod);
     if (!base) return false;
-    _rngSeed = _hashString(KNState.matchId || 'kn-default');
+    _rngSeed = _savedGame?.rngSeed ?? _hashString(KNState.matchId || 'kn-default');
     _rngPatched = true;
     _syncLog(`RNG sync enabled: baseSeed=0x${_rngSeed.toString(16)} rdramBase=0x${base.toString(16)}`);
     return true;
@@ -7796,40 +7797,52 @@
       m._kn_peek_pending_rollback() < 0
     );
   };
-  const _checkpointCapture = () => {
-    if (!_checkpointAligned()) return null;
+  const _readCheckpointCore = (frame) => {
     const m = _checkpointMod();
     ensureSyncBuffer();
-    if (!_syncBufPtr) return null;
+    if (!_syncBufPtr || !m?._kn_sync_read) return null;
     const n = m._kn_sync_read(_syncBufPtr, _syncBufSize);
     const extra = _captureResyncExtras(m),
       fifo = _captureAudioFifoState(m);
     if (n <= 0 || n > _syncBufSize || !extra.hiddenWords || !extra.hle || (_isSmashRemix() && !fifo)) return null;
     return {
-      frame: _frameNum,
+      frame,
       bytes: m.HEAPU8.slice(_syncBufPtr, _syncBufPtr + n),
       hidden: Uint32Array.from(extra.hiddenWords),
       hle: extra.hle,
       fifo: Uint32Array.from(fifo ?? []),
     };
   };
-  const _checkpointInstall = (s) => {
-    if (!_checkpointAligned()) return false;
+  const _checkpointCapture = () => (_checkpointAligned() ? _readCheckpointCore(_frameNum) : null);
+  const _captureMatchCore = (frame) => {
+    const s = _readCheckpointCore(frame);
+    const sram = s && _captureSaveRam(_checkpointMod());
+    return sram ? { ...s, sram } : null;
+  };
+  const _installMatchRam = (sram, guest) => {
+    const m = _checkpointMod();
+    if (!_writeSaveRam(m, sram, 'saved game', guest)) return false;
+    const loaded = _captureSaveRam(m);
+    return loaded && loaded.length === sram.length && loaded.every((v, i) => v === sram[i]);
+  };
+  const _writeCheckpointCore = (s, manual) => {
     const m = _checkpointMod();
     ensureSyncBuffer();
     if (!_syncBufPtr || s.bytes.length > _syncBufSize) return false;
     m.HEAPU8.set(s.bytes, _syncBufPtr);
     if (m._kn_sync_write(_syncBufPtr, s.bytes.length) !== 0) return false;
-    recaptureManualRunner(m, 'verified checkpoint');
+    if (manual) recaptureManualRunner(m, 'verified checkpoint');
     if (
       !_restoreHiddenStateWords(m, s.hidden, 'checkpoint') ||
       !_restoreHleState(m, s.hle, 'checkpoint') ||
       (s.fifo.length && !_restoreAudioFifoState(m, s.fifo, 'checkpoint'))
     )
       return false;
-    m._kn_set_frame(s.frame);
-    _frameNum = KNState.frameNum = s.frame;
-    const loaded = _checkpointCapture();
+    if (manual) {
+      m._kn_set_frame(s.frame);
+      _frameNum = KNState.frameNum = s.frame;
+    }
+    const loaded = _readCheckpointCore(s.frame);
     if (
       !loaded ||
       !['bytes', 'hidden', 'hle', 'fifo'].every(
@@ -7837,6 +7850,11 @@
       )
     )
       return false;
+    return true;
+  };
+  const _checkpointInstall = (s) => {
+    if (!_checkpointAligned() || !_writeCheckpointCore(s, true)) return false;
+    const m = _checkpointMod();
     _clearPendingCInputs('checkpoint install');
     window.KNDesync?.forgetFrom(s.frame);
     _rbCheckBook?.forgetFrom(s.frame);
@@ -7883,7 +7901,7 @@
     _rbLastFailedRollbacks = 0;
     _configureRollbackMemory(m);
     recaptureManualRunner(m, 'checkpoint ring');
-    m._kn_set_true_rollback(1);
+    m._kn_set_true_rollback(_localRollbackCaps().trueRollback ? 1 : 0);
     m._kn_set_frame(r);
     for (const [slot, inputs] of rows) {
       for (let tag = Math.max(0, r - DELAY_FRAMES - 1); tag < r; tag++) {
@@ -7939,6 +7957,245 @@
     setStatus('Connected -- game on!');
     _syncLog(`RESYNC-INPUTS f=${r} verified checkpoint request=${run.request}`);
   };
+  let _savedGame = null;
+  let _returnGate = 'idle';
+  let _saveDue = 0;
+  let _pendingSave = null;
+  let _saveWriting = false;
+
+  const _matchSaveRuntime = () => {
+    const { inputModel, trueRollback, stateBackend } = _localRollbackCaps();
+    return JSON.stringify([inputModel, trueRollback, stateBackend]);
+  };
+  const _matchSaveScope = (id) => window.KNCore.matchSave.scope(_config, window._knCoreHash, id);
+  const _saveMembersPresent = (scope) => {
+    if (
+      _isSpectator ||
+      !scope ||
+      _demoMode ||
+      !socket?.connected ||
+      RB_SHADOW_EMU ||
+      RB_WORKER_COPROC ||
+      _hostMatchUnverified()
+    )
+      return false;
+    const slots = scope.roster.flatMap((pid, i) => (pid ? [i] : []));
+    return (
+      _ownPlayerId === scope.roster[_playerSlot] &&
+      (!_activeRoster || (_activeRoster.size === slots.length && slots.every((i) => _activeRoster.has(i)))) &&
+      slots.every((slot) => {
+        if (slot === _playerSlot) return true;
+        const entry = _peerEntryForSlot(slot);
+        return (
+          entry &&
+          _knownPlayers[entry[0]]?.persistentId === scope.roster[slot] &&
+          entry[1].dc?.readyState === 'open' &&
+          !_peerPhantom[slot] &&
+          !_isPeerPendingLateJoin(...entry) &&
+          !entry[1].synthetic &&
+          !entry[1]._intentionalLeave
+        );
+      })
+    );
+  };
+
+  const _saveOwnerInput = (slot, tag) => {
+    const value = (slot === _playerSlot ? _localInputs : _remoteInputs[slot])?.[tag];
+    return value && value !== KNShared.ZERO_INPUT ? _ownerTuple(value) : null;
+  };
+  const _saveWitnesses = (m, scope) => {
+    if (_liveStateConfirmed(m)) return [];
+    const end = _frameNum - DELAY_FRAMES - 1;
+    const start = Math.max(0, end - KN_MAX_VISIBLE_ROLLBACK_DEPTH - DELAY_FRAMES);
+    if (_pendingCInputs.some((i) => i.frame < start)) return null;
+    const samples = [];
+    for (let slot = 1; slot < scope.roster.length; slot++) {
+      if (!scope.roster[slot]) continue;
+      for (let tag = Math.max(_inputFloor(slot), start); tag <= end; tag++) {
+        const applied = _rbGetInput(m, slot, tag);
+        if (applied === KNShared.ZERO_INPUT) return null;
+        samples.push({ slot, tag, applied: _ownerTuple(applied) });
+      }
+    }
+    return samples;
+  };
+  // SRAM and all emulator sections belong to one frame. The host can be ahead of the
+  // authoritative inputs for it; retain the state only when every prediction was exact.
+  const _sampleMatchSave = (m) => {
+    if (_playerSlot !== 0 || _isSpectator || _saveWriting || !_config?.matchId) return;
+    const now = Date.now();
+    if (!_pendingSave && now < _saveDue) return;
+    const store = window.KNCore.matchSave;
+    if (!_pendingSave) {
+      _saveDue = now + 400;
+      const scope = _matchSaveScope(_config.matchId);
+      if (
+        !_activeRoster ||
+        _frameNum <= DELAY_FRAMES + 1 ||
+        !_saveMembersPresent(scope) ||
+        !_checkpointAligned() ||
+        _checkpoint?.busy ||
+        (m._kn_get_clobbered_predictions?.() ?? 0) !== 0 ||
+        m._kn_get_failed_rollbacks?.() !== 0
+      )
+        return;
+      const witnesses = _saveWitnesses(m, scope);
+      if (!witnesses) return;
+      const snapshot = _captureMatchCore(_frameNum);
+      if (!snapshot) return;
+      _pendingSave = {
+        witnesses,
+        scope,
+        capturedAt: now,
+        frame: _frameNum,
+        rngSeed: _rngSeed,
+        inputRuntime: _matchSaveRuntime(),
+        delay: DELAY_FRAMES,
+        snapshot,
+      };
+    }
+    const save = _pendingSave;
+    if (now - save.capturedAt > 1000 || !_saveMembersPresent(save.scope) || DELAY_FRAMES !== save.delay) {
+      _pendingSave = null;
+      return;
+    }
+    const confirmed = store.confirmInputs(save.witnesses, _saveOwnerInput);
+    if (confirmed === 'changed' || m._kn_get_failed_rollbacks() !== 0) {
+      _pendingSave = null;
+      return;
+    }
+    if (confirmed === 'waiting') return;
+    const rows = [];
+    for (const [slot, pid] of save.scope.roster.entries()) {
+      if (!pid) continue;
+      const row = [];
+      for (let tag = save.frame - save.delay - 1; tag < save.frame; tag++) {
+        const input = _saveOwnerInput(slot, tag);
+        if (!input) return;
+        row.push(input);
+      }
+      rows.push([slot, row]);
+    }
+    const generation = _sessionId;
+    delete save.witnesses;
+    _pendingSave = null;
+    _saveWriting = true;
+    _saveDue = now + store.cadence;
+    store
+      .write({ ...save, rows }, () => generation === _sessionId && _phase === PHASE_RUNNING)
+      .catch((e) => _syncLog('Match save unavailable: ' + e))
+      .finally(() => {
+        if (generation === _sessionId) _saveWriting = false;
+      });
+  };
+  const _returnFailed = (reason) => {
+    if (_returnGate === 'failed') return;
+    _returnGate = 'failed';
+    _syncLog('Match return failed: ' + reason);
+    KNEvent('start-fail', 'Saved game could not resume', { reason, frame: _frameNum });
+    _config?.onResumeFailed?.(reason);
+  };
+  const _sendMatchSave = async () => {
+    const config = _config;
+    try {
+      const scope = _matchSaveScope(config.resumeFromMatchId);
+      if (!scope) throw new Error('Missing original game identity');
+      if (!_saveMembersPresent(scope)) throw new Error('Original players unavailable at save transfer');
+      const save = await window.KNCore.matchSave.load(scope);
+      if (!save) throw new Error('No compatible saved game');
+      const { snapshot, ...returnState } = save;
+      const [state, ram] = await Promise.all([
+        compressAndEncode(snapshot.bytes.slice()),
+        compressAndEncode(snapshot.sram.slice()),
+      ]);
+      if (config !== _config) return;
+      _savedGame = save;
+      _emitSaveStateToPlayers({
+        type: 'save-state',
+        matchId: config.matchId,
+        returnState,
+        frame: save.frame,
+        stateFormat: 'match-return',
+        data: state.data,
+        saveRam: ram.data,
+        hiddenWords: Array.from(snapshot.hidden),
+        audioFifo: Array.from(snapshot.fifo),
+        ..._resyncExtrasFields({ hle: snapshot.hle }),
+      });
+      _markInitialStateReady();
+    } catch (e) {
+      if (config === _config) _returnFailed(e.message);
+    }
+  };
+  const _receiveMatchSave = async (msg) => {
+    const config = _config;
+    if (msg.matchId !== config.matchId || msg.returnState?.scope?.matchId !== config.resumeFromMatchId) return;
+    try {
+      const scope = _matchSaveScope(config.resumeFromMatchId);
+      const [bytes, sram] = await Promise.all([decodeAndDecompress(msg.data), _decodeSaveRam(msg)]);
+      const snapshot = {
+        bytes,
+        sram,
+        hidden: Uint32Array.from(msg.hiddenWords),
+        fifo: Uint32Array.from(msg.audioFifo),
+        hle: _resyncExtrasFromFields(msg).hle,
+      };
+      const save = { ...msg.returnState, snapshot };
+      if (!scope || msg.frame !== save.frame || !(await window.KNCore.matchSave.verify(save, scope)))
+        throw new Error('Saved game verification failed');
+      if (config !== _config || _phase >= PHASE_LOCKSTEP_READY) return;
+      _savedGame = save;
+      _markInitialStateReady();
+    } catch (e) {
+      if (config === _config) _returnFailed(e.message);
+    }
+  };
+
+  const _installMatchSave = () => {
+    if (_returnGate !== 'idle') return;
+    const config = _config,
+      save = _savedGame;
+    try {
+      if (!save || !_saveMembersPresent(save.scope)) throw new Error('Original players unavailable');
+      if (save.inputRuntime !== _matchSaveRuntime()) throw new Error('Saved emulator input settings differ');
+      const s = save.snapshot;
+      const rows = new Map(
+        save.rows.map(([slot, inputs]) => [
+          slot,
+          new Map(inputs.map((value, i) => [save.frame - inputs.length + i, value])),
+        ]),
+      );
+      if (save.delay !== DELAY_FRAMES) throw new Error('Saved input delay mismatch');
+      if (!_checkpointInstall({ ...s, frame: save.frame }))
+        throw new Error('Saved emulator state could not be installed');
+      if (!_installMatchRam(s.sram, _playerSlot !== 0))
+        throw new Error('Saved cartridge memory could not be installed');
+      if (!_checkpointPrepare(save.frame, rows)) throw new Error('Saved inputs could not be installed');
+      _menuStartBarrierReleased = true;
+      _checkpointResume(save.frame, new Map(save.rows.map(([slot]) => [slot, [0, 0, 0, 0, 0]])), {
+        returning: -1,
+        request: 0,
+      });
+      _returnGate = 'waiting';
+      setStatus('Waiting for everyone to resume…');
+      config
+        .awaitResumeRelease()
+        .then((released) => {
+          if (config !== _config || _returnGate !== 'waiting') return;
+          if (!released) return _returnFailed('Game return cancelled');
+          _returnGate = 'released';
+          _savedGame = null;
+          _resetPacingAfterLateJoin();
+          setStatus('Connected -- game on!');
+        })
+        .catch((e) => {
+          if (config === _config) _returnFailed(e.message);
+        });
+    } catch (e) {
+      _returnFailed(e.message);
+    }
+  };
+
   const _checkpointStart = () => {
     if (_checkpoint || _frameNum !== 0 || _phase !== PHASE_RUNNING) return;
     const scope = _checkpointScope();
@@ -8354,6 +8611,7 @@
   let _pendingResyncState = null; // {bytes, frame} buffered for async apply at frame boundary
   // C-level sync: kn_sync_hash/read/write bypass retro_serialize for seamless resync
   let _hasKnSync = false;
+  let _syncBufferOwner = null;
   let _syncBufPtr = 0;
   let _syncBufSize = 0;
 
@@ -8361,10 +8619,12 @@
   // Deferred from startup because the 8MB malloc can trigger WASM memory growth
   // which detaches HEAPU8.buffer. Safe to call multiple times (no-op if already allocated).
   const ensureSyncBuffer = () => {
-    if (_syncBufPtr) return;
     const mod = window.EJS_emulator?.gameManager?.Module;
+    if (mod !== _syncBufferOwner) _syncBufPtr = 0;
+    if (_syncBufPtr) return;
     if (!mod?._malloc) return;
     _syncBufSize = 8 * 1024 * 1024 + 64 * 1024;
+    _syncBufferOwner = mod;
     _syncBufPtr = mod._malloc(_syncBufSize);
     _syncLog(`sync buffer allocated: ptr=${_syncBufPtr} size=${_syncBufSize}`);
   };
@@ -8562,7 +8822,7 @@
       return null;
     }
   };
-  const _writeSaveRam = (mod, bytes, reason) => {
+  const _writeSaveRam = (mod, bytes, reason, protectLocal = true) => {
     if (!bytes?.length) return false;
     try {
       const region = _saveRamRegion(mod);
@@ -8570,7 +8830,7 @@
         _syncLog(`${reason}: save RAM not writable (no RETRO_MEMORY_SAVE_RAM)`);
         return false;
       }
-      _protectLocalSaveFile(mod);
+      if (protectLocal) _protectLocalSaveFile(mod);
       mod.HEAPU8.set(bytes.subarray(0, Math.min(bytes.length, region.size)), region.ptr);
       return true;
     } catch (e) {
@@ -8859,6 +9119,8 @@
   let _blurHandler = null; // stored for removal in stopSync()
   let _focusRestoreHandler = null; // pointer/touch recovery when browser chrome stole focus
   let _controlsFocusLost = false;
+  let _warmReturnMatch = null;
+  let _warmAudioExpiry = null;
   let _bootGestureAbort = null; // AbortController for the gesture-prompt listeners; aborted in stop()
   // Restore handle for the AudioContext hijack installed in the gesture handler.
   // If EJS never calls `new AudioContext()` during a match (hibernate/wake reuse),
@@ -9924,6 +10186,19 @@
   // The host's peer whose channel is open, if any.
   const _hostOpenPeer = () => Object.values(_peers).find((p) => p.slot === 0 && p.dc?.readyState === 'open');
   const _hostChannelOpen = () => !!_hostOpenPeer();
+  const _hostInputHeard = new WeakMap();
+  const hostGameConnected = () => {
+    const peer = _peerEntryForSlot(0)?.[1];
+    const pc = peer?.pc;
+    if (!pc) return false;
+    return window.KNCore.hostGameConnected(
+      pc.connectionState,
+      pc.iceConnectionState,
+      peer.dc?.readyState === 'open' || peer.rbDc?.readyState === 'open',
+      _hostInputHeard.get(pc)?.at,
+      performance.now(),
+    );
+  };
   const _armHostAnswerDeadline = (deadlineMs, after) => {
     if (_playerSlot === 0 || _isSpectator || _lateJoin || _phase >= PHASE_RUNNING) return;
     if (_hostChannelOpen()) return;
@@ -10131,6 +10406,10 @@
       _leftOutOfStart.has(slot),
     );
     if (!leaves) return false;
+    if (_config?.resumeFromMatchId && _returnGate !== 'released') {
+      _returnFailed('An original player could not join the saved game');
+      return false;
+    }
     _leftOutOfStart.add(slot);
     _syncLog(`START-LEFT-OUT sid=${sid} slot=${slot} reason=${reason}`);
     const name = _knownPlayers[sid]?.playerName || `P${slot + 1}`;
@@ -10769,7 +11048,7 @@
   // Process a binary input packet from any DC (lockstep or rollback-input).
   // Shared by setupDataChannel (reliable DC) and setupRollbackInputDataChannel
   // (unordered DC, used when host broadcasts rb-transport:unreliable).
-  const _processInputPacket = (remoteSid, peer, data) => {
+  const _processInputPacket = (remoteSid, peer, data, channel = null) => {
     if (peer.slot === null || peer.slot === undefined) return false; // spectators don't send input
     if (_isPeerPendingLateJoin(remoteSid, peer)) {
       if (!peer._pendingLateJoinInputDroppedLogged) {
@@ -10850,6 +11129,18 @@
       existingHeaderInput !== undefined && !headerPlaceholder && _inputEq(existingHeaderInput, recvInput);
     const headerWasSeeded = _consumeLateJoinSeededInput(peer.slot, recvFrame);
     _remoteInputs[peer.slot][recvFrame] = recvInput;
+    // Synthetic fills, owner-proof replay and a replaced channel cannot vouch for P1.
+    if (
+      peer.slot === 0 &&
+      channel &&
+      _peers[remoteSid] === peer &&
+      channel._knPc === peer.pc &&
+      (channel === peer.dc || channel === peer.rbDc)
+    ) {
+      const heard = _hostInputHeard.get(peer.pc);
+      if (!heard || recvFrame > heard.tag || existingHeaderInput === undefined || headerPlaceholder)
+        _hostInputHeard.set(peer.pc, { at: performance.now(), tag: Math.max(recvFrame, heard?.tag ?? -1) });
+    }
     // An input this page did not hold restarts the peer-stale clock, below
     // the peer's highest frame too: a peer catching up re-sends the frames
     // it runs again, and is live. A resend of a frame already held does not:
@@ -11013,6 +11304,7 @@
   // Receiving is identical to lockstep binary input; sending is gated by
   // _rbTransport === 'unreliable' (host-negotiated).
   const setupRollbackInputDataChannel = (remoteSid, ch) => {
+    ch._knPc = _peers[remoteSid]?.pc;
     ch.binaryType = 'arraybuffer';
     const onOpen = () => {
       // T4: log the ACTUAL negotiated DC properties, not what we asked for.
@@ -11055,7 +11347,7 @@
         e.data.byteLength <= 256 &&
         e.data.byteLength % 4 === 0
       ) {
-        _processInputPacket(remoteSid, peer, e.data);
+        _processInputPacket(remoteSid, peer, e.data, ch);
       }
     };
   };
@@ -11898,7 +12190,7 @@
         e.data.byteLength <= 256 &&
         e.data.byteLength % 4 === 0
       ) {
-        _processInputPacket(remoteSid, peer, e.data);
+        _processInputPacket(remoteSid, peer, e.data, ch);
       }
     };
     return { opened: onOpen, closed: onClose };
@@ -12712,15 +13004,19 @@
     // after ~10s, which caused the host's pre-created context to go stale.
     {
       const showGesturePrompt = () => {
-        _syncLog(`showing gesture prompt (slot=${_playerSlot})`);
         const promptEl = document.getElementById('gesture-prompt');
         if (!promptEl) return;
-        promptEl.classList.remove('hidden');
+        const returnBoot = !!_config?.resumeFromMatchId;
+        const warm =
+          returnBoot && _warmReturnMatch === _config.resumeFromMatchId && !!window.EJS_emulator?.gameManager?.Module;
+        const label = promptEl.querySelector('.gesture-prompt-text');
+        if (label) label.textContent = returnBoot ? 'Tap to resume the fight' : 'Tap to start';
         // AbortController so stop() can drop the click+touchend listeners
         // even when the user never gestures. Replaces the manual
         // removeEventListener pair below — abort() cleans both atomically.
         if (_bootGestureAbort) _bootGestureAbort.abort();
         _bootGestureAbort = new AbortController();
+        let trial = null;
         const onPromptClick = () => {
           if (_bootGestureReceived) return;
           _bootGestureReceived = true;
@@ -12737,8 +13033,9 @@
           // will throw NotAllowedError. We still create the contexts (they'll
           // be resumed by the BF6 visibilitychange handler when tab returns).
           const AC = window.AudioContext || window.webkitAudioContext;
-          if (AC) {
-            const _ejsCtx = new AC();
+          if (AC && !warm) {
+            const _ejsCtx = trial ?? new AC();
+            trial = null;
             _ejsCtx.resume().catch((e) => {
               _syncLog(`EJS AudioContext resume: ${e.name}: ${e.message}`);
               if (e.name === 'NotAllowedError') {
@@ -12821,12 +13118,48 @@
             KNShared.bootWithCheats('lockstep');
           }
           setStatus('Loading emulator...');
-          _syncLog('gesture received — emulator starting');
+          _syncLog(warm ? 'retained emulator resumed' : 'gesture received — emulator starting');
+          _warmReturnMatch = null;
           if (_bootGestureAbort) {
             _bootGestureAbort.abort();
             _bootGestureAbort = null;
           }
         };
+        if (warm) {
+          // The previous fight already unlocked this emulator's audio. Wake it in place.
+          onPromptClick();
+          return;
+        }
+        _syncLog(`showing gesture prompt (slot=${_playerSlot})`);
+        promptEl.classList.remove('hidden');
+        if (returnBoot) {
+          // A navigation can lose transient user activation. Only dismiss the tap
+          // automatically when the new document actually has a running AudioContext.
+          const AC = window.AudioContext || window.webkitAudioContext;
+          if (!AC) {
+            onPromptClick();
+            return;
+          }
+          try {
+            trial = new AC();
+            _bootGestureAbort.signal.addEventListener(
+              'abort',
+              () => {
+                if (trial) {
+                  trial.close().catch(() => {});
+                  trial = null;
+                }
+              },
+              { once: true },
+            );
+            trial
+              .resume()
+              .then(() => {
+                if (trial?.state === 'running') onPromptClick();
+              })
+              .catch(() => {});
+          } catch (_) {}
+        }
         promptEl.addEventListener('click', onPromptClick, { signal: _bootGestureAbort.signal });
         promptEl.addEventListener('touchend', onPromptClick, { signal: _bootGestureAbort.signal });
       };
@@ -13167,6 +13500,11 @@
       return;
     }
 
+    if (_config?.resumeFromMatchId) {
+      if (_playerSlot === 0) _sendMatchSave();
+      return;
+    }
+
     // Try cached state first — eliminates host/guest asymmetry.
     // All players (including host) fetch the same cached state.
     const romHash = _config?.romHash;
@@ -13390,6 +13728,15 @@
 
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) return;
+
+    if (_config?.resumeFromMatchId) {
+      if (!_savedGame || !_saveMembersPresent(_savedGame.scope)) return _returnFailed('Original players unavailable');
+      enterManualMode();
+      _lockstepStartStateKind = 'kn-sync';
+      _frameNum = 0;
+      startLockstep();
+      return;
+    }
 
     if (_isSyntheticOnlyInitialSyncSkip()) {
       enterManualMode();
@@ -13853,6 +14200,7 @@
   };
 
   async function sendInitialState() {
+    if (typeof _config !== 'undefined' && _config?.resumeFromMatchId) return _sendMatchSave();
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) return;
     const publication = typeof _recovery === 'undefined' ? undefined : _recovery.publication;
@@ -13968,6 +14316,12 @@
 
   const handleSaveStateMsg = async (msg) => {
     if (_isSpectator) return;
+    if (typeof _config !== 'undefined' && _config?.resumeFromMatchId) {
+      if (_playerSlot !== 0 && _phase < PHASE_LOCKSTEP_READY && msg.stateFormat === 'match-return')
+        await _receiveMatchSave(msg);
+      return;
+    }
+    if (msg.stateFormat === 'match-return') return;
     // Already loaded: a cached copy that stopped waiting for this message.
     if (_phase >= PHASE_LOCKSTEP_READY) return;
     _syncLog('received initial state');
@@ -15871,6 +16225,8 @@
   // on would silently diverge, so stop the match and surface the failure.
   const _handleCoreFatal = (branch, e) => {
     if (_coreFatalError) return;
+    if (typeof _config !== 'undefined' && _config?.resumeFromMatchId && _returnGate !== 'released')
+      _returnFailed('Emulator could not resume');
     _coreFatalError = true;
     // Restore wall-clock timestamps after a mid-step abort.
     _inDeterministicStep = false;
@@ -15905,6 +16261,8 @@
   };
   const _stopAtStart = (reason, detail = {}) => {
     if (_coreFatalError) return;
+    if (typeof _config !== 'undefined' && _config?.resumeFromMatchId && _returnGate !== 'released')
+      _returnFailed('Emulator could not resume');
     // As after a trap: only a reload starts this page again.
     _coreFatalError = true;
     let message = START_FAIL_MESSAGES[reason] || START_FAIL_MESSAGES['no-host'];
@@ -17375,10 +17733,11 @@
     // Free C-level sync buffers
     if (_syncBufPtr && _hasKnSync) {
       const modStop = window.EJS_emulator?.gameManager?.Module;
-      if (modStop?._free) {
+      if (modStop === _syncBufferOwner && modStop?._free) {
         modStop._free(_syncBufPtr);
       }
       _syncBufPtr = 0;
+      _syncBufferOwner = null;
     }
     _hasKnSync = false;
     _frameAdvantage = 0;
@@ -17821,6 +18180,15 @@
       return;
     }
     _chk('post-phase');
+    if (_playerSlot > 0 && !_isSpectator && _lastUsersUpdated?.hostReturnDeadline && !hostGameConnected()) {
+      _markTickReturn('waiting-for-host-return');
+      return;
+    }
+    if (_config?.resumeFromMatchId && _returnGate !== 'released') {
+      if (window._rbPendingInit && !_guestStart('match return')) return;
+      if (_useCRollback) _installMatchSave();
+      return;
+    }
     _checkpointStart();
     if (_checkpoint?.tick()) {
       _markTickReturn('checkpoint');
@@ -18994,6 +19362,7 @@
         // frame when they differ.
         const cFrameBeforePreTick = tickMod._kn_get_frame?.() ?? _frameNum;
         _checkpoint?.sample(cFrameBeforePreTick);
+        _sampleMatchSave(tickMod);
         const cFrameLocalInput = _localInputs[cFrameBeforePreTick];
         const preTickLocalInput = cFrameLocalInput || localInput;
         if (cFrameBeforePreTick !== _frameNum && window._knLastCInputAlignFrame !== _frameNum) {
@@ -22219,6 +22588,12 @@
     _resetInputAudit();
     _deadbandStick.reset();
     _config = config;
+    _rngPatched = false;
+    _rdramBase = _rngSeed = 0;
+    _returnGate = 'idle';
+    _savedGame = _pendingSave = null;
+    _saveDue = 0;
+    _saveWriting = false;
     socket = config.socket;
     _playerSlot = config.playerSlot;
     _ownPlayerId = typeof config.persistentId === 'string' ? config.persistentId : '';
@@ -22285,6 +22660,8 @@
   };
 
   const stop = () => {
+    _savedGame = _pendingSave = null;
+    _returnGate = 'failed';
     _droppedThisMatch = new Set();
     _droppedByHost = false;
     // Before the final log flush, so its log line reaches the server.
@@ -22514,7 +22891,17 @@
     _syncLogRing.clear();
 
     // Clean up audio (delegated to kn-audio.js)
-    _audio?.cleanup();
+    _audio?.cleanup(!!_warmReturnMatch);
+    clearTimeout(_warmAudioExpiry);
+    const retainedAudio = window._kn_preloadedAudioCtx;
+    if (_warmReturnMatch && retainedAudio) {
+      _warmAudioExpiry = setTimeout(() => {
+        if (window._kn_preloadedAudioCtx === retainedAudio) {
+          delete window._kn_preloadedAudioCtx;
+          retainedAudio.close().catch(() => {});
+        }
+      }, 120000);
+    }
 
     // Restore window.AudioContext if our gesture-handler hijack is still
     // installed. Otherwise a `new AC(...)` call between matches (e.g.,
@@ -22623,8 +23010,24 @@
   };
 
   const NetplayRollbackApi = {
+    hostGameConnected,
+    matchSaveCore: {
+      capture: _captureMatchCore,
+      install: (snapshot, frame) =>
+        _writeCheckpointCore({ ...snapshot, frame }, false) && _installMatchRam(snapshot.sram, false),
+      release: () => {
+        _restoreLocalSaveFile();
+        if (_syncBufPtr && _syncBufferOwner === _checkpointMod()) _syncBufferOwner?._free?.(_syncBufPtr);
+        _syncBufPtr = 0;
+        _syncBufferOwner = null;
+      },
+    },
     init,
-    stop,
+    stop: (options = {}) => {
+      _warmReturnMatch =
+        options.keepAudioForMatch === _config?.matchId && _phase === PHASE_RUNNING ? options.keepAudioForMatch : null;
+      stop();
+    },
     markMatchRecoveryUnverified: (matchId) => _setHostMatchUnverified(matchId, 'room recovery unverified'),
     exportSyncLog,
     flushSyncLog: _flushSyncLog,

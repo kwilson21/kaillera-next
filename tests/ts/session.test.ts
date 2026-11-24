@@ -19,6 +19,17 @@ const joinMidGame = { type: 'joined', status: 'playing', matchId: 'm1', spectato
 const engineUp = { type: 'engineStarted', connectOnly: false, waitsForState: true } as const;
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+test('a returning player waits for the host before asking to join a running match', async () => {
+  const { session } = open();
+  session.send({ type: 'waitForHost' });
+  assert.equal(session.state(), 'waitingForHost');
+  assert.equal(session.gameOn(), false);
+  session.send({ type: 'hostReturned' });
+  session.send(joinMidGame);
+  assert.equal(session.state(), 'lateJoinStarting');
+  await session.stop();
+});
+
 test('a new page is fresh and in the lobby', async () => {
   const { session } = open();
   session.socketUp();

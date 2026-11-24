@@ -132,6 +132,28 @@ def _reconnected(host, guest, sid):
     return guest.evaluate("window.NetplayStreaming.exportSyncLog()")
 
 
+def test_host_return_banner_requires_fresh_video_on_the_current_connection(browser, server_url):
+    host, guest = _start(browser, server_url)
+    try:
+        guest.wait_for_function("window.NetplayStreaming.hostGameConnected()")
+        host.evaluate("window.__test_socket.disconnect()")
+        status = guest.locator("#host-wait-banner [role=status]")
+        expect(status).to_contain_text("game connection is still active")
+        host.evaluate("""async () => {
+            const pc = Object.values(KNState.peers).find(p => p.slot === 1).pc;
+            const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+            window.resumeVideo = sender.replaceTrack.bind(sender, sender.track);
+            await sender.replaceTrack(null);
+        }""")
+        expect(status).to_contain_text("Waiting for them to return", timeout=10000)
+        assert guest.evaluate(f"{_GUEST_HOST_PEER}.dc.readyState") == "open"
+        assert guest.evaluate(f"{_GUEST_HOST_PEER}.pc.connectionState") == "connected"
+        host.evaluate("window.resumeVideo()")
+        expect(status).to_contain_text("game connection is still active", timeout=10000)
+    finally:
+        _close([host, guest])
+
+
 def test_a_dropped_connection_is_offered_again(browser, server_url):
     """droppedGuestTest: the connection drops, both pages forget it, and the host's deadline offers a new one."""
     pages = []
@@ -179,3 +201,67 @@ def test_a_guest_that_still_holds_the_old_connection_replaces_it(browser, server
         assert "for a new connection" in guest_log, guest_log[-3000:]
     finally:
         _close(pages)
+
+
+def test_streaming_host_returns_to_saved_game(browser, server_url, room, rom_path):
+    """A fresh host restores its native save before the original guest receives video again."""
+    context = browser.new_context()
+    guest = browser.new_page()
+    try:
+        host = context.new_page()
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=streaming")
+        host.locator("#rom-drop input[type=file]").set_input_files(rom_path)
+        guest.goto(f"{server_url}/play.html?room={room}&name=P2")
+        host.locator("#start-btn:not([disabled])").click()
+        guest.wait_for_function(_HAS_VIDEO, timeout=60000)
+        first = host.evaluate("() => KNState.matchId")
+        assert first
+        # A save must commit before closing the tab. Playwright's DOM predicate
+        # accepts a pending Promise as truthy, so poll the resolved IndexedDB read.
+        def committed():
+            return host.evaluate(
+                """async room => {
+                  if (!(await indexedDB.databases()).some(d => d.name === 'kn-match-return')) return false;
+                  return new Promise((resolve, reject) => {
+                    const open = indexedDB.open('kn-match-return');
+                    open.onerror = () => reject(open.error);
+                    open.onsuccess = () => {
+                      const db = open.result;
+                      const read = db.transaction('matches').objectStore('matches').get(room);
+                      read.onsuccess = () => {
+                        db.close();
+                        resolve(read.result?.scope.matchId === KNState.matchId && read.result.frame > 15);
+                      };
+                      read.onerror = () => reject(read.error);
+                    };
+                  });
+                }""",
+                room,
+            )
+
+        for _ in range(80):
+            if committed():
+                break
+            host.wait_for_timeout(250)
+        else:
+            raise AssertionError("Streaming host did not save the running match")
+        guest.evaluate("""() => {
+          window.returnEvents = [];
+          __test_socket.on('match-return-go', packet => returnEvents.push(packet.matchId));
+        }""")
+        host.close()
+        expect(guest.locator("#host-wait-banner")).to_be_visible()
+        host = context.new_page()
+        host.goto(server_url)
+        host.get_by_role("link", name="Return to room", exact=True).click()
+        guest.wait_for_function("returnEvents.length === 1", timeout=75000)
+        guest.wait_for_function(_HAS_VIDEO, timeout=30000)
+        expect(guest.locator("#host-wait-banner")).to_be_hidden()
+        continued = guest.evaluate("() => returnEvents[0]")
+        assert continued != first
+        assert host.evaluate("() => KNState.matchId") == continued
+        assert guest.evaluate("() => KNState.slot") == 1
+        host.wait_for_function("EJS_emulator.gameManager.Module._get_current_frame_count() > 120", timeout=30000)
+    finally:
+        context.close()
+        guest.close()

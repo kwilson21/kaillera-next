@@ -23,6 +23,7 @@ import { reconcileRejoin } from './rejoin.ts';
 
 export type SessionState =
   | 'lobby'
+  | 'waitingForHost'
   /** Joined a match in play; no usable ROM yet, the page is asking for one. */
   | 'lateJoinAwaitingRom'
   /** Joined a match in play; the next engine start is the late join. */
@@ -38,7 +39,7 @@ export type SessionCheck = 'gameRunning' | 'lateJoin' | 'pendingLateJoin';
 export const sessionFlag = (state: SessionState, check: SessionCheck): boolean => {
   switch (check) {
     case 'gameRunning':
-      return state !== 'lobby';
+      return state !== 'lobby' && state !== 'waitingForHost';
     case 'pendingLateJoin':
       return state === 'lateJoinAwaitingRom';
     case 'lateJoin':
@@ -80,6 +81,8 @@ export const sessionMachine = setupEffect({
       }),
       gameStarted: Schema.Struct({ matchId: Schema.String }),
       gameEnded: Empty,
+      waitForHost: Empty,
+      hostReturned: Empty,
       /** The server closed the room under this page (host left, shutdown). */
       roomClosed: Empty,
       /**
@@ -152,6 +155,7 @@ export const sessionMachine = setupEffect({
   states: {
     lobby: {
       on: {
+        waitForHost: { target: 'waitingForHost' },
         gameStarted: ({ context, event }) => ({ target: 'running', context: { ...context, matchId: event.matchId } }),
         joined: ({ context, event }) => {
           if (event.status !== 'playing') return;
@@ -160,6 +164,12 @@ export const sessionMachine = setupEffect({
           const target = event.spectator && !event.streaming ? 'running' : 'lateJoinStarting';
           return { target, context: { ...context, matchId: event.matchId } };
         },
+      },
+    },
+    waitingForHost: {
+      on: {
+        hostReturned: { target: 'lobby' },
+        gameStarted: ({ context, event }) => ({ target: 'running', context: { ...context, matchId: event.matchId } }),
       },
     },
     lateJoinAwaitingRom: {

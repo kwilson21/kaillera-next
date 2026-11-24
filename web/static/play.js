@@ -446,9 +446,10 @@
 
   const _hostReturn = window.KNCore.play.hostReturn;
   const _identity = new _hostReturn.RoomIdentity(_urlRoomCode, window.KNStorage);
-  let _returningHost = null;
+  let _returningSeat = null;
+  let _matchReturn = null;
   let _leavingRoom = false;
-  const showHostWait = _hostReturn.hostWaitNotice();
+  const showHostWait = _hostReturn.hostWaitNotice(() => engine?.hostGameConnected?.() === true);
   let _lateJoinWaitingForHost = null;
 
   const offerHostReturn = (proof, error = '') => {
@@ -462,7 +463,7 @@
         isHost = false;
         KNState.isLocalHost = false;
         if (!returning) _identity.joinSeparately(proof);
-        _returningHost = returning ? { ...returning, remembered } : null;
+        _returningSeat = returning ? { ...returning, role: 'host', remembered } : null;
         if (!socket) connect();
         else if (socket.connected) onConnect(false);
       },
@@ -689,7 +690,12 @@
   // Once admitted, reloading or sharing this history entry should only join the existing room.
   const keepRoomAddress = () => {
     const url = new URL(window.location.href);
-    if (!url.searchParams.has('host') && !url.searchParams.has('returnHost')) return;
+    const fragment = new URLSearchParams(url.hash.slice(1));
+    if (!url.searchParams.has('host') && !url.searchParams.has('returnHost') && !fragment.has('returnPlayer')) return;
+    if (fragment.has('returnPlayer')) {
+      fragment.delete('returnPlayer');
+      url.hash = fragment.toString();
+    }
     url.searchParams.delete('host');
     url.searchParams.delete('returnHost');
     window.history.replaceState(window.history.state, '', url);
@@ -885,10 +891,16 @@
       'reconnect-token',
       _boundary.server('reconnect-token', (data) => {
         if (_leavingRoom) return;
-        _identity.receiveToken(data.token, _returningHost, !!socket.id && lastUsersData?.owner === socket.id);
+        const pid = _returningSeat?.persistentId ?? _identity.persistentId;
+        const seated = !!socket.id && lastUsersData?.players?.[pid]?.socketId === socket.id;
+        _identity.receiveToken(data.token, _returningSeat, seated && lastUsersData.owner === socket.id, seated);
       }),
     );
     socket.on('game-started', _boundary.server('game-started', onGameStarted));
+    socket.on(
+      'match-return-go',
+      _boundary.server('match-return-go', (data) => _matchReturn?.finish(data.matchId, true)),
+    );
     socket.on('game-ended', _boundary.server('game-ended', onGameEnded));
     socket.on('room-closed', _boundary.server('room-closed', onRoomClosed));
     socket.on('rom-sharing-updated', _boundary.server('rom-sharing-updated', onRomSharingUpdated));
@@ -1178,7 +1190,7 @@
       return;
     }
 
-    if (isHost && !_returningHost && !_identity.wasInRoom()) {
+    if (isHost && !_returningSeat && !_identity.wasInRoom()) {
       const lastEndBeforeOpen = _lastHandledGameEndMatchId;
       socket.emit('open-room', _connect.openRoomRequest(joinerNow(), _gameId || '', null), (err) => {
         // What the answer means is connect.ts: opened, the room is someone
@@ -1235,7 +1247,10 @@
       try {
         const response = await fetch(`/room/${encodeURIComponent(roomCode)}`);
         if (!response.ok) {
-          if (response.status === 404 && savedHost) _identity.discardRefused(savedHost.token);
+          if (response.status === 404) {
+            if (savedHost) _identity.discardRefused(savedHost.token);
+            if (_returningSeat?.role === 'player') _identity.discardPlayer(_returningSeat.token);
+          }
           showError(
             response.status === 404
               ? 'Room not found — it may have expired or the code may be incorrect'
@@ -1246,7 +1261,7 @@
         const roomData = await response.json();
         if (!roomData) return;
         // A visitor without a seat can wait on the invite while this room is reserved.
-        if (_hostReturn.hostReturnClock(roomData) !== null && !_returningHost && !_identity.reconnectToken) {
+        if (_hostReturn.hostReturnClock(roomData) !== null && !_returningSeat && !_identity.reconnectToken) {
           window.location.replace(inviteUrl(isSpectator));
           return;
         }
@@ -1258,7 +1273,7 @@
         // full room (socket reconnect, or catching up with a replaced match)
         // must not turn it into a spectator while the server keeps its slot.
         const holdsPlayerSlot =
-          !!_returningHost || _identity.hasRoomToken() || (mySlot !== null && mySlot !== undefined);
+          !!_returningSeat || _identity.hasRoomToken() || (mySlot !== null && mySlot !== undefined);
         if (_joinPlan.becomesSpectator(isSpectator, holdsPlayerSlot, roomData.player_count, roomData.max_players)) {
           console.log(
             `[play] auto-spectate: player_count=${roomData.player_count} >= max_players=${roomData.max_players}`,
@@ -1281,240 +1296,300 @@
           }
         }
 
-        const returning = _returningHost;
+        const returning = _returningSeat;
         const joiner = joinerNow();
         if (returning) {
-          if (returning.remembered && _identity.savedHost(0)?.persistentId !== returning.persistentId) {
-            _returningHost = null;
-            showError('This browser no longer has a saved host seat for this room.', inviteUrl(false));
+          const saved =
+            returning.role === 'host' ? _identity.savedHost(0) : _identity.savedPlayer(returning.persistentId, 0);
+          if (returning.remembered && saved?.persistentId !== returning.persistentId) {
+            _returningSeat = null;
+            showError('This browser no longer has a saved seat for this room.', inviteUrl(false));
             return;
           }
           joiner.persistentId = returning.persistentId;
           joiner.reconnectToken = returning.token;
         }
+        let recoverMatchId;
+        const hostProof =
+          !isSpectator &&
+          (_returningSeat?.role === 'host' || (!returning && savedHost?.persistentId === joiner.persistentId)) &&
+          savedHost;
+        if (hostProof && roomData.status === 'playing' && roomData.hostReturnDeadline != null) {
+          const status = await fetch('/room/' + encodeURIComponent(roomCode), {
+            headers: { Authorization: 'Bearer ' + hostProof.token },
+            cache: 'no-store',
+          });
+          if (status.status >= 500) throw new Error('Could not check the saved fight');
+          const seat = status.ok ? await status.json() : null;
+          if (
+            seat?.role === 'host' &&
+            seat.matchId &&
+            seat.rom_hash &&
+            (await window.KNCore.matchSave.available({
+              room: roomCode,
+              matchId: seat.matchId,
+              hostId: joiner.persistentId,
+              romHash: seat.rom_hash,
+              mode: seat.mode,
+              remainingMs: seat.returnDeadline - seat.serverTime,
+            }))
+          ) {
+            const loaded =
+              (_romHash === seat.rom_hash && localRomLoaded()) ||
+              (await new Promise((resolve) => loadRomFromLibrary(seat.rom_hash, resolve)));
+            if (loaded && _romHash === seat.rom_hash) {
+              recoverMatchId = seat.matchId;
+              _returningSeat = { ...hostProof, role: 'host', remembered: true };
+            }
+          }
+        }
         const sid = socket.id;
-        socket.emit('join-room', _connect.joinRoomRequest(joiner, isSpectator, null, !!returning), (err, joinAck) => {
-          if (socket.id !== sid) return;
-          if (err) {
-            if (returning || err === 'Host tab is still connected') {
-              _returningHost = null;
-              if (returning && err === 'Host seat is no longer available') _identity.discardRefused(returning.token);
-              offerHostReturn(returning ?? joinerProof(), err);
-              return;
-            }
-            if (err === 'Room closed' && _hostReturn.hostReturnClock(roomData) !== null) {
-              window.location.replace(inviteUrl(isSpectator));
-              return;
-            }
-            // What each refusal says is connect.ts (the spectator-cap copy
-            // is §7.2 M3 #3, whichever cap tripped).
-            const refusal = _connect.joinRefusal(err, roomClosedMessage(roomData?.host_name));
-            // Room filled between REST check and join — auto-spectate
-            if (refusal.kind === 'watch-instead') {
-              isSpectator = true;
-              _autoSpectated = true;
-              socket.emit('join-room', _connect.joinRoomRequest(joinerNow(), true, null), (err2, joinAck2) => {
-                if (err2) {
-                  showError(`Failed to join: ${err2}`);
-                  return;
-                }
-                const joinData2 = _boundary.ack('join-room', joinAck2);
-                mySlot = null;
-                if (joinData2) lastUsersData = joinData2;
-                sendDeviceType();
-                KNEvent('peer_joined', '', { slot: -1, is_spectator: true });
-                showRoomFullBanner();
-                showOverlay();
-              });
-              return;
-            }
-            showError(refusal.message);
-            return;
-          }
-
-          // The ack's data, decoded; one off its schema is dropped, and the page
-          // goes on from the room it looked up and the users-updated that follows.
-          const joinData = _boundary.ack('join-room', joinAck);
-          if (joinData) showHostWait(joinData);
-          if (returning) {
-            if (joinData?.owner !== sid) {
-              showError('The server could not confirm your host seat.');
-              return;
-            }
-            _identity.acceptReturn(returning);
-            _returningHost = null;
-          } else if (joinData?.owner && joinData.owner !== sid && savedHost?.persistentId === joiner.persistentId) {
-            _identity.discardRefused(savedHost.token);
-          }
-          const joinedStatus = joinData?.status ?? roomData.status;
-          keepRoomAddress();
-          const hostShares = joinData?.romSharing ?? roomData.rom_sharing;
-          mode = normalizeMode(joinData?.mode ?? roomData.mode ?? mode);
-          _takeRoomGameId(joinData?.gameId ?? joinData?.game_id);
-          applyHostRomFromData(joinData || roomData);
-
-          if (!isSpectator && joinData?.players) {
-            for (const entry of Object.values(joinData.players)) {
-              if (entry.socketId === socket.id) {
-                mySlot = entry.slot;
-                break;
+        socket.emit(
+          'join-room',
+          _connect.joinRoomRequest(joiner, isSpectator, null, _returningSeat?.role, recoverMatchId),
+          (err, joinAck) => {
+            if (socket.id !== sid) return;
+            if (err) {
+              if (returning?.role === 'player') {
+                _returningSeat = null;
+                if (err === 'Player seat is no longer available') _identity.discardPlayer(returning.token);
+                showError(err, inviteUrl(false));
+                return;
               }
+              if (returning || err === 'Host tab is still connected') {
+                _returningSeat = null;
+                if (returning && err === 'Host seat is no longer available') _identity.discardRefused(returning.token);
+                offerHostReturn(returning ?? joinerProof(), err);
+                return;
+              }
+              if (err === 'Room closed' && _hostReturn.hostReturnClock(roomData) !== null) {
+                window.location.replace(inviteUrl(isSpectator));
+                return;
+              }
+              // What each refusal says is connect.ts (the spectator-cap copy
+              // is §7.2 M3 #3, whichever cap tripped).
+              const refusal = _connect.joinRefusal(err, roomClosedMessage(roomData?.host_name));
+              // Room filled between REST check and join — auto-spectate
+              if (refusal.kind === 'watch-instead') {
+                isSpectator = true;
+                _autoSpectated = true;
+                socket.emit('join-room', _connect.joinRoomRequest(joinerNow(), true, null), (err2, joinAck2) => {
+                  if (err2) {
+                    showError(`Failed to join: ${err2}`);
+                    return;
+                  }
+                  const joinData2 = _boundary.ack('join-room', joinAck2);
+                  mySlot = null;
+                  if (joinData2) lastUsersData = joinData2;
+                  sendDeviceType();
+                  KNEvent('peer_joined', '', { slot: -1, is_spectator: true });
+                  showRoomFullBanner();
+                  showOverlay();
+                });
+                return;
+              }
+              showError(refusal.message);
+              return;
             }
-          } else if (isSpectator) {
-            mySlot = null;
-            if (_autoSpectated) showRoomFullBanner();
-          }
 
-          sendDeviceType();
-          KNEvent('peer_joined', '', {
-            slot: mySlot ?? -1,
-            is_spectator: !!isSpectator,
-          });
-          crumb('join-ack', {
-            host: isHost,
-            spectator: isSpectator,
-            status: joinedStatus,
-            sharing: !!hostShares,
-            hasRom: !!(_romBlob || _romBlobUrl),
-            romHash: _romHash?.substring(0, 12),
-            hostHash: (_hostRom?.hash ?? '').substring(0, 12),
-          });
-          // If ROM was already loaded from cache, notify server immediately.
-          // Skip for guests if host's ROM hash is known and doesn't match —
-          // onUsersUpdated will handle activation once the host hash is verified.
-          if (localRomLoaded() && (isHost || !hostRomMismatch())) {
-            if (isReconnect) tellRomAfterRejoin();
-            else notifyRomReady();
-          } else if (!isHost && !_romSharingEnabled && !hostShares && hostRomMismatch()) {
-            // Cached ROM doesn't match host's — clear it now (skip when ROM sharing handles it)
-            console.log('[play] join: cached ROM mismatch — clearing');
-            clearLoadedRom();
-          } else if (isReconnect) {
-            tellRomAfterRejoin();
-          }
-          if (isReconnect) resumeRomTransferAfterReconnect();
+            // The ack's data, decoded; one off its schema is dropped, and the page
+            // goes on from the room it looked up and the users-updated that follows.
+            const joinData = _boundary.ack('join-room', joinAck);
+            if (recoverMatchId && !returning) _returningSeat = null;
+            if (joinData) showHostWait(joinData);
+            if (returning) {
+              if (
+                joinData?.players?.[returning.persistentId]?.socketId !== sid ||
+                (returning.role === 'host') !== (joinData.owner === sid)
+              ) {
+                showError('The server could not confirm your seat.');
+                return;
+              }
+              _identity.acceptReturn(returning);
+              _returningSeat = null;
+            } else if (joinData?.owner && joinData.owner !== sid && savedHost?.persistentId === joiner.persistentId) {
+              _identity.discardRefused(savedHost.token);
+            }
+            const joinedStatus = joinData?.status ?? roomData.status;
+            keepRoomAddress();
+            const hostShares = joinData?.romSharing ?? roomData.rom_sharing;
+            mode = normalizeMode(joinData?.mode ?? roomData.mode ?? mode);
+            _takeRoomGameId(joinData?.gameId ?? joinData?.game_id);
+            applyHostRomFromData(joinData || roomData);
 
-          if (joinedStatus !== 'playing') {
-            _session?.send({
-              type: 'joined',
-              status: 'lobby',
-              matchId: null,
-              spectator: !!isSpectator,
-              streaming: mode === 'streaming',
+            if (!isSpectator && joinData?.players) {
+              for (const entry of Object.values(joinData.players)) {
+                if (entry.socketId === socket.id) {
+                  mySlot = entry.slot;
+                  break;
+                }
+              }
+            } else if (isSpectator) {
+              mySlot = null;
+              if (_autoSpectated) showRoomFullBanner();
+            }
+
+            sendDeviceType();
+            KNEvent('peer_joined', '', {
+              slot: mySlot ?? -1,
+              is_spectator: !!isSpectator,
             });
-          }
-          // Mid-game join handling
-          if (joinedStatus === 'playing') {
-            crumb('mid-game-join', {
+            crumb('join-ack', {
+              host: isHost,
               spectator: isSpectator,
-              mode,
+              status: joinedStatus,
               sharing: !!hostShares,
               hasRom: !!(_romBlob || _romBlobUrl),
               romHash: _romHash?.substring(0, 12),
               hostHash: (_hostRom?.hash ?? '').substring(0, 12),
             });
-            console.log(
-              `[play] mid-game join: isSpectator=${isSpectator}, mode=${mode}, player_count=${roomData.player_count}, max_players=${roomData.max_players}`,
-            );
-            // Set matchId for late joiners — game-started event doesn't fire
-            // for them, so session logging would silently fail without this.
-            // roomData (REST) doesn't include matchId — use joinData (Socket.IO ack).
-            const joinedMatchId = joinData?.matchId || roomData.matchId;
-            if (joinedMatchId && joinedMatchId !== KNState.matchId) {
-              _clearMatchIntegrity();
-              KNState.matchId = joinedMatchId;
+            // If ROM was already loaded from cache, notify server immediately.
+            // Skip for guests if host's ROM hash is known and doesn't match —
+            // onUsersUpdated will handle activation once the host hash is verified.
+            if (localRomLoaded() && (isHost || !hostRomMismatch())) {
+              if (isReconnect) tellRomAfterRejoin();
+              else notifyRomReady();
+            } else if (!isHost && !_romSharingEnabled && !hostShares && hostRomMismatch()) {
+              // Cached ROM doesn't match host's — clear it now (skip when ROM sharing handles it)
+              console.log('[play] join: cached ROM mismatch — clearing');
+              clearLoadedRom();
+            } else if (isReconnect) {
+              tellRomAfterRejoin();
             }
-            // The machine needs the mode, which is only known here.
-            _session?.send({
-              type: 'joined',
-              status: 'playing',
-              matchId: joinData?.matchId ?? null,
-              spectator: !!isSpectator,
-              streaming: mode === 'streaming',
-            });
-            // A page that runs an emulator is in the game once it advances
-            // frames. Streaming guests and spectators have no frame counter:
-            // for them the engine start is the whole late join.
-            if (!isSpectator && mode !== 'streaming') _sessionWatchLateJoin();
-            _acceptRemoteIntegrity(lastUsersData);
-            _acceptRemoteIntegrity(joinData);
-            // Use joinData directly — the users-updated socket event may not
-            // have arrived yet (ack returns before broadcast is delivered)
-            if (joinData) lastUsersData = joinData;
+            if (isReconnect) resumeRomTransferAfterReconnect();
 
-            // Store host ROM metadata for verification
-            applyHostRomFromData(joinData || roomData);
+            if (joinedStatus === 'playing' && joinData?.resumePending && joinData.resumeFromMatchId) {
+              lastUsersData = joinData;
+              onGameStarted(joinData);
+              return;
+            }
+            if (joinedStatus === 'playing' && joinData?.hostReturnDeadline != null && !isHost) {
+              _session?.send({ type: 'waitForHost' });
+              showOverlay();
+              return;
+            }
+            if (joinedStatus !== 'playing') {
+              _session?.send({
+                type: 'joined',
+                status: 'lobby',
+                matchId: null,
+                spectator: !!isSpectator,
+                streaming: mode === 'streaming',
+              });
+            }
+            // Mid-game join handling
+            if (joinedStatus === 'playing') {
+              crumb('mid-game-join', {
+                spectator: isSpectator,
+                mode,
+                sharing: !!hostShares,
+                hasRom: !!(_romBlob || _romBlobUrl),
+                romHash: _romHash?.substring(0, 12),
+                hostHash: (_hostRom?.hash ?? '').substring(0, 12),
+              });
+              console.log(
+                `[play] mid-game join: isSpectator=${isSpectator}, mode=${mode}, player_count=${roomData.player_count}, max_players=${roomData.max_players}`,
+              );
+              // Set matchId for late joiners — game-started event doesn't fire
+              // for them, so session logging would silently fail without this.
+              // roomData (REST) doesn't include matchId — use joinData (Socket.IO ack).
+              const joinedMatchId = joinData?.matchId || roomData.matchId;
+              if (joinedMatchId && joinedMatchId !== KNState.matchId) {
+                _clearMatchIntegrity();
+                KNState.matchId = joinedMatchId;
+              }
+              // The machine needs the mode, which is only known here.
+              _session?.send({
+                type: 'joined',
+                status: 'playing',
+                matchId: joinData?.matchId ?? null,
+                spectator: !!isSpectator,
+                streaming: mode === 'streaming',
+              });
+              // A page that runs an emulator is in the game once it advances
+              // frames. Streaming guests and spectators have no frame counter:
+              // for them the engine start is the whole late join.
+              if (!isSpectator && mode !== 'streaming') _sessionWatchLateJoin();
+              _acceptRemoteIntegrity(lastUsersData);
+              _acceptRemoteIntegrity(joinData);
+              // Use joinData directly — the users-updated socket event may not
+              // have arrived yet (ack returns before broadcast is delivered)
+              if (joinData) lastUsersData = joinData;
 
-            // How this page gets into the match is join-plan.ts (proved). A
-            // ROM still being hashed is none yet: the page waits for a ROM,
-            // and the hash landing joins the match or refuses it
-            // (rom-identity.ts, specs/rom_identity.qnt).
-            const verdict = romVerdictNow();
-            const hasRom = romIdentity.romDecided(verdict);
-            const lateJoinPlan = _joinPlan.lateJoinPlan(
-              !!isSpectator || mode === 'streaming',
-              hasRom,
-              romIdentity.offersHostsRom(verdict, !!hostShares),
-              verdict === 'mismatch',
-              _romSharingDecision === 'accepted',
-            );
+              // Store host ROM metadata for verification
+              applyHostRomFromData(joinData || roomData);
 
-            // Spectators and streaming guests don't need a ROM — they
-            // receive a video stream. Skip ROM checks and go to engine init.
-            if (lateJoinPlan === 'watch') {
+              // How this page gets into the match is join-plan.ts (proved). A
+              // ROM still being hashed is none yet: the page waits for a ROM,
+              // and the hash landing joins the match or refuses it
+              // (rom-identity.ts, specs/rom_identity.qnt).
+              const verdict = romVerdictNow();
+              const hasRom = romIdentity.romDecided(verdict);
+              const lateJoinPlan = _joinPlan.lateJoinPlan(
+                !!isSpectator || mode === 'streaming',
+                hasRom,
+                romIdentity.offersHostsRom(verdict, !!hostShares),
+                verdict === 'mismatch',
+                _romSharingDecision === 'accepted',
+              );
+
+              // Spectators and streaming guests don't need a ROM — they
+              // receive a video stream. Skip ROM checks and go to engine init.
+              if (lateJoinPlan === 'watch') {
+                hideOverlay();
+                showToolbar();
+                showGameLoading();
+                initEngine();
+                return;
+              }
+
+              // No ROM, or one that isn't the host's, and the host is sharing
+              // theirs: show the accept/decline prompt instead of a ROM drop.
+              if (lateJoinPlan === 'askForSharedRom') {
+                if (!hasRom) crumb('late-join-sharing-prompt', { sharing: true });
+                _romSharingEnabled = true;
+                _setPendingLateJoin(true);
+                showLateJoinRomPrompt();
+                updateRomSharingUI();
+                return;
+              }
+              if (lateJoinPlan === 'askForRom') {
+                crumb('late-join-rom-prompt', { sharing: false });
+                _setPendingLateJoin(true);
+                showLateJoinRomPrompt();
+                return;
+              }
+              // The ROM's hash isn't the host's (one that came from the host by
+              // sharing is believed), and the host isn't sharing.
+              if (lateJoinPlan === 'wrongRom') {
+                showError("Your ROM doesn't match the host's game. Drop the correct ROM.");
+                return;
+              }
+
+              // A page that was in the lobby (it has just caught up with a
+              // match that replaced the one it was in) still has the lobby
+              // overlay up; a fresh page does not.
               hideOverlay();
               showToolbar();
-              showGameLoading();
               initEngine();
               return;
             }
 
-            // No ROM, or one that isn't the host's, and the host is sharing
-            // theirs: show the accept/decline prompt instead of a ROM drop.
-            if (lateJoinPlan === 'askForSharedRom') {
-              if (!hasRom) crumb('late-join-sharing-prompt', { sharing: true });
-              _romSharingEnabled = true;
-              _setPendingLateJoin(true);
-              showLateJoinRomPrompt();
+            showOverlay();
+            // Sync ROM sharing state and refresh UI unconditionally.
+            // users-updated may arrive before or after the ack, and only calls
+            // updateRomSharingUI() when the value changes. If it already set
+            // _romSharingEnabled=true before the ack, the change-guard skips it
+            // a second time — so we call it here after showOverlay() to ensure
+            // the prompt appears regardless of event ordering.
+            if (!isHost && !isSpectator) {
+              if (hostShares !== undefined) {
+                _romSharingEnabled = !!hostShares;
+              }
               updateRomSharingUI();
-              return;
             }
-            if (lateJoinPlan === 'askForRom') {
-              crumb('late-join-rom-prompt', { sharing: false });
-              _setPendingLateJoin(true);
-              showLateJoinRomPrompt();
-              return;
-            }
-            // The ROM's hash isn't the host's (one that came from the host by
-            // sharing is believed), and the host isn't sharing.
-            if (lateJoinPlan === 'wrongRom') {
-              showError("Your ROM doesn't match the host's game. Drop the correct ROM.");
-              return;
-            }
-
-            // A page that was in the lobby (it has just caught up with a
-            // match that replaced the one it was in) still has the lobby
-            // overlay up; a fresh page does not.
-            hideOverlay();
-            showToolbar();
-            initEngine();
-            return;
-          }
-
-          showOverlay();
-          // Sync ROM sharing state and refresh UI unconditionally.
-          // users-updated may arrive before or after the ack, and only calls
-          // updateRomSharingUI() when the value changes. If it already set
-          // _romSharingEnabled=true before the ack, the change-guard skips it
-          // a second time — so we call it here after showOverlay() to ensure
-          // the prompt appears regardless of event ordering.
-          if (!isHost && !isSpectator) {
-            if (hostShares !== undefined) {
-              _romSharingEnabled = !!hostShares;
-            }
-            updateRomSharingUI();
-          }
-        });
+          },
+        );
       } catch (_) {
         showError('Could not reach the room. Please try again.');
       }
@@ -1527,6 +1602,11 @@
     if (_leavingRoom) return;
     lastUsersData = data;
     showHostWait(data);
+    if (data.resumePending === false && data.matchId) _matchReturn?.finish(data.matchId, true);
+    if (_session?.state() === 'waitingForHost' && data.hostReturnDeadline == null) {
+      _session.send({ type: 'hostReturned' });
+      if (data.status === 'playing') void onConnect(false);
+    }
     // The server sends this after game-ended as well. Reconcile its lobby
     // state even if the one-shot end event was missed (specs/game_end.qnt).
     if (data.status === 'lobby') _reconcileAfterRejoin(data);
@@ -1608,6 +1688,7 @@
 
     // Detect spectator → player transition (via claim-slot)
     const nowPlayer = mySlot !== null && mySlot !== undefined;
+    if (nowPlayer && !isHost) _identity.rememberPlayer(_returningSeat?.persistentId ?? _identity.persistentId);
     if (isSpectator && nowPlayer) {
       if (
         mode !== 'streaming' &&
@@ -1675,6 +1756,17 @@
       }
       syncDelayPickerPlacement();
     }
+    if (
+      data.resumePending &&
+      data.resumeFromMatchId &&
+      myPlayerEntry &&
+      !_returningSeat &&
+      KNState.matchId !== data.matchId &&
+      _lastHandledGameEndMatchId !== data.matchId
+    ) {
+      if (KNState.matchId === data.resumeFromMatchId) onGameEnded({ matchId: KNState.matchId, reason: 'host-rewind' });
+      if (!KNState.matchId) onGameStarted(data);
+    }
     if (_lateJoinWaitingForHost && data.hostReturnDeadline == null) {
       const match = _lateJoinWaitingForHost;
       _lateJoinWaitingForHost = null;
@@ -1701,6 +1793,16 @@
   const _gameStart = window.KNCore.play.gameStart;
 
   const onGameStarted = (data) => {
+    if (data.resumeFromMatchId) {
+      // The host's snapshot and slot are bound to the identity confirmed in its join acknowledgement.
+      if (_returningSeat || _matchReturn?.matchId === data.matchId || data.matchId === _lastHandledGameEndMatchId)
+        return;
+      _matchReturn = new window.KNCore.play.MatchReturn(data.matchId, data.resumeFromMatchId);
+      if (isHost) {
+        const hostId = _identity.persistentId;
+        void _matchReturn.released.then(() => window.KNCore.matchSave.remove(roomCode, data.resumeFromMatchId, hostId));
+      }
+    }
     _endGameRequest?.cancel();
     _endGameRequest = null;
     // Keep match events from covering the fatal error modal.
@@ -1831,9 +1933,23 @@
     _lateJoinWaitingForHost = null;
     // A freshly opened host page receives this end before its room acknowledgement.
     // It has no running engine to clean up, but still needs the lobby explanation.
-    if (data.reason === 'host-reload') {
+    _matchReturn?.finish(endedMatchId, false);
+    if (_matchReturn?.matchId === endedMatchId) _matchReturn = null;
+    if (isHost && endedMatchId && data.reason !== 'host-rewind') {
+      void window.KNCore.matchSave.remove(roomCode, endedMatchId, _identity.persistentId);
+    }
+    const returnReason = ['host-reload', 'players-missing', 'recovery-failed'].includes(data.reason);
+    if (returnReason) {
       const notice = document.getElementById('host-reload-notice');
-      if (notice) notice.hidden = false;
+      if (notice) {
+        notice.textContent =
+          data.reason === 'players-missing'
+            ? 'Some players left the fight. You can start a rematch from this room.'
+            : data.reason === 'recovery-failed'
+              ? 'The saved fight could not resume. You can start a rematch from this room.'
+              : 'The host’s page closed. You can start a rematch from this room.';
+        notice.hidden = false;
+      }
     }
     // Whether this page has the end to handle (web/src/play/game-start.ts,
     // `handlesGameEnd`): not the same match's end twice, and nothing to end
@@ -1847,7 +1963,7 @@
       !!data?.leftByMachine,
       isGameRunning() || !!engine || _isLateJoin() || _isPendingLateJoin(),
     );
-    if (endedMatchId && (handled || data.reason === 'host-reload')) _lastHandledGameEndMatchId = endedMatchId;
+    if (endedMatchId && (handled || returnReason)) _lastHandledGameEndMatchId = endedMatchId;
     if (!handled) return;
     _clearMatchIntegrity();
     _endGameRequest?.cancel();
@@ -1863,10 +1979,10 @@
     _sessionStopLateJoinPoll();
     _session?.send({ type: 'gameEnded' });
     guardHostNavigation(false);
-    if (data.reason !== 'host-reload' && data.reason !== 'host-timeout')
+    if (!returnReason && data.reason !== 'host-timeout' && data.reason !== 'host-rewind')
       showToast(_gameStart.gameEndedMessage(data?.reason));
     if (engine) {
-      engine.stop();
+      engine.stop({ keepAudioForMatch: data.reason === 'host-rewind' ? endedMatchId : null });
       engine = null;
     }
     KNState.matchId = null;
@@ -1898,6 +2014,10 @@
   };
 
   const onRoomClosed = (data) => {
+    if (_matchReturn) _matchReturn.finish(_matchReturn.matchId, false);
+    if (isHost && KNState.matchId)
+      void window.KNCore.matchSave.remove(roomCode, KNState.matchId, _identity.persistentId);
+    _identity.leaveRoom();
     _lateJoinWaitingForHost = null;
     showHostWait(null);
     _roomIceAuth = null;
@@ -1915,7 +2035,6 @@
     const reason = data?.reason ?? 'closed';
     const expired = reason === 'host-timeout';
     if (expired) {
-      _identity.forgetHost();
       socket.io.reconnection(false);
       socket.disconnect();
     }
@@ -3812,12 +3931,29 @@
     let spectatorRelayUnavailable = false;
     const spectatorRelayError = 'The private spectator connection is unavailable. Try reloading the watch link.';
     engine = Engine;
+    const savedStart = _matchReturn?.matchId === KNState.matchId ? _matchReturn : null;
     if (_reportedUnverifiedMatchId && _reportedUnverifiedMatchId === KNState.matchId) {
       engine.markMatchRecoveryUnverified?.(_reportedUnverifiedMatchId);
     }
     engine.init({
       socket,
       sessionId: roomCode,
+      matchId: KNState.matchId,
+      mode,
+      resumeFromMatchId: savedStart?.source ?? null,
+      awaitResumeRelease: () =>
+        savedStart?.ready(() =>
+          socket.emit('match-return-ready', {
+            matchId: savedStart.matchId,
+            ready: true,
+          }),
+        ) ?? Promise.resolve(false),
+      onResumeFailed: () => {
+        if (savedStart && savedStart === _matchReturn) {
+          socket.emit('match-return-ready', { matchId: savedStart.matchId, ready: false });
+          savedStart.finish(savedStart.matchId, false);
+        }
+      },
       playerSlot: isSpectator ? null : mySlot,
       // This page's own roster entry is found by this too (KNCore.rosterPeers).
       persistentId: _identity.persistentId,
@@ -4107,6 +4243,9 @@
   const leaveGame = () => {
     if (_leavingRoom) return;
     _leavingRoom = true;
+    if (_matchReturn) _matchReturn.finish(_matchReturn.matchId, false);
+    if (isHost && KNState.matchId)
+      void window.KNCore.matchSave.remove(roomCode, KNState.matchId, _identity.persistentId);
     _identity.leaveRoom();
     showHostWait(null);
     guardHostNavigation(false);
@@ -4349,7 +4488,7 @@
     if (!btn || !isHost) return;
     const sel = document.getElementById('mode-select');
     const selectedMode = sel ? sel.value : mode;
-    const entries = Object.values(players);
+    const entries = Object.values(players).filter((player) => !player.away);
     // Whether the host may start, and what the button says, is room-view.ts:
     // streaming needs two players and no ROMs (the host runs the only
     // emulator); rollback needs every player's ROM, unless the host shares.
@@ -5584,9 +5723,16 @@
     // The server supplies the clock and authenticates recovery; a phone's clock can be ahead.
     const savedHost = _identity.savedHost(0);
     if (savedHost && isSpectator) _identity.joinSeparately(savedHost);
-    if (!isSpectator && new URLSearchParams(location.search).get('returnHost') === '1') {
+    const playerReturn = new URLSearchParams(location.hash.slice(1)).get('returnPlayer');
+    if (!isSpectator && playerReturn) {
+      const player = _identity.savedPlayer(playerReturn, 0);
+      if (player) {
+        _returningSeat = { ...player, role: 'player', remembered: true };
+        connect();
+      } else showError('This browser no longer has a saved seat for this room.', inviteUrl(false));
+    } else if (!isSpectator && new URLSearchParams(location.search).get('returnHost') === '1') {
       if (savedHost) {
-        _returningHost = { ...savedHost, remembered: true };
+        _returningSeat = { ...savedHost, role: 'host', remembered: true };
         connect();
       } else showError('This browser no longer has a saved host seat for this room.', inviteUrl(false));
     } else if (!isSpectator && !_identity.hasRoomToken() && savedHost) offerHostReturn(savedHost);

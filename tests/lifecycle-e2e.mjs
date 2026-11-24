@@ -154,7 +154,6 @@ const BLIP_MS = 3000;
 // Reports that mean a TypeScript module and the page (or the server) differ.
 // The rollback engine's observer reports its own the same way.
 const DISAGREEMENTS = ['session-disagree', 'play-disagree', 'protocol-mismatch', ...OBSERVER_EVENTS];
-const SERVER_GRACE_MS = 30000; // _DISCONNECT_GRACE_SECONDS in server/src/api/signaling.py
 const LATE_JOIN_REPORT_AFTER_MS = 20000; // web/src/session.ts
 
 // The play page's TypeScript must be this tree's, built and served (bundle-check.mjs).
@@ -380,8 +379,8 @@ const checkpoint = async (name, expectations, failures, log) => {
   }
 };
 
-const roomInfo = async (room) => {
-  const res = await fetch(`${URL}/room/${room}`);
+const roomInfo = async (room, token) => {
+  const res = await fetch(`${URL}/room/${room}`, token ? { headers: { Authorization: 'Bearer ' + token } } : {});
   return res.ok ? res.json() : null;
 };
 
@@ -393,18 +392,27 @@ const droppedPlayerReturns = async (room, failures, log, who) => {
   const [host, guest] = await startTwoPlayerGame(room, failures);
   const match = await matchOf(host);
   const dropped = who === 'host' ? host : guest;
+  const token = await dropped.page.evaluate((code) => sessionStorage.getItem('kn-reconnect-token:' + code), room);
   await cutSignaling(dropped);
+  let remainingMs = 0;
+  const held = await waitUntil(async () => {
+    const seat = await roomInfo(room, token);
+    if (seat?.player_count !== 2 || !(seat.returnDeadline > seat.serverTime)) return false;
+    remainingMs = seat.returnDeadline - seat.serverTime;
+    return true;
+  }, 10000);
+  if (!held) failures.push(`the room did not reserve the disconnected ${who} seat`);
+  const since = performance.now();
   if (who === 'host') {
-    const held = await waitUntil(async () => {
-      const data = await roomInfo(room);
-      return data?.player_count === 2 && data.hostReturnDeadline > data.serverTime;
-    }, 10000);
-    if (!held) failures.push('the room did not reserve the disconnected host seat');
-    await dropped.page.waitForTimeout(SERVER_GRACE_MS + 1000);
+    // Return in the latter half of the actual lease, keeping time for reconnection.
+    await dropped.page.waitForTimeout(remainingMs / 2);
   } else {
-    await dropped.page.waitForTimeout(SERVER_GRACE_MS + 8000);
-    if ((await playersInRoom(room)) !== 1) failures.push('the room did not drop the guest after its grace window');
+    const released = await waitUntil(async () => (await playersInRoom(room)) === 1, remainingMs + 15000);
+    if (!released) failures.push('the room did not drop the guest after its grace window');
+    if (performance.now() - since + 1000 < remainingMs) failures.push('the room released the guest seat early');
+    if (await roomInfo(room, token)) failures.push('the expired guest could still return from a fresh tab');
   }
+  log.push({ seat: who, remainingMs, waitedMs: Math.round(performance.now() - since) });
   dropped.signaling.down = false;
   const returned = await waitUntil(async () => {
     const data = await roomInfo(room);

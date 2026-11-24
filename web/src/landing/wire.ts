@@ -47,6 +47,7 @@ export const isHealthAnswer = (value: unknown): value is HealthAnswer => hasText
 
 /** A room as the invite page needs it. The server sends more; the rest is not read. */
 export interface RoomAnswer {
+  readonly room_name?: string | null;
   readonly hostReturnDeadline?: number | null;
   readonly serverTime?: number | null;
   readonly status: string;
@@ -63,12 +64,33 @@ export const isRoomAnswer = (value: unknown): value is RoomAnswer =>
   hasText(value, 'status') &&
   hasNumber(value, 'player_count') &&
   hasNumber(value, 'max_players') &&
+  mayHave(value, 'room_name', 'string') &&
   mayHave(value, 'host_name', 'string') &&
   mayHave(value, 'game_id', 'string') &&
   mayHave(value, 'romName', 'string') &&
   mayHave(value, 'closed', 'boolean') &&
   mayHave(value, 'hostReturnDeadline', 'number') &&
   mayHave(value, 'serverTime', 'number');
+
+/** A room lookup with a seat credential reports whether that particular seat can return. */
+export interface SeatAnswer extends RoomAnswer {
+  readonly role: 'host' | 'player';
+  readonly returnDeadline: number | null;
+  readonly serverTime: number;
+  readonly player_name: string;
+  readonly slot: number | null;
+}
+
+export const isSeatAnswer = (value: unknown): value is SeatAnswer =>
+  isRoomAnswer(value) &&
+  hasText(value, 'role') &&
+  (value.role === 'host' || value.role === 'player') &&
+  hasNumber(value, 'serverTime') &&
+  'returnDeadline' in value &&
+  (value.returnDeadline === null || typeof value.returnDeadline === 'number') &&
+  hasText(value, 'player_name') &&
+  'slot' in value &&
+  (value.slot === null || typeof value.slot === 'number');
 
 // ── GET /list ───────────────────────────────────────────────────────────────
 
@@ -141,11 +163,20 @@ const request = async <T>(
   timeoutMs: number,
   accepts: (body: unknown) => body is T,
   missingIsAnAnswer: boolean,
+  token?: string,
 ): Promise<Answer<T>> => {
   const ctl = new AbortController();
   const timer = host.setTimeout(() => ctl.abort(), timeoutMs);
   try {
-    const res = await host.fetch(url, { signal: ctl.signal, cache: 'no-store' });
+    const res = await host.fetch(url, {
+      signal: ctl.signal,
+      cache: 'no-store',
+      ...(token && {
+        headers: { Authorization: 'Bearer ' + token },
+        mode: 'same-origin' as const,
+        redirect: 'error' as const,
+      }),
+    });
     if (missingIsAnAnswer && res.status === 404) return { there: false };
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const body: unknown = await res.json();
@@ -178,7 +209,8 @@ export const getJSONIfThere = async <T>(
   url: string,
   timeoutMs: number,
   accepts: (body: unknown) => body is T,
+  token?: string,
 ): Promise<T | null> => {
-  const answer = await request(host, url, timeoutMs, accepts, true);
+  const answer = await request(host, url, timeoutMs, accepts, true, token);
   return answer.there ? answer.body : null;
 };

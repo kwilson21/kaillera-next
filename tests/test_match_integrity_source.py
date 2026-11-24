@@ -139,7 +139,8 @@ def test_authoritative_old_end_cannot_end_the_selected_current_match():
     on_end = _slice(play, "  const onGameEnded =", "  const onRoomClosed =")
     mocks = """
     const KNState={matchId:'match-b'}, events=[];
-    let _unverifiedMatchId='match-b', _lastHandledGameEndMatchId=null,
+    const isHost=false;
+    let _matchReturn=null, _unverifiedMatchId='match-b', _lastHandledGameEndMatchId=null,
         _lateJoinWaitingForHost='match-b',
         _endGameRequest=null, engine={stop:()=>events.push('stop')};
     const _clearMatchIntegrity=()=>{_unverifiedMatchId=null};

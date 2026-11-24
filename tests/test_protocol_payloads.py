@@ -95,6 +95,13 @@ async def _room_life_steps() -> dict[str, dict | None]:
     acks["session-log"] = await signaling.session_log_handler("sid-host", flush)
     acks["session-log refused"] = await signaling.session_log_handler("sid-host", {**flush, "matchId": "other"})
     assert await _end_game_locked("sid-host", EndGamePayload()) is None
+    # A saved fight has its own transport epoch and waits for both engines.
+    assert await _start_game_locked("sid-host", StartGamePayload(mode="rollback"), resume_from=match_id) is None
+    acks["rewind"] = signaling._join_ack(rooms["ROOM1"])
+    ready = {"matchId": acks["rewind"]["matchId"], "ready": True}
+    assert await signaling.match_return_ready("sid-host", ready) is None
+    assert await signaling.match_return_ready("sid-guest-2", ready) is None
+    assert await _end_game_locked("sid-host", EndGamePayload()) is None
     # The host leaves: the guest becomes the owner and is asked to renegotiate.
     await _leave("sid-host", "leave")
     rooms["ROOM1"].host_return_deadline = 1
@@ -163,7 +170,10 @@ def test_rosters_identify_the_running_match_and_clear_it_in_the_lobby(room_life)
     emitted, acks = room_life
     rosters = [d for event, d in emitted if event == "users-updated"]
     assert all(r["matchId"] is None for r in rosters if r["status"] == "lobby")
-    assert {r["matchId"] for r in rosters if r["status"] == "playing"} == {acks["rejoin"]["matchId"]}
+    assert {r["matchId"] for r in rosters if r["status"] == "playing"} == {
+        acks["rejoin"]["matchId"],
+        acks["rewind"]["matchId"],
+    }
     legacy = dict(rosters[0])
     del legacy["matchId"]
     assert UsersUpdated.model_validate(legacy).matchId is None

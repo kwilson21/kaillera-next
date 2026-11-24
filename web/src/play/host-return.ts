@@ -4,7 +4,9 @@ import { tokenClaims } from './token-claims.ts';
 
 /** The room's server verifies this credential before changing any membership. */
 export const HOST_RETURN_PREFIX = 'kn-host-return:';
+export const PLAYER_RETURN_PREFIX = 'kn-player-return:';
 export const hostReturnKey = (room: string): string => HOST_RETURN_PREFIX + room;
+export const playerReturnKey = (room: string, pid: string): string => PLAYER_RETURN_PREFIX + room + ':' + pid;
 const PAST_HOST_PREFIX = 'kn-past-host:';
 const MAX_PAST_ROOMS = 32;
 
@@ -49,7 +51,9 @@ export const hostReturnDuration = (seconds: number): string =>
   Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
 
 /** A connected guest keeps its game while the room waits for the host's socket. */
-export function hostWaitNotice(): (room: Pick<RoomAnswer, 'hostReturnDeadline' | 'serverTime'> | null) => void {
+export function hostWaitNotice(
+  hostGameConnected: () => boolean,
+): (room: Pick<RoomAnswer, 'status' | 'hostReturnDeadline' | 'serverTime'> | null) => void {
   let ticking = 0;
   return (room) => {
     window.clearInterval(ticking);
@@ -57,9 +61,18 @@ export function hostWaitNotice(): (room: Pick<RoomAnswer, 'hostReturnDeadline' |
     if (!banner) return;
     const clock = hostReturnClock(room);
     banner.hidden = clock === null;
+    // The connection countdown owns the status while the room holds the host.
+    const toolbarStatus = document.getElementById('toolbar-status');
+    if (toolbarStatus) toolbarStatus.hidden = !banner.hidden;
     if (clock === null) return;
+    const status = banner.querySelector<HTMLElement>('[role="status"]')!;
     const timer = banner.querySelector<HTMLElement>('[role="timer"]')!;
     const render = () => {
+      const message =
+        room?.status === 'playing' && hostGameConnected()
+          ? 'The host is reconnecting to the room. Your game connection is still active.'
+          : 'The host disconnected. Waiting for them to return.';
+      if (status.textContent !== message) status.textContent = message;
       const seconds = hostReturnSeconds(clock);
       timer.textContent = hostReturnDuration(seconds);
       if (!seconds) window.clearInterval(ticking);
@@ -84,7 +97,7 @@ export function readHostReturn(room: string, token: string | null, now = Date.no
   return null;
 }
 
-/** Keep ordinary credentials in the tab. Only a confirmed host saves a return credential for other tabs. */
+/** Each seated player can return from a fresh tab. Spectators keep only their tab credential. */
 export class RoomIdentity {
   readonly room: string;
   readonly storage: SafeStorage;
@@ -112,6 +125,11 @@ export class RoomIdentity {
     return readHostReturn(this.room, this.storage.get('localStorage', hostReturnKey(this.room)), now);
   }
 
+  savedPlayer(pid: string, now = Date.now()): HostReturn | null {
+    const seat = readHostReturn(this.room, this.storage.get('localStorage', playerReturnKey(this.room, pid)), now);
+    return seat?.persistentId === pid ? seat : null;
+  }
+
   hasRoomToken(): boolean {
     return readHostReturn(this.room, this.reconnectToken, 0)?.persistentId === this.persistentId;
   }
@@ -134,6 +152,13 @@ export class RoomIdentity {
     clearHostReturn(this.storage, this.room, token);
   }
 
+  discardPlayer(token: string): void {
+    const proof = readHostReturn(this.room, token, 0);
+    if (!proof) return;
+    const key = playerReturnKey(this.room, proof.persistentId);
+    if (this.storage.get('localStorage', key) === token) this.storage.remove('localStorage', key);
+  }
+
   joinSeparately(host: HostReturn): void {
     if (this.persistentId !== host.persistentId) return;
     this.resetTabIdentity();
@@ -141,6 +166,7 @@ export class RoomIdentity {
 
   leaveRoom(): void {
     this.forgetHost();
+    this.storage.remove('localStorage', playerReturnKey(this.room, this.persistentId));
     this.resetTabIdentity();
   }
 
@@ -154,13 +180,22 @@ export class RoomIdentity {
 
   rememberHost(persistentId: string): void {
     const proof = readHostReturn(this.room, this.reconnectToken, 0);
-    if (proof?.persistentId === persistentId) this.storage.set('localStorage', hostReturnKey(this.room), proof.token);
+    if (proof?.persistentId !== persistentId) return;
+    this.storage.set('localStorage', hostReturnKey(this.room), proof.token);
+    this.storage.remove('localStorage', playerReturnKey(this.room, persistentId));
   }
 
-  receiveToken(token: string, returning: HostReturn | null, owner: boolean): void {
+  rememberPlayer(persistentId: string): void {
+    const proof = readHostReturn(this.room, this.reconnectToken, 0);
+    if (proof?.persistentId === persistentId)
+      this.storage.set('localStorage', playerReturnKey(this.room, persistentId), proof.token);
+  }
+
+  receiveToken(token: string, returning: HostReturn | null, owner: boolean, player = false): void {
     this.reconnectToken = token;
     if (!returning) this.storage.set('sessionStorage', this.tokenKey, token);
     if (owner) this.rememberHost(returning?.persistentId ?? this.persistentId);
+    else if (player) this.rememberPlayer(returning?.persistentId ?? this.persistentId);
   }
 
   acceptReturn(host: HostReturn): void {
@@ -221,7 +256,7 @@ export function chooseHostReturn(
       message.textContent = refused
         ? 'Your host seat is no longer available.'
         : clock !== null
-          ? 'The host disconnected. Returning here opens the room for a new match.'
+          ? 'Your host seat is reserved until the timer ends.'
           : 'The room is active. If your host tab just closed, keep this page open while it disconnects.';
       if (!refused && clock === null && error === 'Host tab is still connected')
         message.textContent = 'Your host tab is still connected. This page will check again.';

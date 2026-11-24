@@ -431,6 +431,14 @@
     // Guest/spectator: listen for incoming video tracks
     if (_playerSlot !== 0 || _isSpectator) {
       peer.pc.ontrack = (event) => {
+        if (_peers[remoteSid] !== peer) return;
+        // The host attaches this video track after installing its saved fight.
+        const config = _config;
+        if (config?.resumeFromMatchId && !_isSpectator && peer.slot === 0 && event.track.kind === 'video') {
+          void config.awaitResumeRelease().then((go) => {
+            if (go && _config === config) startGuestInputLoop();
+          });
+        }
         _syncLog(
           `received track: ${event.track.kind} streams=${event.streams.length} stream0tracks=${
             event.streams[0]
@@ -565,9 +573,10 @@
           );
         }, 2000);
 
-        if (_guestVideo.requestVideoFrameCallback) {
+        if (_guestVideo.requestVideoFrameCallback && event.track.kind === 'video') {
           const measureLatency = (now, metadata) => {
-            if (!_gameRunning) return;
+            if (_peers[remoteSid] !== peer || _guestVideo?.srcObject !== stream) return;
+            peer.lastVideoFrameAt = now;
             if (metadata.receiveTime && metadata.expectedDisplayTime) {
               const pipelineDelay = metadata.expectedDisplayTime - metadata.receiveTime;
               window._videoPipelineDelay = pipelineDelay.toFixed(1);
@@ -810,7 +819,7 @@
         _syncLog('DC open: late-join peer already has tracks');
       } else if (act === 'streamNotReady') {
         _syncLog('DC open: host running but stream not ready');
-      } else if (act === 'startGuestInput') {
+      } else if (act === 'startGuestInput' && !_config?.resumeFromMatchId) {
         _syncLog('DC open: starting guest input loop');
         startGuestInputLoop();
       } else if (act === 'spectator') {
@@ -980,6 +989,39 @@
     return recovery;
   };
 
+  let _matchSaveTimer = null;
+  const startStreamingSaves = (config, gm) => {
+    if (!config.matchId) return;
+    const store = window.KNCore.matchSave;
+    const scope = store.scope(config, window._knStreamingCoreHash);
+    if (!scope) return;
+    let writing = false;
+    let savedFrame = 0;
+    const current = () => _gameRunning && _config === config && window.EJS_emulator?.gameManager === gm;
+    const capture = async () => {
+      if (writing || !current()) return;
+      const frame = gm.Module._get_current_frame_count?.();
+      if (!frame || frame === savedFrame) return;
+      writing = true;
+      try {
+        const snapshot = window.NetplayRollback.matchSaveCore.capture(frame);
+        if (!snapshot) return;
+        // Streaming also needs libretro's live scheduler, which rollback drives itself.
+        snapshot.lib = new Uint8Array(gm.getState());
+        const written = await store.write(
+          { scope, frame, capturedAt: Date.now(), delay: 0, rows: [], snapshot },
+          current,
+        );
+        if (written) savedFrame = frame;
+      } catch (err) {
+        _syncLog(`streaming match save unavailable: ${err?.message || err}`);
+      } finally {
+        writing = false;
+      }
+    };
+    _matchSaveTimer = setInterval(capture, store.cadence);
+  };
+
   const startHost = () => {
     if (_gameRunning) return;
     _gameRunning = true;
@@ -988,10 +1030,11 @@
     KNShared.bootWithCheats('streaming');
     setupKeyTracking();
 
+    const config = _config;
     const MIN_HOST_FRAMES = 10;
     let timingNormalized = false;
-    const waitForEmu = () => {
-      if (!_gameRunning) return;
+    const waitForEmu = async () => {
+      if (!_gameRunning || _config !== config) return;
       const gm = window.EJS_emulator?.gameManager;
       if (!gm) {
         setTimeout(waitForEmu, 100);
@@ -1025,6 +1068,23 @@
         return;
       }
 
+      if (config.resumeFromMatchId) {
+        try {
+          gm.Module.pauseMainLoop();
+          const store = window.KNCore.matchSave;
+          const scope = store.scope(config, window._knStreamingCoreHash, config.resumeFromMatchId);
+          const saved = scope && (await store.load(scope));
+          if (_config !== config || !_gameRunning) return;
+          if (!saved?.snapshot.lib) throw new Error('Streaming save unavailable');
+          gm.loadState(saved.snapshot.lib);
+          if (!window.NetplayRollback.matchSaveCore.install(saved.snapshot, saved.frame))
+            throw new Error('Streaming save verification failed');
+        } catch (err) {
+          _syncLog(`streaming restore failed: ${err?.message || err}`);
+          if (_config === config) config.onResumeFailed();
+          return;
+        }
+      }
       startCanvasCapture(srcCanvas);
 
       captureEmulatorAudio();
@@ -1039,6 +1099,12 @@
         renegotiate(sid);
       }
 
+      if (config.resumeFromMatchId) {
+        setStatus('Waiting for players to resume…');
+        if (!(await config.awaitResumeRelease()) || _config !== config || !_gameRunning) return;
+        gm.Module.resumeMainLoop();
+      }
+      startStreamingSaves(config, gm);
       setStatus('🟢 Hosting — game on!');
       startHostInputLoop();
       startHostFrameRateWatchdog();
@@ -1458,6 +1524,9 @@
   };
 
   const stop = () => {
+    if (_matchSaveTimer !== null) clearInterval(_matchSaveTimer);
+    _matchSaveTimer = null;
+    if (_playerSlot === 0 && _config?.matchId) window.NetplayRollback.matchSaveCore.release();
     _gameRunning = false;
     _guestLoopStarted = false;
     _cachedInfo = null;
@@ -1564,9 +1633,35 @@
     _config = null;
   };
 
+  const hostGameConnected = () => {
+    const peer = Object.values(_peers).find((p) => p.slot === 0);
+    const pc = peer?.pc;
+    if (!pc) return false;
+    const video = _guestVideo;
+    const tracks = video?.srcObject?.getVideoTracks() || [];
+    if (!pc.getReceivers().some(({ track }) => tracks.includes(track) && track.readyState === 'live' && !track.muted))
+      return false;
+    const now = performance.now();
+    if (!video.requestVideoFrameCallback) {
+      // Older receivers expose a decoded-frame counter without presentation callbacks.
+      const frames = video.getVideoPlaybackQuality?.().totalVideoFrames ?? video.webkitDecodedFrameCount;
+      if (frames > peer.lastDecodedFrames && now - peer.lastVideoSampleAt <= 2000) peer.lastVideoFrameAt = now;
+      peer.lastDecodedFrames = frames;
+      peer.lastVideoSampleAt = now;
+    }
+    return window.KNCore.hostGameConnected(
+      pc.connectionState,
+      pc.iceConnectionState,
+      peer.dc?.readyState === 'open',
+      peer.lastVideoFrameAt,
+      now,
+    );
+  };
+
   window.NetplayStreaming = {
     init,
     stop,
+    hostGameConnected,
     exportSyncLog,
     getInfo: () => _cachedInfo,
     getPeerConnection: (sid) => {

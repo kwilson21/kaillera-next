@@ -263,7 +263,7 @@ def test_closed_host_tab_returns_from_a_new_tab_without_displacing_a_live_host(b
                     replacement.get_by_role("link", name="Return to room").click()
                 else:
                     replacement.goto(server_url)
-                    replacement.get_by_role("link", name=f"Return to room {room}").click()
+                    replacement.get_by_role("link", name="Return to room", exact=True).click()
             expect(replacement.locator("#host-controls")).to_be_visible()
             expect(replacement.locator("#host-reload-notice")).to_be_visible()
             expect(guest.locator("#host-reload-notice")).to_be_visible()
@@ -297,7 +297,7 @@ def test_host_can_cancel_or_confirm_leaving_an_active_room(browser, server_url, 
         with host.expect_navigation():
             dialog.get_by_role("button", name="Leave room").click()
         assert host.url == f"{server_url}/"
-        expect(host.get_by_role("link", name=f"Return to room {room}")).to_have_count(0)
+        expect(host.get_by_role("link", name="Return to room", exact=True)).to_have_count(0)
         assert host.evaluate("room => localStorage.getItem('kn-host-return:' + room)", room) is None
         guest.wait_for_function("() => window.KNState.isLocalHost", timeout=10000)
         response = guest.request.get(f"{server_url}/room/{room}")
@@ -1264,4 +1264,4 @@ def test_an_open_duplicate_honors_leaving_from_the_disconnected_host_tab(browser
             host.locator("#leave-btn").click()
         expect(recover).to_have_count(0)
         expect(duplicate.locator("#host-return-dialog [role=status]")).to_contain_text("no longer has that host seat")
-        expect(host.get_by_role("link", name=f"Return to room {room}")).to_have_count(0)
+        expect(host.get_by_role("link", name="Return to room", exact=True)).to_have_count(0)

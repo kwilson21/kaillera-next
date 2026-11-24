@@ -96,6 +96,11 @@ def test_full_room_leads_with_watch(invite):
 def test_invite_offers_a_saved_host_seat_only_in_its_own_retained_room(page, invite, record, query, token_room, offer):
     token = make_reconnect_token(token_room, "returning-host")
     page.add_init_script(f"localStorage.setItem('kn-host-return:KAZ12345', {json.dumps(token)})")
+    if record is not None:
+        record = {
+            **record, "role": "host", "player_name": "Kaz", "slot": 0,
+            "serverTime": record.get("serverTime", 1000000), "returnDeadline": record.get("hostReturnDeadline"),
+        }
     invite(query=f"?room=KAZ12345{query}", room=record)
     link = page.get_by_role("link", name="Return to room", exact=True)
     if offer:
@@ -103,8 +108,7 @@ def test_invite_offers_a_saved_host_seat_only_in_its_own_retained_room(page, inv
         assert link.get_attribute("href") == "/play.html?room=KAZ12345&returnHost=1"
         expect(page.get_by_role("button", name="Open your own room")).to_be_visible()
         expect(page.get_by_role("timer")).to_contain_text("0:30")
-        if record["status"] == "playing":
-            expect(page.locator("#closed-line")).to_contain_text("start a rematch")
+        expect(page.locator("#closed-line")).to_contain_text("The host disconnected.")
         expect(page.get_by_role("link", name="Watch")).to_have_count(0)
     else:
         expect(link).to_have_count(0)
@@ -113,7 +117,10 @@ def test_invite_offers_a_saved_host_seat_only_in_its_own_retained_room(page, inv
 def test_host_invite_stops_offering_return_at_the_deadline(page, invite):
     token = make_reconnect_token("KAZ12345", "returning-host")
     page.add_init_script(f"localStorage.setItem('kn-host-return:KAZ12345', {json.dumps(token)})")
-    invite(room=dict(_room(), hostReturnDeadline=102000, serverTime=100000))
+    invite(room=dict(
+        _room(), hostReturnDeadline=102000, returnDeadline=102000, serverTime=100000,
+        role="host", player_name="Kaz", slot=0,
+    ))
     expect(page.get_by_role("link", name="Return to room")).to_be_visible()
     expect(page.get_by_role("link", name="Return to room")).to_have_count(0, timeout=4000)
     expect(page.get_by_role("timer")).to_have_text("0:00")

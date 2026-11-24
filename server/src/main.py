@@ -30,7 +30,7 @@ from src.api.signaling import (
     configure_cors,
     finish_room_shutdown,
     renew_member_tokens,
-    restore_host_reservations,
+    restore_member_reservations,
     rooms,
     set_shutting_down,
     sio,
@@ -57,7 +57,7 @@ async def lifespan(_app):
     restored = await state.load_all_rooms()
     if restored:
         rooms.update(restored)
-        await restore_host_reservations()
+        await restore_member_reservations()
         log.info("Restored %d room(s) from Redis", len(restored))
     task = asyncio.create_task(_cleanup_empty_rooms())
     token_task = asyncio.create_task(renew_member_tokens())
