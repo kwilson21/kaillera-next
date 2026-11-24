@@ -478,12 +478,12 @@ def test_host_leaving_with_only_spectators_unlists_the_room(sig):
     assert "ROOM1" in signaling.rooms and not room.listed
 
 
-def test_join_allowed_while_the_only_player_is_in_grace(sig):
-    room, _ = sig
+@pytest.mark.parametrize(("grace_room", "error"), [("ROOM1", None), ("ELSEWHERE", "Room closed")])
+def test_join_allowed_only_during_grace_in_this_room(sig, grace_room, error):
     del signaling._sid_host["host"]
-    signaling._disconnect_grace_tasks["p-host"] = object()  # lobby owner grace running
-    assert _join("guest", "p-guest")[0] is None
-    assert not signaling.room_frame("ROOM1")  # still nothing public
+    signaling._disconnect_grace_tasks[grace_room, "p-host"] = object()
+    assert _join("guest", "p-guest")[0] == error
+    assert not signaling.room_frame("ROOM1")
 
 
 def test_end_game_drops_the_frame(sig):
@@ -526,7 +526,7 @@ def test_set_listed_is_rate_limited():
 
 def test_spectator_not_admitted_while_the_only_player_is_in_grace(sig):
     del signaling._sid_host["host"]
-    signaling._disconnect_grace_tasks["p-host"] = object()
+    signaling._disconnect_grace_tasks["ROOM1", "p-host"] = object()
     assert _join("watcher", "p-watch", spectate=True) == ("Room closed", None)
 
 

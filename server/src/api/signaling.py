@@ -598,19 +598,19 @@ def _swap_sid(room: Room, persistent_id: str, old_sid: str, new_sid: str) -> Non
         room.device_types[new_sid] = room.device_types.pop(old_sid)
 
 
-# Pending disconnect grace timers: persistent_id -> asyncio.Task
+# A browser can reuse its persistent ID across rooms. Each membership has its own grace timer.
 # When a player disconnects mid-game, we defer removal for
 # _DISCONNECT_GRACE_SECONDS so Socket.IO auto-reconnect can reclaim
 # their slot. Cancelled on successful reconnect.
-_disconnect_grace_tasks: dict[str, asyncio.Task] = {}
+_disconnect_grace_tasks: dict[tuple[str, str], asyncio.Task] = {}
 
 
-def _cancel_disconnect_grace(persistent_id: str) -> None:
+def _cancel_disconnect_grace(session_id: str, persistent_id: str) -> None:
     """Cancel a pending disconnect grace timer if one exists."""
-    task = _disconnect_grace_tasks.pop(persistent_id, None)
+    task = _disconnect_grace_tasks.pop((session_id, persistent_id), None)
     if task and not task.done():
         task.cancel()
-        log.info("Disconnect grace cancelled for %s (reconnected)", persistent_id)
+        log.info("Disconnect grace cancelled for %s in room %s", persistent_id, session_id)
 
 
 def _nobody_is_connected_to_match(session_id: str) -> bool:
@@ -636,13 +636,18 @@ async def _disconnect_grace_expiry(
     except asyncio.CancelledError:
         return  # Reconnected in time
     async with _room_lock:
-        _disconnect_grace_tasks.pop(player_id, None)
-        if _shutting_down:
+        key = (session_id, player_id)
+        if _disconnect_grace_tasks.get(key) is not asyncio.current_task():
+            return
+        del _disconnect_grace_tasks[key]
+        if _shutting_down or _sid_to_room.get(sid) != (session_id, player_id, False):
+            return
+        room = rooms.get(session_id)
+        if room is None or room.players.get(player_id, {}).get("socketId") != sid:
+            # The old connection no longer holds this seat.
+            _sid_to_room.pop(sid, None)
             return
         log.info("Disconnect grace expired for %s in room %s — removing", player_id, session_id)
-        # Re-insert the entry so _leave can find it. The SID is dead but
-        # _leave needs the mapping to locate the room/player.
-        _sid_to_room[sid] = (session_id, player_id, False)
         await _leave(sid, reason)
 
 
@@ -652,7 +657,7 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
     if entry is None:
         return
     session_id, player_id, is_spectator = entry
-    _cancel_disconnect_grace(player_id)
+    _cancel_disconnect_grace(session_id, player_id)
 
     room = rooms.get(session_id)
     if room is None:
@@ -822,7 +827,7 @@ async def _reconnect_member(
             return None
         if old_sid in _sid_host:
             return "Host tab is still connected"
-    _cancel_disconnect_grace(persistent_id)
+    _cancel_disconnect_grace(session_id, persistent_id)
     _swap_sid(room, persistent_id, old_sid, sid)
     _sid_to_room.pop(old_sid, None)
     _sid_to_room[sid] = (session_id, persistent_id, spectator)
@@ -1017,7 +1022,7 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
     # disconnect grace window is on their way back, so the room stays open.
     # Spectators never enter a room with no connected player: if that
     # player doesn't return, nobody is left to host.
-    player_returning = not spectate and any(pid in _disconnect_grace_tasks for pid in room.players)
+    player_returning = not spectate and any((session_id, pid) in _disconnect_grace_tasks for pid in room.players)
     if not room_is_live(room) and not player_returning:
         return ("Room closed", None)
 
@@ -1071,10 +1076,6 @@ async def leave_room(sid: str, data: dict | None = None) -> None:
     if not check(sid, "leave-room"):
         return
     async with _room_lock:
-        # Intentional leave — cancel any pending grace timer
-        entry = _sid_to_room.get(sid)
-        if entry:
-            _cancel_disconnect_grace(entry[1])  # entry[1] = player_id
         await _leave(sid, reason="leave")
 
 
@@ -2215,7 +2216,7 @@ async def _disconnect_from_room(sid: str) -> None:
                 # Cancel any existing grace task before starting a new one —
                 # a rapid reconnect→disconnect cycle could otherwise orphan
                 # the old task while overwriting the dict entry.
-                _cancel_disconnect_grace(player_id)
+                _cancel_disconnect_grace(session_id, player_id)
                 log.info(
                     "SIO %s disconnect mid-game — %ds grace for %s in room %s",
                     sid,
@@ -2224,13 +2225,13 @@ async def _disconnect_from_room(sid: str) -> None:
                     session_id,
                 )
                 task = asyncio.create_task(_disconnect_grace_expiry(sid, session_id, player_id, "disconnect"))
-                _disconnect_grace_tasks[player_id] = task
+                _disconnect_grace_tasks[session_id, player_id] = task
                 return  # Don't call _leave yet
             # Lobby owner grace: serializes ownership transfer through a short
             # timer so a brief network blip on the host doesn't churn ownership
             # to the next player.
             if room and room.status != "playing" and not is_spectator and room.owner == sid:
-                _cancel_disconnect_grace(player_id)
+                _cancel_disconnect_grace(session_id, player_id)
                 log.info(
                     "SIO %s disconnect (lobby owner) — %ds grace for %s in room %s",
                     sid,
@@ -2241,7 +2242,7 @@ async def _disconnect_from_room(sid: str) -> None:
                 task = asyncio.create_task(
                     _disconnect_grace_expiry(sid, session_id, player_id, "disconnect", _LOBBY_OWNER_GRACE_SECONDS)
                 )
-                _disconnect_grace_tasks[player_id] = task
+                _disconnect_grace_tasks[session_id, player_id] = task
                 return
 
         await _leave(sid)

@@ -71,7 +71,9 @@ def _stubbed(stack: ExitStack, silent_room_grace: float) -> None:
 
 
 def _expire(name: str) -> asyncio.Task:
-    return asyncio.create_task(_disconnect_grace_expiry(f"sid-{name}", "ROOM1", f"pid-{name}", "disconnect", GRACE))
+    task = asyncio.create_task(_disconnect_grace_expiry(f"sid-{name}", "ROOM1", f"pid-{name}", "disconnect", GRACE))
+    signaling._disconnect_grace_tasks["ROOM1", f"pid-{name}"] = task
+    return task
 
 
 def test_places_are_kept_while_nobody_is_connected():

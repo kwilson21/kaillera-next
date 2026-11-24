@@ -241,11 +241,85 @@ def test_shutdown_drains_cleanup_that_already_started_persisting(server, monkeyp
     run_async(scenario())
 
 
+def test_same_browser_hosting_two_rooms_has_independent_grace(server, monkeypatch):
+    async def scenario():
+        first, guest = await lobby(server)
+        second_host = await server.manager.connect("other-transport", "/")
+        signaling._sid_host[second_host] = "localhost"
+        opened = {"extra": {"sessionid": "OTHER", "persistentId": "host"}}
+        assert await signaling.open_room(second_host, opened) is None
+
+        # Hold the first timer until the host has returned to the second room.
+        release = asyncio.Event()
+        expiry = signaling._disconnect_grace_expiry
+
+        async def grace(sid, code, pid, reason, _seconds):
+            await release.wait()
+            await expiry(sid, code, pid, reason, 0)
+
+        monkeypatch.setattr(signaling, "_disconnect_grace_expiry", grace)
+        await server._handle_eio_disconnect("host-transport", "transport close")
+        await server._handle_eio_disconnect("other-transport", "transport close")
+        timers = list(signaling._disconnect_grace_tasks.values())
+        assert len(timers) == 2
+        returned = await server.manager.connect("returned-transport", "/")
+        signaling._sid_host[returned] = "localhost"
+        error, _ = await signaling.join_room(
+            returned,
+            {
+                "extra": {
+                    "sessionid": "OTHER",
+                    "persistentId": "host",
+                    "returnHost": True,
+                    "reconnectToken": signaling.make_reconnect_token("OTHER", "host"),
+                }
+            },
+        )
+        assert error is None
+        release.set()
+        await asyncio.gather(*timers, return_exceptions=True)
+        assert first.owner == guest
+        assert first.slots == {0: "guest"}
+        assert signaling.rooms["OTHER"].owner == returned
+        assert signaling.rooms["OTHER"].slots == {0: "host"}
+        assert not signaling._disconnect_grace_tasks
+
+    run_async(scenario())
+
+
+@pytest.mark.parametrize("replaced", ["timer", "seat"])
+def test_expired_grace_leaves_a_replacement_alone(server, replaced):
+    async def scenario():
+        room, _ = await lobby(server)
+        old_sid = room.owner
+        async with signaling._room_lock:
+            old = asyncio.create_task(signaling._disconnect_grace_expiry(old_sid, "ROOM", "host", "disconnect", 0))
+            key = ("ROOM", "host")
+            signaling._disconnect_grace_tasks[key] = old
+            if replaced == "timer":
+                replacement = asyncio.create_task(asyncio.sleep(0))
+                signaling._disconnect_grace_tasks[key] = replacement
+            else:
+                room.owner = room.players["host"]["socketId"] = "new-socket"
+                signaling._sid_to_room["new-socket"] = ("ROOM", "host", False)
+        await old
+        assert room.slots == {0: "host", 1: "guest"}
+        if replaced == "timer":
+            await replacement
+            assert signaling._disconnect_grace_tasks[key] is replacement
+        else:
+            assert old_sid not in signaling._sid_to_room
+            assert room.owner == "new-socket"
+        signaling.db.insert_client_event.assert_not_awaited()
+
+    run_async(scenario())
+
+
 def test_shutdown_cancels_owner_grace_and_preserves_the_room(server):
     async def scenario():
         room, _guest = await lobby(server)
         await server._handle_eio_disconnect("host-transport", "transport close")
-        grace = signaling._disconnect_grace_tasks["host"]
+        grace = signaling._disconnect_grace_tasks["ROOM", "host"]
         async with asyncio.timeout(2):
             await signaling.finish_room_shutdown()
             await asyncio.gather(grace, return_exceptions=True)
