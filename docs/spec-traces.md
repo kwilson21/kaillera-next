@@ -65,6 +65,21 @@ sequenceDiagram
   Note over Room: s = {epoch: 2, phase: playing, ready: {guest1, guest2, host}, seats: {guest1, guest2, host}}
 ```
 
+## `specs/room_member_return.qnt` (`room_saved_delay_fixed`)
+
+A resumed fight keeps its saved input delay when the new connection measures a different RTT.
+
+### changedReturnDelayTest
+
+```mermaid
+sequenceDiagram
+  participant Host
+  Host->>Host: start(1, 4)
+  Note over Host: saved = 1<br/>measured = 4<br/>host = 1
+  Host->>Host: hearHost
+  Note over Host: guest = 1
+```
+
 ## `specs/room_member_return.qnt` (`room_host_traffic_fixed`)
 
 A guest waits when the host is absent and its direct game connection stops delivering input.

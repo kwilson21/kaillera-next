@@ -154,6 +154,12 @@ $QUINT test specs/room_member_return.qnt --main=room_saved_fight --backend="$BAC
 $QUINT run specs/room_member_return.qnt --main=room_saved_fight --invariant=everyoneInstalled \
   --max-steps=12 --max-samples=5000 --backend="$BACKEND"
 
+for variant in room_saved_delay_before room_saved_delay_fixed; do
+  $QUINT test specs/room_member_return.qnt --main="$variant" --backend="$BACKEND"
+done
+$QUINT run specs/room_member_return.qnt --main=room_saved_delay_fixed --invariant=startMatchesInputHistory \
+  --max-steps=6 --max-samples=1000 --backend="$BACKEND"
+
 for variant in room_saved_seat_before room_saved_seat_fixed; do
   $QUINT test specs/room_member_return.qnt --main="$variant" --backend="$BACKEND"
 done

@@ -247,3 +247,32 @@ module room_return_identity_before {
 module room_return_identity_fixed {
   import room_return_identity(BIND_BEFORE_PUBLISH = true).*
 }
+
+// The delay in a verified save is part of its owner-input history. A new
+// connection can negotiate a different delay from the one that made it.
+module room_saved_delay {
+  const USE_SAVED_DELAY: bool
+  var saved: int
+  var measured: int
+  var host: int
+  var guest: int
+
+  action init = all { saved' = -1, measured' = 1, host' = -1, guest' = -1 }
+  action start(s: int, m: int): bool = all {
+    host == -1, saved' = s, measured' = m,
+    host' = if (USE_SAVED_DELAY and s >= 0) s else m, guest' = -1,
+  }
+  action hearHost = all { host >= 0, guest' = host, host' = host, saved' = saved, measured' = measured }
+  action step = any { start(-1, 1), start(-1, 4), start(1, 4), start(4, 1), start(4, 4), hearHost, init }
+  val startMatchesInputHistory = host == -1 or
+    (host == (if (saved >= 0) saved else measured) and (guest == -1 or guest == host))
+  run changedReturnDelayTest = init.then(start(1, 4)).then(hearHost).expect(startMatchesInputHistory == USE_SAVED_DELAY)
+  run freshDelayTest = init.then(start(-1, 4)).then(hearHost).expect(guest == 4 and startMatchesInputHistory)
+  run sameReturnDelayTest = init.then(start(4, 4)).then(hearHost).expect(guest == 4 and startMatchesInputHistory)
+}
+module room_saved_delay_before {
+  import room_saved_delay(USE_SAVED_DELAY = false).*
+}
+module room_saved_delay_fixed {
+  import room_saved_delay(USE_SAVED_DELAY = true).*
+}

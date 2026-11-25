@@ -56,3 +56,21 @@ lemma delayAtJoin_ensures(hostDelay: int, own: int, offered: int, fallback: int)
   ensures ((hostDelay <= 0) ==> (own <= 0) ==> (offered <= 0) ==> (delayAtJoin(hostDelay, own, offered, fallback) == fallback))
 {
 }
+
+function delayAtStart(saved: int, negotiated: int): int
+  requires (saved >= -1)
+  requires (negotiated >= 0)
+{
+  if (saved >= 0) then
+    saved
+  else
+    negotiated
+}
+
+lemma delayAtStart_ensures(saved: int, negotiated: int)
+  requires (saved >= -1)
+  requires (negotiated >= 0)
+  ensures ((saved >= 0) ==> (delayAtStart(saved, negotiated) == saved))
+  ensures ((saved < 0) ==> (delayAtStart(saved, negotiated) == negotiated))
+{
+}

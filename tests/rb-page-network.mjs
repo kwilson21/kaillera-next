@@ -481,6 +481,8 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
     }
     const ch = scheduleOf(this);
     let hold = 0;
+    if (window.__knReturnPingDelay && typeof data === 'string' && data.startsWith('{"type":"delay-ping"'))
+      hold = window.__knReturnPingDelay;
     if (
       window.__knHoldSyncAnswerMs > 0 &&
       this.label === 'sync-state' &&

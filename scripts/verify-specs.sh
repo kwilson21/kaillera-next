@@ -108,6 +108,8 @@ room_disconnect_cleanup() {
   expect_violation "$expiry" room_expiry_before freshRoomHasGrace 3
   verify specs/room_member_return.qnt room_member_return_fixed allHold init 5
   verify specs/room_member_return.qnt room_saved_fight everyoneInstalled init 5
+  verify specs/room_member_return.qnt room_saved_delay_fixed startMatchesInputHistory init 3
+  expect_violation specs/room_member_return.qnt room_saved_delay_before startMatchesInputHistory 1
   verify specs/room_member_return.qnt room_saved_seat_fixed releaseNeedsBoth init 3
   expect_violation specs/room_member_return.qnt room_saved_seat_before releaseNeedsBoth 2
   verify specs/room_member_return.qnt room_return_identity_fixed visibleSeatHasItsIdentity init 3

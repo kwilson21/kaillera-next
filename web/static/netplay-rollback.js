@@ -455,7 +455,6 @@
         }
       }
       _noteDelayChange(prev);
-      if (_config?.resumeFromMatchId && _savedGame) maxDelay = _savedGame.delay;
       DELAY_FRAMES = maxDelay;
       if (window.showEffectiveDelay) window.showEffectiveDelay(ownDelay, maxDelay);
       _syncLog(
@@ -13685,6 +13684,7 @@
         if (p.delayValue && p.delayValue > maxDelay) maxDelay = p.delayValue;
       }
     }
+    maxDelay = window.KNCore.delayAtStart(_savedGame?.delay ?? -1, maxDelay);
     DELAY_FRAMES = maxDelay;
     if (window.showEffectiveDelay) window.showEffectiveDelay(ownDelay, maxDelay);
     _syncLog(`delay negotiated: own=${ownDelay} effective=${maxDelay}${hasRollback ? ' (rollback)' : ''}`);

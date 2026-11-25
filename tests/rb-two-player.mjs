@@ -50,6 +50,8 @@
  *   FIGHT_RETURN_CHECK=1  In a rollback or lockstep battle (JITTER=20), close the host tab,
  *     return from the homepage, and verify the saved fight on both controllers
  *     through at least 300 more confirmed frames.
+ *     FIGHT_RETURN_PING_DELAY_MS=110 holds the return host's startup RTT probes
+ *     and requires a changed measured delay while both players restore the saved one.
  *   RESET_COMBO_CHECK=1  After battle evidence is collected, pause via Start
  *     and hold the real mobile reset control; require both peers at character
  *     select with the same running emulator and connected room.
