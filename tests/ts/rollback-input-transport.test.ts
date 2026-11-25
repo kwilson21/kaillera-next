@@ -160,9 +160,10 @@ test('a stuck simulation frame preserves the independent rate limit on each carr
 });
 
 test('the host negotiates the lobby choice unless diagnostics override it', () => {
-  const negotiate = (dualInputEnabled?: boolean, overrides: (string | null)[] = [], slot = 0) => {
+  const negotiate = (dualInputEnabled?: boolean, overrides: (string | null)[] = [], slot = 0, local = true) => {
     const messages: string[] = [];
     const context = {
+      _isLocalDev: local,
       _config: { dualInputEnabled },
       _playerSlot: slot,
       _peers: { peer: { dc: { readyState: 'open', send: (message: string) => messages.push(message) } } },
@@ -189,6 +190,7 @@ test('the host negotiates the lobby choice unless diagnostics override it', () =
   assert.deepEqual(negotiate(false), ordered);
   assert.deepEqual(negotiate(true), dual);
   assert.deepEqual(negotiate(false, ['dual']), dual);
+  assert.deepEqual(negotiate(true, ['unreliable'], 0, false), dual);
   assert.deepEqual(negotiate(true, ['reliable']), ordered);
   assert.deepEqual(negotiate(true, ['unreliable']), {
     transport: 'unreliable',

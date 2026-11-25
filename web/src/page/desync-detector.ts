@@ -755,11 +755,6 @@ export const installDesyncDetector = (): void => {
   // set on `window` (the engine's `_knSyncLog`, `KNState.peers` with their
   // data channels); every one is checked where it is read.
   const page = window as Window & DetectorPage;
-  try {
-    const params = new URLSearchParams(window.location?.search || '');
-    if (params.get('forceDesyncTick') === '1') page.__knForceDesyncTick = true;
-  } catch {
-    // No location to read (an embedded or sandboxed page): the flag stays off.
-  }
+  if (window.KNDiag?.options.forceDesyncTick) page.__knForceDesyncTick = true;
   window.KNDesync = createDesyncDetector(page);
 };

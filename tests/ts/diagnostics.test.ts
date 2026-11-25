@@ -11,6 +11,7 @@ import {
   screenshotCrop,
   type Crop,
 } from '../../web/src/diagnostics.ts';
+import { diagnosticOptions } from '../../web/src/page/diagnostic-options.ts';
 import type { CanvasSample, Diagnostics } from '../../web/src/page/diagnostics.ts';
 import { lcg, plain } from './load-shared.ts';
 
@@ -88,6 +89,7 @@ test('audio transitions: only leaving and re-entering running are reported', () 
 // ── window.KNDiag (web/src/page/diagnostics.ts) ───────────────────────────
 
 interface DiagWindow {
+  location: Pick<Location, 'search' | 'hostname'>;
   KNDiag?: Diagnostics;
   KNCapture: { allowed: () => boolean };
   KNAudio: { ctx: { state: string } };
@@ -146,12 +148,16 @@ const runDiagnostics = (): Observed => {
     toDataURL: () => `data:image/jpeg;base64,${'A'.repeat(200)}`,
   });
   const window: DiagWindow = {
+    location: { hostname: 'kaillera.example', search: '' },
     KNCapture: { allowed: () => true },
     KNAudio: { ctx: { state: 'running' } },
     addEventListener: () => undefined,
   };
   const document = { querySelector: () => game, createElement: scratch, hasFocus: () => true };
-  vm.runInContext(pageScript(), vm.createContext({ window, document, navigator: {}, console, CustomEvent }));
+  vm.runInContext(
+    pageScript(),
+    vm.createContext({ window, document, URLSearchParams, navigator: {}, console, CustomEvent }),
+  );
   const diag = window.KNDiag;
   assert.ok(diag, 'the page script did not define window.KNDiag');
 
@@ -233,6 +239,7 @@ test('window.KNDiag measures, crops and logs what kn-diagnostics.js did', () => 
 test('the render-stall window starts over on leaving a native pause', () => {
   const messages: string[] = [];
   const window: DiagWindow = {
+    location: { hostname: 'kaillera.example', search: '' },
     KNCapture: { allowed: () => true },
     KNAudio: { ctx: { state: 'running' } },
     addEventListener: () => undefined,
@@ -250,7 +257,7 @@ test('the render-stall window starts over on leaving a native pause', () => {
       }),
     }),
   };
-  vm.runInContext(pageScript(), vm.createContext({ window, document, navigator: {} }));
+  vm.runInContext(pageScript(), vm.createContext({ window, document, URLSearchParams, navigator: {} }));
   const diag = window.KNDiag ?? assert.fail('missing diagnostics');
   let frame = 360;
   let paused = true;
@@ -269,12 +276,13 @@ test('the render-stall window starts over on leaving a native pause', () => {
 
 test('neutral input reports touch activity at the gap and when input resumes', () => {
   const window: DiagWindow = {
+    location: { hostname: 'kaillera.example', search: '' },
     KNCapture: { allowed: () => false },
     KNAudio: { ctx: { state: 'running' } },
     addEventListener: () => undefined,
   };
   const document = { hasFocus: () => true };
-  vm.runInContext(pageScript(), vm.createContext({ window, document, navigator: {} }));
+  vm.runInContext(pageScript(), vm.createContext({ window, document, URLSearchParams, navigator: {} }));
   const diag = window.KNDiag ?? assert.fail('missing diagnostics');
   const messages: string[] = [];
   let frame = 360;
@@ -302,4 +310,24 @@ test('neutral input reports touch activity at the gap and when input resumes', (
   frame = 660;
   diag.checkFreeze(neutral);
   assert.doesNotMatch(messages[2] ?? '', /padStart/);
+});
+
+test('player switches and stored debugging preferences are inert on a hosted match', () => {
+  const search =
+    '?debug=1&knDiag&verbose=1&knperf=light&kntrace=1&kndiag=deep&desync=force&knflush=live&canvasCadence=1&tickProfile=1&rbProbe=1&tickReturnTrace=1&shadowVerbose=1&forceDesyncTick=1';
+  for (const hostname of ['kaillera.example', 'localhost.example', '127.0.0.1.example']) {
+    const options = diagnosticOptions({ hostname, search }, () => assert.fail('read a public debugging preference'));
+    assert.ok(Object.values(options).every((value) => value === false || value === null));
+  }
+  for (const hostname of ['localhost', '127.0.0.1', '[::1]']) {
+    const options = diagnosticOptions({ hostname, search }, () => null);
+    assert.ok(Object.values(options).every((value) => value === true || value === 'force'));
+  }
+});
+
+test('local stored preferences survive reload and an explicit zero overrides profiling', () => {
+  const options = diagnosticOptions({ hostname: 'localhost', search: '?tickProfile=0' }, () => '1');
+  assert.equal(options.interactive, true);
+  assert.equal(options.rollbackProbe, true);
+  assert.equal(options.tickProfile, false);
 });

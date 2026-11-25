@@ -11,6 +11,7 @@
  */
 import fs from 'node:fs';
 import { initialTransition, transition } from 'xstate';
+import { emulatorBootMachine } from '../web/src/play/emulator-boot.ts';
 import { matchReturnMachine } from '../web/src/play/match-return.ts';
 import { rejoinMachine } from '../web/src/rejoin-machine.ts';
 import { sessionFlag, sessionMachine } from '../web/src/session.ts';
@@ -203,6 +204,20 @@ const lines = [
     matchReturnMachine,
     ['install', 'grant', 'restart', 'cancel'].map((type) => [type, { type }]),
     'returnStart',
+  ),
+  '# Emulator boot',
+  '',
+  'One request owns core preparation and loader construction until completion, timeout or teardown.',
+  'Generated from `web/src/play/emulator-boot.ts`. The Quint model is `emulator_boot_fixed` in `specs/emulator_boot.qnt`.',
+  '',
+  ...drawMachine(
+    emulatorBootMachine,
+    [
+      ['request', { type: 'request', owner: new AbortController() }],
+      ['prepared', { type: 'prepared' }],
+      ['complete or cancel', { type: 'stop' }],
+    ],
+    'bootStart',
   ),
 ];
 const text = lines.join('\n');

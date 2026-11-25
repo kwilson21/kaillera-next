@@ -30,26 +30,6 @@ def test_key_tracking_releases_held_keys_on_focus_loss():
     assert "document.removeEventListener('visibilitychange', _visibilityHandler, true)" in source
 
 
-def test_key_tracking_reinstalls_listeners_when_reusing_cached_keymap():
-    source = SHARED_TS.read_text()
-
-    setup_idx = source.find("function setupKeyTracking(keymap: KeyMap | null | undefined, heldKeys: Set<number>): KeyMap {")
-    assert setup_idx != -1
-    # The whole function body.
-    setup_window = source[setup_idx : source.find("\n  }\n", setup_idx)]
-
-    cached_idx = setup_window.find("if (keymap) {")
-    cached_ensure_idx = setup_window.find("ensureKeyTrackingListeners();", cached_idx)
-    cached_return_idx = setup_window.find("return keymap;", cached_idx)
-    resolved_ensure_idx = setup_window.rfind("ensureKeyTrackingListeners();")
-    resolved_return_idx = setup_window.find("return resolved;")
-
-    assert cached_idx != -1
-    assert cached_idx < cached_ensure_idx < cached_return_idx
-    assert resolved_ensure_idx != -1
-    assert resolved_ensure_idx < resolved_return_idx
-
-
 def test_key_tracking_cached_keymap_captures_after_teardown_behavior():
     script = textwrap.dedent(
         r"""
@@ -70,9 +50,10 @@ def test_key_tracking_cached_keymap_captures_after_teardown_behavior():
           removeEventListener: (type, fn) => remove('document', type, fn),
           dispatchEvent: (evt) => dispatch('document', evt),
         };
+        let savedMap = null;
         global.window = {
           document,
-          KNState: { safeGet: () => null },
+          KNState: { safeGet: () => savedMap },
           addEventListener: (type, fn) => add('window', type, fn),
           removeEventListener: (type, fn) => remove('window', type, fn),
         };
@@ -92,6 +73,22 @@ def test_key_tracking_cached_keymap_captures_after_teardown_behavior():
         if (!secondHeld.has(65)) throw new Error('reused keymap did not recapture keydown');
         document.dispatchEvent({ type: 'keyup', keyCode: 65 });
         if (secondHeld.has(65)) throw new Error('keyup did not release reused keymap input');
+        window.KNState.remapActive = true;
+        document.dispatchEvent({ type: 'keydown', keyCode: 81 });
+        if (secondHeld.has(81)) throw new Error('the key used to bind A was delivered to the game');
+        savedMap = '{"81":0,"68":16}';
+        window.KNShared.refreshKeyMap();
+        window.KNState.remapActive = false;
+        if (reusedKeymap[81] !== 0 || 65 in reusedKeymap) throw new Error('active map did not take the new binding');
+        document.dispatchEvent({ type: 'keydown', keyCode: 68 });
+        if (!secondHeld.has(68) || firstHeld.has(68)) throw new Error('rebind transferred keyboard ownership');
+        savedMap = null;
+        window.KNShared.refreshKeyMap();
+        if (reusedKeymap[67] !== 0 || 81 in reusedKeymap || !secondHeld.has(68)) throw new Error('reset lost map or hold');
+        document.dispatchEvent({ type: 'keyup', keyCode: 68 });
+        if (secondHeld.has(68)) throw new Error('reset lost keyup');
+        window.KNShared.teardownKeyTracking();
+        if (window.KNShared.refreshKeyMap()) throw new Error('lobby refresh took keyboard ownership');
         """
     )
 

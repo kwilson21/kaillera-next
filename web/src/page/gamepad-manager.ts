@@ -276,8 +276,7 @@ export const createGamepadManager = (env: GamepadEnv) => {
   // { gamepadIndex: { id, profileName, profile } }
   const detected: Record<string, Detected> = {};
 
-  // Previous gamepad IDs for change detection
-  let prevIds = new Map<number, string>();
+  let previousPadCount = 0;
 
   // Resting position of the stick axes of profiles with axisCenter: 'auto'.
   // { gamepadIndex: { axisIndex: restValue } }, and the reading awaiting a second, matching poll.
@@ -333,13 +332,12 @@ export const createGamepadManager = (env: GamepadEnv) => {
 
   // ── Polling / Scanning ───────────────────────────────────────────────
 
-  const poll = (): void => {
+  const scan = (slotChanged: boolean): void => {
     const gamepads = env.getGamepads();
-    let changed = false;
-    const currentIds = new Map<number, string>();
+    let changed = slotChanged;
 
     // Scan all gamepad slots
-    for (let i = 0; i < gamepads.length; i++) {
+    for (let i = 0; i < Math.max(previousPadCount, gamepads.length); i++) {
       const gp = gamepads[i];
       if (!gp) {
         // Gamepad gone — remove if was detected
@@ -358,32 +356,48 @@ export const createGamepadManager = (env: GamepadEnv) => {
         continue;
       }
 
-      currentIds.set(i, gp.id);
-
       // New or changed gamepad
       let entry = detected[i];
-      if (!entry || prevIds.get(i) !== gp.id) {
+      if (!entry || entry.id !== gp.id) {
         const profile = resolveProfile(gp.id, gp.mapping);
         entry = { id: gp.id, mapping: gp.mapping, profileName: profile.name, profile };
         detected[i] = entry;
         delete centers[i];
         delete centerCandidates[i];
         changed = true;
-
-        // Auto-assign to player slot if unassigned
-        if (assignments[playerSlot] === undefined) {
-          assignments[playerSlot] = i;
-        }
       }
 
       updateCenter(i, gp, entry.profile);
     }
 
-    prevIds = currentIds;
+    previousPadCount = gamepads.length;
+    if (assignments[playerSlot] === undefined) {
+      const assigned = Object.values(assignments);
+      const available = Object.keys(detected)
+        .map(Number)
+        .find((index) => !assigned.includes(index));
+      if (available !== undefined) {
+        assignments[playerSlot] = available;
+        changed = true;
+      }
+    }
 
     if (changed && onUpdate) {
       onUpdate();
     }
+  };
+
+  const poll = (): void => scan(false);
+
+  const changeSlot = (slot: number): boolean => {
+    if (slot === playerSlot) return false;
+    const selected = assignments[playerSlot];
+    if (selected !== undefined) {
+      assignments[slot] ??= selected;
+      delete assignments[playerSlot];
+    }
+    playerSlot = slot;
+    return true;
   };
 
   // ── Read Gamepad ─────────────────────────────────────────────────────
@@ -480,11 +494,10 @@ export const createGamepadManager = (env: GamepadEnv) => {
 
   return {
     start: (opts?: StartOptions | null): void => {
-      playerSlot = opts?.playerSlot ?? 0;
+      const slotChanged = changeSlot(opts?.playerSlot ?? 0);
       onUpdate = opts?.onUpdate ?? null;
 
-      // Immediate first poll
-      poll();
+      scan(slotChanged);
 
       // Also listen for browser events for faster response
       env.listen(poll);
@@ -502,6 +515,9 @@ export const createGamepadManager = (env: GamepadEnv) => {
       env.unlisten(poll);
     },
 
+    setPlayerSlot: (slot: number): void => {
+      if (changeSlot(slot)) scan(true);
+    },
     readGamepad,
     axisTransform,
     axisCenter,

@@ -48,6 +48,6 @@ def test_guest_writes_host_save_ram_at_start_and_restores_its_own_at_stop():
     stop = SRC[SRC.index("  const stop = () => {") :]
     # In that order: the host-state wait cleared, the guest's own save file put
     # back, then the final flush, which carries the restore's log line.
-    calls = ("_clearHostInitialStateWait();", "_restoreLocalSaveFile();", "_flushSyncLog();")
+    calls = ("_clearHostInitialStateWait();", "_restoreLocalSaveFile();", "_flushSyncLog({ final: true });")
     clear, restore, flush = (stop.index(call) for call in calls)
     assert clear < restore < flush

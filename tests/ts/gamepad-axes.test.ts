@@ -271,3 +271,47 @@ test('a saved profile that does not fit is ignored and the pad reads as built in
     assert.deepStrictEqual(runManager(stored), builtIn, `stored ${stored}`);
   }
 });
+
+test('the selected controller follows a seat change and losing it releases the assignment', () => {
+  const pad = (id: string): PadReading => ({ id, mapping: 'standard', buttons: [{ pressed: true }], axes: [] });
+  const pads = [pad('first'), pad('selected')];
+  let updates = 0;
+  let poll = (): void => {};
+  const manager = createGamepadManager({
+    getGamepads: () => pads,
+    state: () => undefined,
+    now: () => 0,
+    setItem: () => {},
+    listen: (scan) => {
+      poll = scan;
+    },
+    unlisten: () => {},
+    every: () => () => {},
+    warn: () => {},
+  });
+  manager.start({
+    playerSlot: 0,
+    onUpdate: () => {
+      updates++;
+    },
+  });
+  manager.reassignSlot(0, 1);
+  for (const slot of [1, 2, 3, 0]) {
+    const before = updates;
+    manager.setPlayerSlot(slot);
+    assert.deepEqual(Object.keys(manager.getAssignments()), [String(slot)]);
+    assert.equal(manager.getActiveProfile(slot)?.id, 'selected');
+    assert.equal(manager.readGamepad(slot)?.buttons, 1);
+    assert.equal(updates, before + 1);
+    manager.setPlayerSlot(slot);
+    assert.equal(updates, before + 1);
+  }
+  pads.pop();
+  poll();
+  assert.equal(manager.getActiveProfile(0)?.id, 'first');
+  pads.pop();
+  poll();
+  assert.equal(manager.hasGamepad(0), false);
+  assert.equal(manager.readGamepad(0), null);
+  manager.stop();
+});

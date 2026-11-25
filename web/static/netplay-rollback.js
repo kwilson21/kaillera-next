@@ -267,13 +267,15 @@
   'use strict';
 
   const _urlParams = new URLSearchParams(window.location.search);
-  const _knPerfLight = _urlParams.get('knperf') === 'light';
-  const _knTraceDiagnostics = _urlParams.get('kntrace') === '1';
-  const _knDeepDiagnostics = _urlParams.get('kndiag') === 'deep' || _urlParams.get('desync') === 'deep';
+  const _diagnosticOptions = window.KNDiag?.options ?? {};
+  const _isLocalDev = _diagnosticOptions.local;
+  const _knPerfLight = _diagnosticOptions.light;
+  const _knTraceDiagnostics = _diagnosticOptions.trace;
+  const _knDeepDiagnostics = _diagnosticOptions.deep;
   const _knRuntimeDiagnostics = !_knPerfLight && _knDeepDiagnostics;
   // Read the shared preference at capture time so live toggles take effect.
   const _knScreenshots = () => window.KNCapture?.allowed() === true;
-  const _knLiveFlush = _urlParams.get('knflush') === 'live';
+  const _knLiveFlush = _diagnosticOptions.liveFlush;
   // Local-dev-only: synthesize an Emscripten RuntimeError abort at a selected frame.
   const _forceAbortFrame = (() => {
     const v = parseInt(_urlParams.get('knForceAbort') ?? '', 10);
@@ -1209,7 +1211,7 @@
   };
   // Diagnostic accessor — call window.knAdaptiveDebug() in the console
   // to inspect what the adaptive sizer is currently computing.
-  if (typeof window !== 'undefined') {
+  if (_isLocalDev) {
     window.knAdaptiveDebug = () => {
       if (_stepCostStatsDirty) _recomputeStepCostStats();
       const burst = _adaptiveReplayBurst();
@@ -1261,16 +1263,8 @@
   // circular buffer at window.__knTickProfile so a probe can identify
   // which phase dominates tick time. Off by default; recording costs
   // ~5 performance.now() calls per tick when on, ~0 when off.
-  const RB_CANVAS_CADENCE = _urlParams.get('canvasCadence') === '1';
-  const RB_TICK_PROFILE =
-    RB_CANVAS_CADENCE ||
-    (() => {
-      try {
-        const raw = _urlParams.get('tickProfile') ?? localStorage.getItem('kn-tick-profile');
-        if (raw === '1') return true;
-      } catch (_) {}
-      return false;
-    })();
+  const RB_CANVAS_CADENCE = _diagnosticOptions.cadence;
+  const RB_TICK_PROFILE = _diagnosticOptions.tickProfile;
   if (RB_TICK_PROFILE) window.__knTickProfile = [];
   let _canvasCadence = null;
   const _resetCanvasCadence = () => {
@@ -1316,13 +1310,7 @@
   //       one tick, then back.
   // Call window.knProbeRollback() in console for an analysis around
   // the most recent rollback boundary.
-  const RB_PROBE = (() => {
-    try {
-      const raw = _urlParams.get('rbProbe') ?? localStorage.getItem('kn-rb-probe');
-      if (raw === '1') return true;
-    } catch (_) {}
-    return false;
-  })();
+  const RB_PROBE = _diagnosticOptions.rollbackProbe;
   if (RB_PROBE) window.__knRbProbe = [];
   let _probeHashCanvas = null;
   let _probeHashCtx = null;
@@ -1362,7 +1350,7 @@
     });
     if (buf.length > 1200) buf.splice(0, buf.length - 1200);
   };
-  if (typeof window !== 'undefined') {
+  if (_isLocalDev) {
     window.knProbeRollback = (lookbackTicks = 60, lookaheadTicks = 60) => {
       const buf = window.__knRbProbe || [];
       if (!buf.length) return { error: 'no samples — load with ?rbProbe=1 and play through a rollback first' };
@@ -1442,7 +1430,7 @@
   // Console helper: window.knTickProfileSummary() returns a digest of the
   // last N ticks (default 600 = 10 s at 60 Hz). Use after enabling
   // ?tickProfile=1 and playing through the stuttery period.
-  if (typeof window !== 'undefined') {
+  if (_isLocalDev) {
     window.knTickProfileSummary = (n = 600) => {
       const buf = window.__knTickProfile || [];
       if (!buf.length) return { error: 'no samples — load with ?tickProfile=1' };
@@ -2199,7 +2187,7 @@
   //
   // Usage in console (after demo enters a match with ?shadowEmu=1):
   //   await window.knShadowHashCheck()
-  if (typeof window !== 'undefined') {
+  if (_isLocalDev) {
     let _hashCheckSeq = 0;
     window.knShadowHashCheck = async (timeoutMs = 1000) => {
       if (!_rbShadowWorker || !_rbShadowReady) {
@@ -3692,7 +3680,7 @@
             coreBase: `/api/core-worker/${window._knCoreWorkerHash}/`,
             coreSettings,
             controllerMask: _shadowControllerMask(),
-            verbose: _urlParams.get('shadowVerbose') === '1',
+            verbose: _diagnosticOptions.shadowVerbose,
           },
           [offscreen, romBuffer, stateBuffer],
         );
@@ -4379,8 +4367,7 @@
 
   // ── window.knDiag — interactive diagnostics for devtools console ──
   //
-  // Gated behind a debug flag so production users don't have an easily
-  // discoverable surface for poking at emulator internals. Enable via:
+  // Developer console controls are available on loopback origins. Enable via:
   //   - ?knDiag=1 URL parameter (ephemeral, one page load)
   //   - localStorage.setItem('kn-debug', '1') (persistent)
   //
@@ -4394,26 +4381,10 @@
   // localStorage. Dev builds throw on invariant violations so the test
   // suite catches regressions. Production builds log and continue.
   // (Rollback integrity spec §Core principle.)
-  const KN_DEV_BUILD = (() => {
-    try {
-      if (new URLSearchParams(window.location.search).get('debug') === '1') return true;
-      if (window.localStorage?.getItem('KN_DEV_BUILD') === '1') return true;
-    } catch (_) {}
-    return false;
-  })();
-  window.KN_DEV_BUILD = KN_DEV_BUILD;
-
-  const _knDiagEnabled = (() => {
-    try {
-      if (window.KN_DEV_BUILD) return true;
-      if (new URLSearchParams(window.location.search).has('knDiag')) return true;
-      if (localStorage.getItem('kn-debug') === '1') return true;
-    } catch (_) {}
-    return false;
-  })();
+  window.KN_DEV_BUILD = _diagnosticOptions.devBuild;
 
   window.knDiag =
-    _knDiagEnabled &&
+    _diagnosticOptions.interactive &&
     (window.knDiag ||
       (() => {
         const getMod = () => window.EJS_emulator?.gameManager?.Module;
@@ -6846,15 +6817,8 @@
   const SYNC_LOG_FLUSH_MAX_ENTRIES = 5000;
   let _syncLogAckedSeq = -1;
 
-  const _isLocalDev = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   const SYNC_LOG_FLUSH_MS = _isLocalDev && _knLiveFlush ? 1000 : 5000;
-  const _knVerboseSyncConsole = (() => {
-    try {
-      return _urlParams.get('verbose') === '1' || _urlParams.has('debug') || localStorage.getItem('kn-debug') === '1';
-    } catch (_) {
-      return _urlParams.get('verbose') === '1' || _urlParams.has('debug');
-    }
-  })();
+  const _knVerboseSyncConsole = _diagnosticOptions.verbose;
   const _isConsoleCriticalSyncLog = (msg) => {
     const text = String(msg);
     return (
@@ -7159,7 +7123,7 @@
     return base;
   };
 
-  const _buildFlushPayload = () => ({
+  const _buildFlushPayload = (final = false) => ({
     matchId: _cachedMatchId || KNState.matchId,
     slot: window._playerSlot,
     playerName: (() => {
@@ -7175,7 +7139,11 @@
     // ring (new epoch) that restarts seq at 0, and without this the server
     // would dedupe every new entry away against the old ring's last_seq.
     epoch: _syncLogRing.epoch,
-    entries: _syncLogRing.entriesAfter(_syncLogAckedSeq, SYNC_LOG_FLUSH_MAX_ENTRIES),
+    entries: _syncLogRing.entriesAfter(
+      _syncLogAckedSeq,
+      final ? Infinity : SYNC_LOG_FLUSH_MAX_ENTRIES,
+      final ? Infinity : undefined,
+    ),
     summary: {
       desyncs: KNState.sessionStats?.desyncs ?? 0,
       stalls: KNState.sessionStats?.stalls ?? 0,
@@ -7207,7 +7175,7 @@
       rbTransport: _useCRollback ? _rbTransport : 'n/a',
     },
     // Input audit records the server hasn't acked yet (see _auditPending).
-    audit: { epoch: _auditEpoch, entries: _auditPending.slice(0, AUDIT_FLUSH_MAX) },
+    audit: { epoch: _auditEpoch, entries: _auditPending.slice(0, final ? undefined : AUDIT_FLUSH_MAX) },
   });
 
   // Advance the flush cursor only from a server-confirmed lastSeq — never
@@ -7237,46 +7205,71 @@
     }
   };
 
-  // fetch(..., {keepalive:true}) bodies are capped at 64KB by the browser —
-  // silently dropped (not even a network error) past that. The periodic
-  // fallback (used while the socket is connected-but-failing) can carry a
-  // full flush without keepalive; only the pagehide/hidden safety-net flush
-  // needs keepalive (socket is already gone), so only that call site caps
-  // entries to fit the 64KB limit. It leaves out the input audit records,
-  // which wouldn't fit beside the log entries.
-  const _KEEPALIVE_ENTRY_BUDGET = 60 * 1024;
-  const _capPayloadEntriesForKeepalive = (payload) => {
-    const { audit: _audit, ...rest } = payload;
-    const entries = rest.entries || [];
-    let bytes = 0;
-    let start = entries.length;
-    while (start > 0) {
-      const size = (entries[start - 1].msg?.length || 0) + 64;
-      if (bytes + size > _KEEPALIVE_ENTRY_BUDGET) break;
-      bytes += size;
-      start--;
-    }
-    return start > 0 ? { ...rest, entries: entries.slice(start) } : rest;
-  };
-
-  const _flushViaHttp = (payload, { keepalive = false } = {}) => {
-    const token = _cachedUploadToken || KNState.uploadToken;
-    const room = _cachedRoom || KNState.room || '';
-    if (!token || !room) return;
-    const body = keepalive ? _capPayloadEntriesForKeepalive(payload) : payload;
+  const _KEEPALIVE_BUDGET = 60 * 1024;
+  const _logEncoder = new TextEncoder();
+  const _flushViaHttp = async (payload, { url, final }) => {
+    if (!url) return false;
     try {
-      fetch(`/api/session-log?token=${encodeURIComponent(token)}&room=${encodeURIComponent(room)}`, {
+      const body = JSON.stringify(payload);
+      const options = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        ...(keepalive ? { keepalive: true } : {}),
-      })
-        .then((res) => (res.ok ? res.json() : null))
-        // Ack against what was sent: a keepalive body has no audit, so its
-        // auditLastSeq (the server's stored position) must not move ours.
-        .then((json) => _ackSyncLogFlush(json, body))
-        .catch(() => {});
-    } catch (_) {}
+        body,
+        keepalive: final && _logEncoder.encode(body).length <= _KEEPALIVE_BUDGET,
+      };
+      let response = await fetch(url, options);
+      // A concurrent socket append may hold this slot's DB writer briefly.
+      if (final && response.status === 429) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        response = await fetch(url, options);
+      }
+      if (!response.ok) return false;
+      const ack = _peerBoundary().ack('session-log', await response.json());
+      if (!ack) return false;
+      _ackSyncLogFlush(ack, payload);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  // Keep contiguous prefixes of both streams; advancing past a gap would
+  // make the server deduplicate missing entries on a later flush.
+  const _finalBatchEnd = (entries, offset, maxCount, byteBudget) => {
+    let end = offset;
+    let bytes = 0;
+    while (end < entries.length && end - offset < maxCount) {
+      const size = _logEncoder.encode(JSON.stringify(entries[end])).length + 1;
+      if (end > offset && bytes + size > byteBudget) break;
+      bytes += size;
+      end++;
+    }
+    return end;
+  };
+
+  const _flushFinalLog = async (payload, target) => {
+    let logOffset = 0;
+    let auditOffset = 0;
+    const budget = target.keepalive ? _KEEPALIVE_BUDGET : 2 * 1024 * 1024;
+    // The envelope contains the same frozen summary and context on every batch.
+    const empty = { ...payload, entries: [], audit: { ...payload.audit, entries: [] } };
+    const available = budget - _logEncoder.encode(JSON.stringify(empty)).length;
+    do {
+      const logsRemain = logOffset < payload.entries.length;
+      const auditsRemain = auditOffset < payload.audit.entries.length;
+      const logBudget = auditsRemain ? Math.floor(available * 0.75) : available;
+      const auditBudget = logsRemain ? available - logBudget : available;
+      const logEnd = _finalBatchEnd(payload.entries, logOffset, SYNC_LOG_FLUSH_MAX_ENTRIES, logBudget);
+      const auditEnd = _finalBatchEnd(payload.audit.entries, auditOffset, AUDIT_FLUSH_MAX, auditBudget);
+      const batch = {
+        ...payload,
+        entries: payload.entries.slice(logOffset, logEnd),
+        audit: { epoch: payload.audit.epoch, entries: payload.audit.entries.slice(auditOffset, auditEnd) },
+      };
+      if (!(await _flushViaHttp(batch, target))) return;
+      logOffset = logEnd;
+      auditOffset = auditEnd;
+    } while (logOffset < payload.entries.length || auditOffset < payload.audit.entries.length);
   };
 
   // Drain the C engine's rb_log() buffer into the JS sync log, so its lines
@@ -7318,56 +7311,66 @@
       }
     } catch (_) {}
   };
-  const _flushSyncLog = () => {
+  const _flushSyncLog = ({ final = false, keepalive = false } = {}) => {
     const matchId = _cachedMatchId || KNState.matchId;
     if (!matchId) return;
+    const token = _cachedUploadToken || KNState.uploadToken;
+    const room = _cachedRoom || KNState.room;
+    const url =
+      token && room ? `/api/session-log?token=${encodeURIComponent(token)}&room=${encodeURIComponent(room)}` : null;
+    const target = { url, keepalive, final: final || keepalive };
     // Drain the C debug log into JS sync log BEFORE building the flush
     // payload so the new entries are included.
     _drainCDebugLog();
     try {
-      const payload = _buildFlushPayload();
+      const payload = _buildFlushPayload(target.final);
+      if (target.final) return _flushFinalLog(payload, target);
       if (socket?.connected) {
         let acked = false;
         socket.emit('session-log', payload, (ack) => {
+          if (payload.epoch !== _syncLogRing.epoch) return;
+          const accepted = _peerBoundary().ack('session-log', ack);
+          if (!accepted) return;
           acked = true;
           _socketFlushFails = 0;
-          // The server acks a flush it turned away with no data at all; an
-          // ack off its schema is dropped, and acks nothing.
-          _ackSyncLogFlush(_peerBoundary().ack('session-log', ack), payload);
+          _ackSyncLogFlush(accepted, payload);
         });
         // If no ack within 5s, count as failure and try HTTP next time
         setTimeout(() => {
-          if (!acked) {
+          if (!acked && payload.epoch === _syncLogRing.epoch) {
             _socketFlushFails++;
-            if (_socketFlushFails >= 2) _flushViaHttp(payload);
+            if (_socketFlushFails >= 2) void _flushViaHttp(payload, target);
           }
         }, 5000);
       } else {
-        _flushViaHttp(payload);
+        return _flushViaHttp(payload, target);
       }
     } catch (_) {
       // Payload construction failed — try HTTP with minimal payload
       try {
-        _flushViaHttp({
-          matchId,
-          slot: window._playerSlot,
-          playerName: 'Player',
-          mode: _modeName(),
-          entries: [],
-          summary: {
-            desyncs: 0,
-            stalls: 0,
-            reconnects: 0,
-            frames: _frameNum,
-            duration_sec: Math.round((performance.now() - _startTime) / 1000),
-            peers: 0,
+        return _flushViaHttp(
+          {
+            matchId,
+            slot: window._playerSlot,
+            playerName: 'Player',
+            mode: _modeName(),
+            entries: [],
+            summary: {
+              desyncs: 0,
+              stalls: 0,
+              reconnects: 0,
+              frames: _frameNum,
+              duration_sec: Math.round((performance.now() - _startTime) / 1000),
+              peers: 0,
+            },
+            context: {
+              ua: navigator.userAgent,
+              mobile: /Mobi|Android/i.test(navigator.userAgent),
+              forkedCore: !!window.EJS_emulator?.gameManager?.Module?._kn_set_deterministic,
+            },
           },
-          context: {
-            ua: navigator.userAgent,
-            mobile: /Mobi|Android/i.test(navigator.userAgent),
-            forkedCore: !!window.EJS_emulator?.gameManager?.Module?._kn_set_deterministic,
-          },
-        });
+          target,
+        );
       } catch (_2) {}
     }
   };
@@ -10497,6 +10500,7 @@
   // already leave players out, and this only brings that sooner.
   const START_LOAD_DEADLINE_MS = (() => {
     const DEFAULT_MS = 60000;
+    if (!_isLocalDev) return DEFAULT_MS;
     const asked = Number(_urlParams.get('knStartLoadMs'));
     if (!_urlParams.has('knStartLoadMs') || !Number.isFinite(asked)) return DEFAULT_MS;
     return Math.min(DEFAULT_MS, Math.max(5000, Math.floor(asked)));
@@ -13437,8 +13441,7 @@
         // without going through initEngine() again), init() must run here as a fallback.
         // The idempotent guard in init() makes double-calling harmless.
         VirtualGamepad.init();
-        const detected = window.GamepadManager ? GamepadManager.getDetected() : [];
-        if (detected.length > 0) VirtualGamepad.setVisible(false);
+        if (window.GamepadManager?.hasGamepad(_playerSlot)) VirtualGamepad.setVisible(false);
       }
 
       // Late join: request state from host instead of normal sync flow.
@@ -13733,7 +13736,7 @@
     // Host broadcasts effective delay so all players use the same value.
     // Independent calculation can disagree due to asymmetric RTT/jitter.
     if (_playerSlot === 0) {
-      const transportOverride = window._knTransportOverride;
+      const transportOverride = _isLocalDev ? window._knTransportOverride : undefined;
       const lobbyTransport = _config?.dualInputEnabled === true ? 'dual' : 'reliable';
       const transportMode = ['reliable', 'unreliable', 'dual'].includes(transportOverride)
         ? transportOverride
@@ -15752,7 +15755,7 @@
       `REPLAY-NORUN f=${_frameNum} rbFrame=${rbFrame} ` +
         `replayRemaining=${replayRemaining} tick=${performance.now().toFixed(1)}`,
     );
-    if (window.KN_DEV_BUILD) {
+    if (_diagnosticOptions.devBuild) {
       throw new Error('REPLAY-NORUN: stepOneFrame did not emulate during replay');
     }
   };
@@ -16727,7 +16730,7 @@
     // For trying a candidate map on a ROM that has none yet (see
     // docs/address-maps.md): ?desync=force runs the detector anyway, with
     // the map of the ROM whose hash is in ?desyncMap=, or SSB64 US's.
-    const desyncParam = _urlParams.get('desync');
+    const desyncParam = _diagnosticOptions.desync;
     if (lsMod && window.KNDesync && desyncParam !== 'off') {
       const mapFor = window.KNCore?.addressMapFor;
       const forced = desyncParam === 'force';
@@ -17116,7 +17119,7 @@
         });
       },
     });
-    if (window._KN_DIAG) _diagInstallHooks();
+    if (_isLocalDev && window._KN_DIAG) _diagInstallHooks();
 
     // DIAG: one-time startup banner for log self-description
     const ua = navigator.userAgent;
@@ -17175,26 +17178,11 @@
     setStatus('Connected -- game on!');
     _startTime = performance.now();
 
-    // Closing or backgrounding the page can interrupt the interval and
-    // disconnect the socket. Upload its last entries with HTTP keepalive.
-    if (!window._knFlushUnloadHandler) {
-      const handler = () => {
-        try {
-          // Drain C debug log one last time so we capture final rb_log entries
-          _drainCDebugLog();
-          const payload = _buildFlushPayload();
-          // Only use HTTP here — Socket.IO is already torn down. keepalive
-          // is required for delivery to survive unload, which caps the
-          // body at 64KB, so entries are capped to fit.
-          _flushViaHttp(payload, { keepalive: true });
-        } catch (_) {}
-      };
-      window._knFlushUnloadHandler = handler;
-      window.addEventListener('pagehide', handler);
-      // visibilitychange to 'hidden' is the mobile-Safari-friendly equivalent
-      // for app backgrounding (pagehide doesn't always fire there).
+    // play.js handles pagehide for both engines; some mobile browsers
+    // only signal an app switch with visibilitychange.
+    if (!_unloadVisChangeHandler) {
       _unloadVisChangeHandler = () => {
-        if (document.visibilityState === 'hidden') handler();
+        if (document.visibilityState === 'hidden') void _flushSyncLog({ keepalive: true });
       };
       document.addEventListener('visibilitychange', _unloadVisChangeHandler);
     }
@@ -17798,14 +17786,7 @@
   const _tickReturnCounts = Object.create(null);
   const _tickReturnRing = []; // [{ t, frame, tag }]
   const _TICK_RETURN_RING_MAX = 240;
-  const _tickReturnTraceEnabled = (() => {
-    try {
-      const raw = _urlParams.get('tickReturnTrace') ?? localStorage.getItem('kn-tick-return-trace');
-      return raw === '1';
-    } catch (_) {
-      return false;
-    }
-  })();
+  const _tickReturnTraceEnabled = _diagnosticOptions.tickReturnTrace;
   const _markTickReturn = (tag) => {
     _tickReturnCounts[tag] = (_tickReturnCounts[tag] || 0) + 1;
     if (_tickReturnTraceEnabled) {
@@ -17827,7 +17808,7 @@
     _tickLastCheckpoint = name;
     _tickCheckpointCounts[name] = (_tickCheckpointCounts[name] || 0) + 1;
   };
-  if (typeof window !== 'undefined') {
+  if (_isLocalDev) {
     window.knTickReturnStats = () => ({
       counts: { ..._tickReturnCounts },
       recent: _tickReturnRing.slice(-60),
@@ -19410,7 +19391,7 @@
               `FATAL-RING-STALE f=${staleF} ring[${staleIdx}]=${staleActual} ` +
                 `curF=${_frameNum} tick=${performance.now().toFixed(1)}`,
             );
-            if (window.KN_DEV_BUILD) {
+            if (_diagnosticOptions.devBuild) {
               throw new Error(`FATAL-RING-STALE: ring[${staleIdx}]=${staleActual} but needed frame ${staleF}`);
             }
           }
@@ -19434,7 +19415,7 @@
               `RB-LIVE-MISMATCH f=${mf} ring=0x${ringHash.toString(16)} ` +
                 `live=0x${liveHash.toString(16)} curF=${_frameNum}`,
             );
-            if (window.KN_DEV_BUILD) {
+            if (_diagnosticOptions.devBuild) {
               throw new Error(
                 `RB-LIVE-MISMATCH: ring=0x${ringHash.toString(16)} live=0x${liveHash.toString(16)} at f=${mf}`,
               );
@@ -20728,10 +20709,12 @@
   // mispredict every frame now that the C engine matches predictions exactly.
   const _deadbandStick = KNShared.createStickDeadband();
 
-  window.debugInput = () => {
-    window._debugInputUntil = performance.now() + 3000;
-    console.log('[input-debug] Logging input for 3 seconds — press buttons now');
-  };
+  if (_isLocalDev) {
+    window.debugInput = () => {
+      window._debugInputUntil = performance.now() + 3000;
+      console.log('[input-debug] Logging input for 3 seconds — press buttons now');
+    };
+  }
 
   // -- Inline Web Worker for hash + compress/decompress ----------------------
   //
@@ -22652,7 +22635,7 @@
     // The final flush covers anything a pending critical flush would send.
     clearTimeout(_criticalFlushTimer);
     _criticalFlushTimer = null;
-    _flushSyncLog();
+    _flushSyncLog({ final: true });
     _resetInputAudit();
     _cachedMatchId = null;
     _cachedRoom = null;
@@ -22662,14 +22645,6 @@
     if (_flushInterval) {
       clearInterval(_flushInterval);
       _flushInterval = null;
-    }
-    // Drop the unload/hidden flush listeners so their closure (which retains
-    // _drainCDebugLog, _buildFlushPayload, _flushViaHttp) can be GC'd between
-    // game cycles. The window flag is what guards re-registration in
-    // startGameSequence, so it must be cleared too.
-    if (window._knFlushUnloadHandler) {
-      window.removeEventListener('pagehide', window._knFlushUnloadHandler);
-      window._knFlushUnloadHandler = null;
     }
     if (_unloadVisChangeHandler) {
       document.removeEventListener('visibilitychange', _unloadVisChangeHandler);
@@ -23150,18 +23125,7 @@
       return _externalTickPaused;
     },
     isTickPaused: () => _externalTickPaused,
-    // Force the keymap to be re-read from localStorage / EJS controls /
-    // DEFAULT_N64_KEYMAP. Call after ControllerSettings saves a new
-    // mapping (or clears it) — the engine caches _p1KeyMap after the
-    // first setupKeyTracking call at emulator-ready, so without this
-    // refresh in-place remap edits don't reach readLocalInput.
-    refreshKeyMap: () => {
-      _p1KeyMap = null;
-      try {
-        setupKeyTracking();
-      } catch (_) {}
-      return !!_p1KeyMap;
-    },
+    refreshKeyMap: KNShared.refreshKeyMap,
     setDemoMode: (on) => {
       const next = !!on;
       const changed = _demoMode !== next;
@@ -23319,6 +23283,7 @@
     },
     // C-level rollback diagnostics
     selfTest: () => {
+      if (!_isLocalDev) return 'available on localhost only';
       // Self-test requires retro_run from C which doesn't work in ASYNC mode.
       // Use pure lockstep determinism verification instead.
       return 'not available (ASYNC mode — use lockstep hash check)';
@@ -23413,6 +23378,8 @@
   window.NetplayLockstep = NetplayRollbackApi;
 
   // Global console helpers
-  window.knSelfTest = () => window.NetplayRollback?.selfTest?.() ?? 'not available';
-  window.knRollbackStats = () => window.NetplayRollback?.getRollbackStats?.() ?? 'not available';
+  if (_isLocalDev) {
+    window.knSelfTest = () => window.NetplayRollback?.selfTest?.() ?? 'not available';
+    window.knRollbackStats = () => window.NetplayRollback?.getRollbackStats?.() ?? 'not available';
+  }
 })();

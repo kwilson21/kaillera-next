@@ -120,9 +120,10 @@
   let _audioStreamDest = null; // MediaStreamAudioDestinationNode (host only)
   let _unmuteAbort = null; // AbortController for the unmute-banner gesture listeners; cleared in stop()
 
-  // -- Sync log ring buffer (matches lockstep — uploaded on game end) --------
+  // The match owns its log epoch through its last acknowledged upload.
   const SYNC_LOG_MAX = 5000;
-  const _syncLogRing = KNShared.createSyncLogRing(SYNC_LOG_MAX);
+  let _syncLogRing = KNShared.createSyncLogRing(SYNC_LOG_MAX);
+  let _logUpload = null;
 
   const _syncLog = (msg) => {
     _syncLogRing.push({ t: performance.now(), f: 0, msg });
@@ -130,6 +131,50 @@
   };
 
   const exportSyncLog = () => _syncLogRing.export();
+
+  const startSessionLog = (config) => {
+    if (config.isSpectator || config.playerSlot == null || !config.matchId) return null;
+    const { matchId, playerName, playerSlot: slot, sessionId: room, socket: connection } = config;
+    const boundary = window.KNCore.protocol.createBoundary((line) => console.warn(line));
+    let token = config.uploadToken;
+    const started = performance.now();
+    return _rules.startLogUpload(_syncLogRing, async (epoch, entries, keepalive) => {
+      if (_config === config && KNState.uploadToken) token = KNState.uploadToken;
+      const payload = {
+        matchId,
+        playerName,
+        slot,
+        mode: 'streaming',
+        epoch,
+        entries,
+        summary: { duration_sec: Math.round((performance.now() - started) / 1000) },
+      };
+      if (!keepalive && connection.connected) {
+        const ack = await new Promise((resolve) => {
+          connection.timeout(4000).emit('session-log', payload, (err, value) => resolve(err ? null : value));
+        });
+        const accepted = ack && boundary.ack('session-log', ack);
+        if (accepted) return accepted.lastSeq;
+      }
+      if (!token || !room) return -1;
+      const body = JSON.stringify(payload);
+      // An individual oversized line still belongs in the log. The normal
+      // HTTP path can carry it while the page remains open.
+      const canKeepAlive = keepalive && new Blob([body]).size <= 60 * 1024;
+      const response = await fetch(
+        `/api/session-log?token=${encodeURIComponent(token)}&room=${encodeURIComponent(room)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          keepalive: canKeepAlive,
+        },
+      );
+      if (!response.ok) return -1;
+      return boundary.ack('session-log', await response.json())?.lastSeq ?? -1;
+    });
+  };
+  const flushSyncLog = ({ keepalive = false } = {}) => _logUpload?.flush(keepalive);
 
   // Expose for Playwright
   window._playerSlot = _playerSlot;
@@ -311,7 +356,7 @@
     if (deadlines) {
       for (const sid of deadlines.armed()) if (!_isListed(sid)) deadlines.forget(sid);
       const listed = [...Object.keys(_knownPlayers), ..._knownSpectators].filter(_isListed);
-      for (const sid of listed) if (_peers[sid]?.dc?.readyState !== 'open') deadlines.arm(sid);
+      for (const sid of listed) if (_offerRetry(sid) !== 'none') deadlines.arm(sid);
     }
     // After this handler, so the roster's own effect is observed first.
     if (_heldOffers.size) queueMicrotask(_decideHeldOffers);
@@ -360,9 +405,10 @@
   // A member the host's latest roster lists: a player other than this page, or a spectator.
   const _isListed = (sid) => (sid !== socket?.id && Object.hasOwn(_knownPlayers, sid)) || _knownSpectators.has(sid);
 
-  const _reofferDue = (sid) =>
-    window.KNCore?.streaming?.reofferDue?.(_playerSlot === 0, _isListed(sid), _peers[sid]?.dc?.readyState === 'open') ??
-    false;
+  const _offerRetry = (sid) => {
+    const peer = _peers[sid];
+    return _rules.retryOffer(_playerSlot === 0, _isListed(sid), peer?.dc?.readyState === 'open', !!peer?.mediaPending);
+  };
 
   // The deadlines, made on first use; null without the bundle's rules (a
   // page that met an older bundle offers once, as before).
@@ -370,7 +416,10 @@
   const _deadlines = () => {
     if (_reofferDeadlines === undefined) {
       _reofferDeadlines =
-        window.KNCore?.streaming?.startReofferDeadlines?.({ due: _reofferDue, reoffer: _reofferNow }) ?? null;
+        window.KNCore?.streaming?.startReofferDeadlines?.({
+          due: (sid) => _offerRetry(sid) !== 'none',
+          reoffer: _reofferNow,
+        }) ?? null;
     }
     return _reofferDeadlines;
   };
@@ -392,6 +441,11 @@
   // The host's deadline for `sid` expired with no open channel: replace the
   // connection and offer on the new one.
   const _reofferNow = (sid, tries) => {
+    if (_offerRetry(sid) === 'media') {
+      _syncLog(`STREAM-REOFFER media ${sid} try=${tries} held=${_attemptText(_peers[sid].attempt)}`);
+      void renegotiate(sid);
+      return;
+    }
     const old = _peers[sid];
     const state = old ? `${old.dc?.readyState ?? 'no-channel'}/${old.pc?.connectionState ?? '?'}` : 'none';
     _syncLog(`STREAM-REOFFER ${sid} try=${tries} held=${_attemptText(old?.attempt)} (${state})`);
@@ -739,12 +793,36 @@
         _syncLog(
           `received offer #${peer._offerCount} from ${senderSid} (hasVideo=${hasVideo}, attempt=${_attemptText(named)})`,
         );
+        // A lost answer leaves the host retrying the same SDP. Reply from the
+        // existing negotiation, including its ICE credentials.
+        if (
+          peer.answeredOffer === data.offer.sdp &&
+          peer.pc.signalingState === 'stable' &&
+          peer.pc.localDescription?.type === 'answer'
+        ) {
+          socket.emit(
+            'webrtc-signal',
+            _withAttempt({ target: senderSid, answer: peer.pc.localDescription }, peer.attempt),
+          );
+          return;
+        }
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
         await KNShared.drainCandidates(peer);
         await KNShared.createAndSendAnswer(peer.pc, socket, senderSid, peer.attempt);
+        peer.answeredOffer = data.offer.sdp;
       } else if (data.answer) {
         _syncLog(`received answer from ${senderSid}`);
+        const answeredMedia = peer.pc.localDescription?.sdp?.includes('m=video');
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+        if (_peers[senderSid] !== peer) return;
+        if (peer.mediaPending) {
+          if (answeredMedia) {
+            peer.mediaPending = false;
+            if (peer.dc?.readyState === 'open') _deadlines()?.opened(senderSid);
+          } else {
+            void renegotiate(senderSid);
+          }
+        }
         await KNShared.drainCandidates(peer);
       } else if (data.candidate) {
         await KNShared.addBufferedCandidate(peer, data.candidate);
@@ -793,7 +871,7 @@
 
     const onOpen = () => {
       const peer = _peers[remoteSid];
-      if (_playerSlot === 0 && peer?.dc === ch) _deadlines()?.opened(remoteSid);
+      if (_playerSlot === 0 && peer?.dc === ch && !peer.mediaPending) _deadlines()?.opened(remoteSid);
       _syncLog(
         `DC open with ${remoteSid} slot=${peer ? peer.slot : '?'} mySlot=${_playerSlot} gameRunning=${_gameRunning} isSpectator=${_isSpectator}`,
       );
@@ -1125,14 +1203,33 @@
 
   const renegotiate = async (remoteSid) => {
     const peer = _peers[remoteSid];
-    if (!peer) return;
+    if (!peer || !_isListed(remoteSid)) return;
+    peer.mediaPending = true;
+    _deadlines()?.arm(remoteSid);
+    if (peer.makingMediaOffer) return;
+    peer.makingMediaOffer = true;
     try {
-      const offer = await peer.pc.createOffer();
-      offer.sdp = _rules.tuneOfferSdp(offer.sdp);
-      await peer.pc.setLocalDescription(offer);
-      socket.emit('webrtc-signal', _withAttempt({ target: remoteSid, offer }, peer.attempt));
+      if (peer.pc.signalingState === 'stable') {
+        const offer = await peer.pc.createOffer();
+        offer.sdp = _rules.tuneOfferSdp(offer.sdp);
+        if (_peers[remoteSid] !== peer || !_isListed(remoteSid)) return;
+        await peer.pc.setLocalDescription(offer);
+        peer.mediaOffer = offer;
+      }
+      // If the original data-only offer is still outstanding, its answer
+      // triggers negotiation for the attached tracks.
+      if (
+        _peers[remoteSid] === peer &&
+        _isListed(remoteSid) &&
+        peer.pc.signalingState === 'have-local-offer' &&
+        peer.mediaOffer
+      ) {
+        socket.emit('webrtc-signal', _withAttempt({ target: remoteSid, offer: peer.mediaOffer }, peer.attempt));
+      }
     } catch (err) {
       _syncLog(`renegotiate failed: ${err}`);
+    } finally {
+      peer.makingMediaOffer = false;
     }
   };
 
@@ -1475,6 +1572,7 @@
     socket = config.socket;
     _playerSlot = config.playerSlot;
     _isSpectator = config.isSpectator;
+    _logUpload = startSessionLog(config);
 
     window._playerSlot = _playerSlot;
     window._isSpectator = _isSpectator;
@@ -1514,8 +1612,7 @@
           VirtualGamepad.init(gameEl);
           gameEl.style.margin = '0';
           // If a physical gamepad is already connected, hide virtual controls immediately
-          const detected = window.GamepadManager ? GamepadManager.getDetected() : [];
-          if (detected.length > 0) VirtualGamepad.setVisible(false);
+          if (window.GamepadManager?.hasGamepad(_playerSlot)) VirtualGamepad.setVisible(false);
         } catch (err) {
           _syncLog(`VirtualGamepad init failed: ${err.message || err}`);
         }
@@ -1628,7 +1725,9 @@
     }
 
     // Reset sync log for next game
-    _syncLogRing.clear();
+    _logUpload?.stop();
+    _logUpload = null;
+    _syncLogRing = KNShared.createSyncLogRing(SYNC_LOG_MAX);
 
     _config = null;
   };
@@ -1663,6 +1762,7 @@
     stop,
     hostGameConnected,
     exportSyncLog,
+    flushSyncLog,
     getInfo: () => _cachedInfo,
     getPeerConnection: (sid) => {
       const p = _peers[sid];

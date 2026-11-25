@@ -8,12 +8,6 @@
     <meta name="description" content="Play N64 games online with friends in your browser — no download needed." />
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
-    <script>
-      if (!new URLSearchParams(location.search).has('debug')) {
-        console.log = () => {};
-        console.debug = () => {};
-      }
-    </script>
     <link rel="stylesheet" href="/static/play.css" />
   </head>
   <body>
@@ -371,6 +365,7 @@
       <div id="info-peers"></div>
       <button
         id="dump-logs-btn"
+        hidden
         style="
           margin-top: 8px;
           padding: 4px 10px;
@@ -474,6 +469,12 @@
          (window.KNShared: cheats, keymap, input tracking, input codec). Loaded
          before every script that builds on any of them. -->
     <script src="/static/dist/kn-core.js"></script>
+    <script>
+      if (!window.KNDiag?.options?.console) {
+        console.log = () => {};
+        console.debug = () => {};
+      }
+    </script>
     <!-- Version-mismatch reload guard (window.KNSite, set by the core): a
          stale tab is caught before the engine scripts start. -->
     <script src="/static/version-guard.js"></script>

@@ -217,6 +217,7 @@ type Settings = {
 };
 
 interface PageOptions {
+  readonly slot?: number;
   readonly saved?: readonly (readonly [string, string])[];
   readonly active?: ActivePad | null;
   readonly romHash?: string | null;
@@ -259,8 +260,8 @@ const page = (options: PageOptions = {}) => {
   };
 
   const GamepadManager = {
-    getAssignments: () => (state.assigned === null ? {} : { 0: { gamepadIndex: state.assigned } }),
-    getActiveProfile: (slot: number) => (slot === 0 ? state.active : null),
+    getAssignments: () => (state.assigned === null ? {} : { [options.slot ?? 0]: { gamepadIndex: state.assigned } }),
+    getActiveProfile: (slot: number) => (slot === (options.slot ?? 0) ? state.active : null),
     saveGamepadProfile: (gamepadId: string, profile: GamepadProfile): void => {
       const text = JSON.stringify(profile);
       calls.push(`save ${gamepadId} ${text}`);
@@ -311,7 +312,11 @@ const page = (options: PageOptions = {}) => {
     },
   };
 
-  const host: ControllerSettingsHost & { ControllerSettings?: ControllerSettingsPanel; oldHelpers?: OldHelpers } = {
+  const host: ControllerSettingsHost & {
+    ControllerSettings?: ControllerSettingsPanel;
+    oldHelpers?: OldHelpers;
+    NetplayRollback?: { refreshKeyMap: () => void };
+  } = {
     document,
     localStorage,
     addEventListener: (_type: 'gamepadconnected' | 'gamepaddisconnected', listener: () => void): void => {
@@ -326,9 +331,11 @@ const page = (options: PageOptions = {}) => {
     },
     GamepadManager,
     APISandbox,
-    KNShared: { DEFAULT_N64_KEYMAP: { 67: 0, 88: 1, 13: 3, 86: 3, 38: 4, 40: 5, 68: 16, 65: 17, 74: 20, 73: 23 } },
-    KNState: { remapActive: false, romHash: options.romHash ?? null },
-    NetplayRollback: { refreshKeyMap: () => calls.push('refreshKeyMap') },
+    KNShared: {
+      refreshKeyMap: () => calls.push('refreshKeyMap'),
+      DEFAULT_N64_KEYMAP: { 67: 0, 88: 1, 13: 3, 86: 3, 38: 4, 40: 5, 68: 16, 65: 17, 74: 20, 73: 23 },
+    },
+    KNState: { remapActive: false, romHash: options.romHash ?? null, slot: options.slot ?? 0 },
     _startIngameRemap: () => calls.push('startIngameRemap'),
     showToast: options.ownToast ? undefined : (message: string) => calls.push(`toast ${message}`),
     Switch2USB: options.switch2 ? { isSupported: () => true } : undefined,
@@ -341,6 +348,7 @@ type Page = ReturnType<typeof page>;
 
 const startOld = (fake: Page): ControllerSettingsPanel => {
   const window = fake.host;
+  window.NetplayRollback = { refreshKeyMap: () => fake.calls.push('refreshKeyMap') };
   OLD_SCRIPT_WITH_HELPERS.runInNewContext({
     window,
     document: window.document,
@@ -718,6 +726,25 @@ test('the markup of a just-opened panel is the old script’s, with and without 
   const drawings = withTag(fake, 'svg').map((e) => e.markup);
   assert.deepEqual(drawings, [LEFT_STICK_SVG, C_STICK_SVG]);
   assert.equal(withClass(fake, 'cs-map-bind').length, N64_BUTTONS.length * 2);
+});
+
+test('a guest rebinds the pad assigned to their seat', () => {
+  const active = { id: 'guest pad', profileName: 'Standard', profile: { buttons: {} } };
+  const fake = page({ slot: 2, active });
+  fake.state.assigned = 1;
+  const panel = startNew(fake);
+  apply(fake, panel, {
+    kind: 'pads',
+    pads: [
+      { axes: [], buttons: [{ pressed: true }] },
+      { axes: [], buttons: [{ pressed: false }, { pressed: true }] },
+    ],
+  });
+  apply(fake, panel, { kind: 'open' });
+  apply(fake, panel, { kind: 'cell', index: 0 });
+  apply(fake, panel, { kind: 'frame' });
+  assert.ok(fake.calls.some((call) => call.startsWith('save guest pad ')));
+  assert.equal(fake.state.active?.profile.buttons[1], 1);
 });
 
 test('every rebind of a pad button or axis saves the profile the old script saved', () => {

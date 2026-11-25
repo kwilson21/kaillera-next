@@ -59,7 +59,7 @@ which fields mean anything in a given frame.
 
    Before the map is in the table, try a candidate that is: add it under a
    scratch key and pass that key as `ADDRESS_MAP_OF=<hash>`, which also runs
-   the detector with it (`?desync=force&desyncMap=`). If the ROM's menus are
+   the detector with it on localhost (`?desync=force&desyncMap=`). If the ROM's menus are
    not laid out like SSB64's, add `MENU_AUTOPILOT=any-fighter`.
 
 4. **A healthy match raises no flag.** The same run must end with zero hash

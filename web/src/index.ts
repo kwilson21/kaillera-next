@@ -82,6 +82,7 @@ import * as connectionNotices from './play/connection-notices.ts';
 import { installShared } from './page/shared.ts';
 import * as delay from './play/delay.ts';
 import * as gameStart from './play/game-start.ts';
+import { startEmulatorBoot } from './play/emulator-boot.ts';
 import * as joinPlan from './play/join-plan.ts';
 import { canRetryRoomIce, createRoomIceCache } from './play/room-ice.ts';
 import * as mode from './play/mode.ts';
@@ -154,6 +155,7 @@ import { createStickDeadband } from './stick-deadband.ts';
 import * as streamingAttempt from './streaming/attempt.ts';
 import * as streamingInput from './streaming/input.ts';
 import * as streamingReoffer from './streaming/reoffer.ts';
+import { startLogUpload } from './streaming/session-log.ts';
 import * as streamingRoster from './streaming/roster.ts';
 import * as streamingSignal from './streaming/signal.ts';
 import * as streamingVideo from './streaming/video.ts';
@@ -218,6 +220,7 @@ export const createSession = (
    * anAbandonedMatchIsEnded).
    */
   onMatchJoined: (matchId: string) => void = () => undefined,
+  onMatchChanged?: (matchId: string | null) => void,
 ) => {
   const scope = Effect.runSync(Scope.make());
   const ready = startActor(sink, scope, lateJoinReportAfterMs);
@@ -275,7 +278,9 @@ export const createSession = (
     joinedMidMatch && snapshot.value === 'running' ? snapshot.context.matchId : null;
   const send = (event: SessionEvent): void => {
     const before = joinedMatch();
+    const previousId = snapshot.context.matchId;
     [snapshot] = transition(sessionMachine, snapshot, event);
+    if (previousId !== snapshot.context.matchId) onMatchChanged?.(snapshot.context.matchId);
     if (snapshot.value === 'lobby') joinedMidMatch = false;
     else if (event.type === 'joined') joinedMidMatch = true;
     // A rejoin in flight belongs to the socket and the game it started
@@ -555,6 +560,7 @@ export const KNCore = {
     createRoomIceCache,
     mode,
     gameStart,
+    startEmulatorBoot,
     observe,
     remapWizard,
     romTransfer,
@@ -572,6 +578,7 @@ export const KNCore = {
     ...streamingSignal,
     ...streamingAttempt,
     ...streamingReoffer,
+    startLogUpload,
     ...streamingInput,
     ...streamingVideo,
   },

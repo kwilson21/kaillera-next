@@ -88,6 +88,7 @@ function harness({
     // What the bundle's libraries expect of any browser as they load.
     TextEncoder,
     TextDecoder,
+    AbortController,
     setTimeout,
     clearTimeout,
     queueMicrotask,
@@ -102,7 +103,7 @@ function harness({
     Uint8Array,
     KNState: { slot: 0, isLocalHost: false },
     KNAudio: { ctx: { state: 'running' } },
-    location: { search },
+    location: { search, hostname: 'localhost' },
     localStorage: { getItem: (key) => storage.get(key) ?? null },
     KNStorage: {
       get: () => {
@@ -458,12 +459,13 @@ for (const options of [{ saved: 'off' }, { search: '?screenshots=off' }, { searc
 }
 
 function probeHarness(hashes) {
-  const h = harness({ saved: 'off' });
+  const h = harness({ saved: 'off', search: '?rbProbe=1' });
   const engine = read('static/netplay-rollback.js');
   const start = engine.indexOf('  const RB_PROBE =');
   const end = engine.indexOf('  // Console helper: window.knTickProfileSummary()', start);
   vm.runInContext(
-    `const _urlParams = new URLSearchParams('?rbProbe=1');
+    `const _diagnosticOptions = window.KNDiag.options;
+const _isLocalDev = _diagnosticOptions.local;
 ${engine.slice(start, end)}
 window.probeHash = _probeCanvasHash;`,
     h.context,

@@ -16,6 +16,8 @@ Run: pytest tests/test_streaming_reconnect.py -v   (needs the server running)
 
 import secrets
 
+import pytest
+
 from playwright.sync_api import expect
 from test_streaming_late_join import _HAS_VIDEO, _install_fake_streaming_host, _wait_for_socket
 
@@ -24,7 +26,7 @@ _GUEST_HOST_PEER = "Object.values(window.KNState?.peers || {}).find((p) => p.slo
 _HOST_GUEST_PEER = "(window.KNState?.peers || {})[sid]"
 
 
-def _start(browser, server_url):
+def _start(browser, server_url, before_start=None):
     room = f"STR{secrets.token_hex(3).upper()}"
     host = browser.new_page()
     guest = browser.new_page()
@@ -36,6 +38,8 @@ def _start(browser, server_url):
     expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
     _wait_for_socket(guest)
     expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+    if before_start:
+        before_start(host, guest)
     host.click("#start-btn")
     host.wait_for_function(
         "document.querySelector('#toolbar-status')?.textContent.includes('Hosting')",
@@ -130,6 +134,77 @@ def _reconnected(host, guest, sid):
     host_log = host.evaluate("window.NetplayStreaming.exportSyncLog()")
     assert f"STREAM-REOFFER {sid}" in host_log, host_log[-3000:]
     return guest.evaluate("window.NetplayStreaming.exportSyncLog()")
+
+
+@pytest.mark.parametrize("drop", ["offer", "answer"])
+def test_media_negotiation_retries_on_the_open_input_channel(browser, server_url, drop):
+    def lose_one_signal(host, guest):
+        for page, field in ((host, "offer"), (guest, "answer")):
+            page.evaluate(
+                """([field, drop]) => {
+                    const socket = window.__test_socket, emit = socket.emit;
+                    window.mediaSignals = [];
+                    socket.emit = function(event, packet, ...args) {
+                        if (event === 'webrtc-signal' && packet?.[field]?.sdp?.includes('m=video')) {
+                            window.mediaSignals.push({ attempt: packet.attemptId, sdp: packet[field].sdp });
+                            if (field === drop && window.mediaSignals.length === 1) return this;
+                        }
+                        return emit.call(this, event, packet, ...args);
+                    };
+                }""",
+                [field, drop],
+            )
+
+    host, guest = _start(browser, server_url, lose_one_signal)
+    try:
+        host.wait_for_function("window.mediaSignals.length >= 2", timeout=20000)
+        guest.wait_for_function("window.mediaSignals.length >= 1", timeout=10000)
+        host.wait_for_function(
+            "Object.values(KNState.peers).some(p => p.dc?.readyState === 'open' && !p.mediaPending)"
+        )
+        offers = host.evaluate("window.mediaSignals")
+        assert offers[0] == offers[1]
+        if drop == "answer":
+            answers = guest.evaluate("window.mediaSignals")
+            assert len(answers) == 2
+            assert answers[0]["attempt"] == answers[1]["attempt"]
+        _input_reaches_host(host, guest)
+    finally:
+        _close([host, guest])
+
+
+def test_streaming_session_logs_flush_automatically_and_keep_the_final_tail(browser, server_url):
+    def observe_acks(host, guest):
+        for page in (host, guest):
+            page.evaluate("""() => {
+                const socket = window.__test_socket, emit = socket.emit;
+                window.logAcks = [];
+                socket.emit = function(event, payload, callback, ...rest) {
+                    if (event !== 'session-log') return emit.apply(this, arguments);
+                    return emit.call(this, event, payload, (err, ack) => {
+                        if (!err && ack) logAcks.push({ epoch: payload.epoch, last: ack.lastSeq });
+                        callback(err, ack);
+                    }, ...rest);
+                };
+            }""")
+
+    host, guest = _start(browser, server_url, observe_acks)
+    try:
+        for page in (host, guest):
+            page.wait_for_function("window.logAcks.some(a => a.last >= 0)", timeout=10000)
+        host.locator("#toolbar-more").click()
+        # The close callback appends a line after the periodic batch was acknowledged.
+        host.evaluate("Object.values(KNState.peers).find(p => p.slot === 1).dc.close()")
+        with host.expect_response(lambda r: "/api/session-log?" in r.url and r.request.method == "POST") as final:
+            host.locator("#toolbar-end").click()
+        assert final.value.ok
+        body = final.value.request.post_data_json
+        last = host.evaluate("window.logAcks.at(-1)")
+        assert body["mode"] == "streaming" and body["slot"] == 0 and body["epoch"] == last["epoch"]
+        assert body["entries"][0]["seq"] == last["last"] + 1
+        assert any("peer disconnected:" in e["msg"] for e in body["entries"])
+    finally:
+        _close([host, guest])
 
 
 def test_host_return_banner_requires_fresh_video_on_the_current_connection(browser, server_url):

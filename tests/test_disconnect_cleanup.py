@@ -312,6 +312,7 @@ def test_host_has_the_same_return_deadline_with_or_without_other_players(server,
         assert not signaling._disconnect_grace_tasks
         assert list(server.manager.get_participants("/", "ROOM")) == []
         events.assert_awaited_with("room-closed", {"reason": "host-timeout"}, room="ROOM")
+        await signaling.finish_room_shutdown()
         if status == "playing":
             signaling.db.set_session_ended.assert_awaited_once_with("current", None, "host-timeout")
 
@@ -404,6 +405,102 @@ def test_host_rejoins_just_before_deadline_and_cancels_closure(server, monkeypat
         now += 1
         await signaling._expire_rooms({})
         assert signaling.rooms["ROOM"] is room
+        await signaling.finish_room_shutdown()
+
+    run_async(scenario())
+
+
+@pytest.mark.parametrize("mode", ["rollback", "lockstep"])
+@pytest.mark.parametrize("authority_owns_room", [True, False])
+def test_native_authority_leaves_before_another_player_joins(server, monkeypatch, mode, authority_owns_room):
+    async def scenario():
+        room, guest = await lobby(server)
+        authority = room.owner
+        if not authority_owns_room:
+            room.owner = guest
+        room.status, room.mode, room.match_id = "playing", mode, "old"
+        monkeypatch.setattr(signaling.db, "set_session_ended", AsyncMock())
+        monkeypatch.setattr(signaling.desync_vision, "run_postmortem", AsyncMock())
+        events = AsyncMock(wraps=server.emit)
+        monkeypatch.setattr(server, "emit", events)
+
+        await signaling.leave_room(authority)
+        ended = [call for call in events.await_args_list if call.args[0] == "game-ended"]
+        assert len(ended) == 1 and ended[0].args[1] == {
+            "matchId": "old",
+            "reason": "host-left",
+        }
+        rosters = [call.args[1] for call in events.await_args_list if call.args[0] == "users-updated"]
+        assert rosters and all(r["status"] == "lobby" and r["players"]["guest"]["slot"] == 0 for r in rosters)
+        assert room.status == "lobby" and room.match_id is None and room.owner == guest
+
+        sid = await server.manager.connect("new-transport", "/")
+        err, roster = await signaling.join_room(sid, {"extra": {"sessionid": "ROOM", "persistentId": "new"}})
+        assert err is None and roster["status"] == "lobby" and roster["players"]["new"]["slot"] == 1
+        assert not room.waiting_for_state
+
+    run_async(scenario())
+
+
+@pytest.mark.parametrize("cancel_leave", [False, True])
+def test_slow_departure_history_allows_another_host_to_return_and_keeps_log_order(server, monkeypatch, cancel_leave):
+    async def scenario():
+        returning, _ = await lobby(server)
+        old_host = returning.owner
+        await server._handle_eio_disconnect("host-transport", "transport close")
+        leaving = signaling.Room("elsewhere", "Another room", "", None, 4)
+        leaving.players = {
+            "p1": {"socketId": "elsewhere"},
+            "p2": {"socketId": "leaving"},
+        }
+        leaving.slots = {0: "p1", 1: "p2"}
+        leaving.status, leaving.match_id = "playing", "active"
+        signaling.rooms["OTHER"] = leaving
+        signaling._sid_to_room.update({"elsewhere": ("OTHER", "p1", False), "leaving": ("OTHER", "p2", False)})
+        writing, release, ended = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def save(code, room):
+            if code == "OTHER" and room.status == "lobby":
+                ended.set()
+
+        monkeypatch.setattr(signaling.state, "save_room", save)
+        recorded = []
+
+        async def record(match, slot, reason):
+            if slot == 1:
+                writing.set()
+                await release.wait()
+            recorded.append(reason)
+
+        monkeypatch.setattr(signaling.db, "set_session_ended", record)
+        monkeypatch.setattr(signaling.desync_vision, "run_postmortem", AsyncMock())
+        leave = asyncio.create_task(signaling.leave_room("leaving"))
+        await asyncio.wait_for(writing.wait(), 2)
+        if cancel_leave:
+            leave.cancel()
+        end = asyncio.create_task(signaling.end_game("elsewhere", {"matchId": "active"}))
+        try:
+            sid = await server.manager.connect("new-host", "/")
+            signaling._sid_host[sid] = "localhost"
+            request = {
+                "extra": {
+                    "sessionid": "ROOM",
+                    "persistentId": "host",
+                    "resume": True,
+                    "reconnectToken": signaling.make_reconnect_token("ROOM", "host"),
+                }
+            }
+            assert await asyncio.wait_for(signaling.open_room(sid, request), 2) is None
+            assert returning.owner == sid and returning.host_return_deadline is None and old_host != sid
+            await asyncio.wait_for(ended.wait(), 2)
+            assert leaving.status == "lobby" and not recorded
+        finally:
+            release.set()
+            results = await asyncio.gather(leave, end, return_exceptions=True)
+        assert isinstance(results[0], asyncio.CancelledError) if cancel_leave else results[0] is None
+        assert results[1] is None
+        assert recorded == ["leave", "game-end"]
+        assert not signaling._history_tail
 
     run_async(scenario())
 
@@ -419,7 +516,8 @@ def test_promoted_owner_starts_the_rematch_in_p1(server, monkeypatch, occupied_p
         room.rom_ready.update((room.owner, guest))
         assert await signaling.start_game(room.owner, {"mode": "rollback"}) is None
         first_match = room.match_id
-        await signaling.leave_room(room.owner)
+        # A player dropped by signaling may still hold the native match on its own connection.
+        await signaling._leave(room.owner, "disconnect")
         assert room.owner == guest and room.slots == {1: "guest"} and room.status == "playing"
         if occupied_p1:
             sid = await server.manager.connect("new-transport", "/")
@@ -583,12 +681,12 @@ def test_original_host_emulator_only_keeps_a_fight_with_its_original_players(ser
             },
         )
         assert not err and ack["owner"] == new_sid
+        await signaling.finish_room_shutdown()
         if other == "still-playing":
             assert room.status == "playing" and room.match_id == match
         else:
             assert room.status == "lobby" and room.match_id is None and not room.match_participants
             signaling.db.set_session_ended.assert_awaited_with(match, None, "players-missing")
-        await signaling.finish_room_shutdown()
 
     run_async(scenario())
 
@@ -657,6 +755,7 @@ def test_recovered_fight_requires_every_original_socket_before_release(server, m
             assert room.status == "lobby" and room.match_id is None
             assert ("game-ended", {"matchId": source, "reason": "host-reload"}) in sent
             assert not any(event == "game-started" for event, _ in sent)
+            await signaling.finish_room_shutdown()
             return
         epoch = room.match_id
         assert epoch and epoch != source and room.status == "playing"

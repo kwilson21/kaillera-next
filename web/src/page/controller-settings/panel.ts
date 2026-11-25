@@ -199,11 +199,9 @@ export interface ControllerSettingsHost {
   readonly GamepadManager?: PanelGamepads | undefined;
   readonly APISandbox?: PanelSandbox | undefined;
   /** web/src/page/shared.ts: the keys a player with no saved mapping has. */
-  readonly KNShared?: { readonly DEFAULT_N64_KEYMAP: KeyMap } | undefined;
+  readonly KNShared?: { readonly DEFAULT_N64_KEYMAP: KeyMap; readonly refreshKeyMap: () => void } | undefined;
   /** The panel sets `remapActive` while it is open, so the engine does not read the keys pressed in it. */
-  readonly KNState?: Pick<PageState, 'remapActive' | 'romHash'> | undefined;
-  /** The engine, once loaded: told to read the key map again after the panel changes it. */
-  readonly NetplayRollback?: { readonly refreshKeyMap?: () => void } | undefined;
+  readonly KNState?: Pick<PageState, 'remapActive' | 'romHash' | 'slot'> | undefined;
   /** play.js's toast, on the play page. */
   readonly showToast?: ((message: string) => void) | undefined;
   readonly knShowToast?: ((message: string, tone: 'success') => void) | undefined;
@@ -241,6 +239,7 @@ type ElementAttrs = {
  */
 export const startControllerSettings = (host: ControllerSettingsHost): ControllerSettingsPanel => {
   const document = host.document;
+  const localSlot = (): number => Math.max(0, host.KNState?.slot ?? 0);
   const gamepads = (): PanelGamepads => defined(host.GamepadManager, 'GamepadManager');
   const sandbox = (): PanelSandbox => defined(host.APISandbox, 'APISandbox');
 
@@ -329,7 +328,7 @@ export const startControllerSettings = (host: ControllerSettingsHost): Controlle
     host.localStorage.setItem(KEYBOARD_MAP_KEY, JSON.stringify(map));
     // The engine keeps the key map it read when the emulator became ready;
     // without this the new mapping would not reach the input it reads.
-    host.NetplayRollback?.refreshKeyMap?.();
+    host.KNShared?.refreshKeyMap();
   };
 
   // ── Rebind ─────────────────────────────────────────────────────────────────
@@ -380,7 +379,7 @@ export const startControllerSettings = (host: ControllerSettingsHost): Controlle
     }
 
     // Where the axes are now, so a stick already held does not bind at once.
-    const assignedIndex = gamepads().getAssignments()[0]?.gamepadIndex;
+    const assignedIndex = gamepads().getAssignments()[localSlot()]?.gamepadIndex;
     const assignedPad = assignedIndex === undefined ? undefined : sandbox().nativeGetGamepads()[assignedIndex];
     const baseline = assignedPad ? [...assignedPad.axes] : [];
 
@@ -388,19 +387,13 @@ export const startControllerSettings = (host: ControllerSettingsHost): Controlle
     const pollRebind = (): void => {
       if (!rebindCell) return;
       rebindPollId = sandbox().nativeRAF(pollRebind);
+      const index = gamepads().getAssignments()[localSlot()]?.gamepadIndex;
       const pads = sandbox().nativeGetGamepads();
-      let pad: PanelPad | null = null;
-      for (let i = 0; i < pads.length; i++) {
-        const candidate = pads[i];
-        if (candidate) {
-          pad = candidate;
-          break;
-        }
-      }
+      const pad = (index === undefined ? null : pads[index]) ?? Array.from(pads).find(Boolean);
       if (!pad) return;
       const captured = capturedInput(bit, pad.buttons, pad.axes, baseline);
       if (!captured) return;
-      const active = gamepads().getActiveProfile(0);
+      const active = gamepads().getActiveProfile(localSlot());
       if (active) gamepads().saveGamepadProfile(active.id, profileAfterCapture(active.profile, bit, captured));
       refreshMappingGrid();
       cancelRebind();
@@ -423,7 +416,7 @@ export const startControllerSettings = (host: ControllerSettingsHost): Controlle
     );
 
     const keyByBit = invertKeyMap(getKeyboardMap());
-    const profile = gamepads().getActiveProfile(0)?.profile || null;
+    const profile = gamepads().getActiveProfile(localSlot())?.profile || null;
 
     let lastGroup: string | null = null;
     for (const button of N64_BUTTONS) {
@@ -551,9 +544,9 @@ export const startControllerSettings = (host: ControllerSettingsHost): Controlle
    * sensitivity, so the dot moves the way the stick does. Null without a pad.
    */
   const readRawAxes = (): { lx: number; ly: number; cx: number; cy: number } | null => {
-    const active = gamepads().getActiveProfile(0);
+    const active = gamepads().getActiveProfile(localSlot());
     if (!active) return null;
-    const padIndex = gamepads().getAssignments()[0]?.gamepadIndex;
+    const padIndex = gamepads().getAssignments()[localSlot()]?.gamepadIndex;
     if (padIndex === undefined) return null;
     const pad = sandbox().nativeGetGamepads()[padIndex];
     if (!pad) return null;
@@ -761,8 +754,8 @@ export const startControllerSettings = (host: ControllerSettingsHost): Controlle
     if (!host.confirm('Reset all controller settings to defaults?')) return;
     for (const key of resetStorageKeys(host.KNState?.romHash)) host.localStorage.removeItem(key);
     // The engine keeps its own copy of the key map, so it is told as well.
-    host.NetplayRollback?.refreshKeyMap?.();
-    const active = gamepads().getActiveProfile(0);
+    host.KNShared?.refreshKeyMap();
+    const active = gamepads().getActiveProfile(localSlot());
     if (active) gamepads().clearGamepadProfile(active.id);
     rebuildPanel();
   };
@@ -817,7 +810,7 @@ export const startControllerSettings = (host: ControllerSettingsHost): Controlle
       ),
     );
 
-    const active = gamepads().getActiveProfile(0);
+    const active = gamepads().getActiveProfile(localSlot());
     newPanel.appendChild(
       el(
         'div',

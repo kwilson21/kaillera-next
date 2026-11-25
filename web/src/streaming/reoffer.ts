@@ -2,22 +2,11 @@
  * The streaming host's deadline to offer again (`reoffer` in
  * specs/streaming_connection.qnt, HOST_REOFFERS).
  *
- * The host keeps one deadline for every member its roster lists whose data
- * channel to it is not open: a connection that dropped, an offer or answer
- * that was lost, a late joiner's ready that never came. When the deadline
- * expires and the member still has no open channel (`reofferDue`,
- * attempt.ts), the host replaces the connection and offers on the new one,
- * then waits again. Without it a lost connection was forgotten on both pages
- * and nothing offered again (droppedGuestTest).
- *
- * Each wait is an Effect program, so that a deadline that is no longer
- * wanted is interrupted with its timer: when the channel opens, when the
- * roster stops listing the member, when the engine stops.
- *
- * The first wait is `REOFFER_FIRST_MS`; while no channel opens each next one
- * is longer, up to `REOFFER_MAX_MS`, so a connection that takes long to come
- * up (a spectator's goes through a TURN relay) is not replaced every time
- * before it can. An open channel starts the count again.
+ * Each listed member has at most one Effect deadline. With no open data
+ * channel the host replaces the connection and offers again. If the channel
+ * is open but its media offer still has no answer, the host resends that
+ * offer on the same connection. Removal, completion and stop interrupt the
+ * pending wait. Retries back off from REOFFER_FIRST_MS to REOFFER_MAX_MS.
  */
 import { Duration, Effect, Fiber } from 'effect';
 
@@ -31,7 +20,7 @@ export const reofferDelayMs = (tries: number): number =>
 export interface ReofferOptions {
   /** Does the member still need a new offer? Asked when its deadline expires. */
   readonly due: (sid: string) => boolean;
-  /** Replace the member's connection and offer on the new one. `tries` counts from 1. */
+  /** Retry the pending offer or replace the connection. `tries` counts from 1. */
   readonly reoffer: (sid: string, tries: number) => void;
   /** The wait before offering again after `tries` offers; `reofferDelayMs` when not given. */
   readonly delayMs?: (tries: number) => number;
@@ -39,9 +28,9 @@ export interface ReofferOptions {
 
 /** The host's deadlines, one per member, for the plain-script engine. */
 export interface ReofferDeadlines {
-  /** The member has no open channel: start its deadline, unless one is already running. */
+  /** Start the deadline for an outstanding offer unless one is already running. */
   readonly arm: (sid: string) => void;
-  /** The member's channel opened: stop its deadline, and the next one starts from the first wait. */
+  /** The negotiation completed: stop its deadline and reset the backoff. */
   readonly opened: (sid: string) => void;
   /** The roster no longer lists the member: stop its deadline and forget it. */
   readonly forget: (sid: string) => void;

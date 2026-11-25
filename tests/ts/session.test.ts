@@ -510,3 +510,25 @@ test('a newer rejoin replaces the one in flight', async () => {
   assert.deepEqual(outcomes, ['second']);
   await session.stop();
 });
+
+test('match observers follow starts, late joins and authoritative exits', async () => {
+  const matches: (string | null)[] = [];
+  const session = createSession(
+    () => {},
+    undefined,
+    undefined,
+    (id) => matches.push(id),
+  );
+  try {
+    session.send({ type: 'gameStarted', matchId: 'm1' });
+    session.send({ type: 'gameStarted', matchId: 'm1' });
+    session.send({ type: 'socketDown' });
+    assert.deepEqual(matches, ['m1']);
+    session.send({ type: 'gameEnded' });
+    session.send({ type: 'joined', matchId: 'm2', status: 'playing', spectator: false, streaming: true });
+    session.send({ type: 'roomClosed' });
+    assert.deepEqual(matches, ['m1', null, 'm2', null]);
+  } finally {
+    await session.stop();
+  }
+});

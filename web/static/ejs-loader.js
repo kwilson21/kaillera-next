@@ -1,4 +1,12 @@
-(async function () {
+((script, load) => {
+  load(script).catch((error) => {
+    if (script.knBootSignal?.aborted) return;
+    console.error('[ejs-loader]', error);
+    script.dispatchEvent(new Event('error'));
+  });
+})(document.currentScript, async (script) => {
+  const boot = script.knBootSignal;
+  if (boot?.aborted) return;
   const scripts = [
     'emulator.js',
     'nipplejs.js',
@@ -12,49 +20,57 @@
 
   const folderPath = (path) => path.substring(0, path.length - path.split('/').pop().length);
   let scriptPath =
-    typeof window.EJS_pathtodata === 'string'
-      ? window.EJS_pathtodata
-      : folderPath(new URL(document.currentScript.src).pathname);
+    typeof window.EJS_pathtodata === 'string' ? window.EJS_pathtodata : folderPath(new URL(script.src).pathname);
   if (!scriptPath.endsWith('/')) scriptPath += '/';
-  //console.log(scriptPath);
-  function loadScript(file) {
-    return new Promise(function (resolve) {
-      let script = document.createElement('script');
-      script.src = (function () {
-        if ('undefined' != typeof EJS_paths && typeof EJS_paths[file] === 'string') {
-          return EJS_paths[file];
-        } else if (file.endsWith('emulator.min.js')) {
-          return scriptPath + file;
-        } else {
-          return scriptPath + 'src/' + file;
-        }
-      })();
-      script.onload = resolve;
-      script.onerror = () => {
-        filesmissing(file).then((e) => resolve());
+  function assetReady(file, style) {
+    const url =
+      typeof window.EJS_paths?.[file] === 'string'
+        ? window.EJS_paths[file]
+        : (style || file.endsWith('emulator.min.js') ? scriptPath : scriptPath + 'src/') + file;
+    const asset = document.createElement(style ? 'link' : 'script');
+    if (style) {
+      asset.rel = 'stylesheet';
+      asset.href = url;
+    } else {
+      asset.src = url;
+    }
+    const key = style ? asset.href : asset.src;
+    const existing = Array.from(document.head.querySelectorAll('[data-kn-ejs-asset]')).find(
+      (el) => el.dataset.knEjsAsset === key,
+    );
+    if (existing) return existing.knEjsReady;
+
+    // A removed script can still execute. Keep its request and result available
+    // to the next boot so script globals are installed once, in source order.
+    asset.dataset.knEjsAsset = key;
+    if (scripts.includes(file)) asset.dataset.knEjsSource = file;
+    const styleSignal = style ? boot : null;
+    asset.knEjsReady = new Promise((resolve) => {
+      const finish = (loaded) => {
+        styleSignal?.removeEventListener('abort', discard);
+        asset.onload = null;
+        asset.onerror = null;
+        if (!loaded) asset.remove();
+        resolve(loaded);
       };
-      document.head.appendChild(script);
+      const discard = () => finish(false);
+      styleSignal?.addEventListener('abort', discard, { once: true });
+      asset.onload = () => finish(true);
+      asset.onerror = discard;
     });
+    document.head.appendChild(asset);
+    return asset.knEjsReady;
   }
 
-  function loadStyle(file) {
-    return new Promise(function (resolve) {
-      let css = document.createElement('link');
-      css.rel = 'stylesheet';
-      css.href = (function () {
-        if ('undefined' != typeof EJS_paths && typeof EJS_paths[file] === 'string') {
-          return EJS_paths[file];
-        } else {
-          return scriptPath + file;
-        }
-      })();
-      css.onload = resolve;
-      css.onerror = () => {
-        filesmissing(file).then((e) => resolve());
-      };
-      document.head.appendChild(css);
-    });
+  async function loadAsset(file, style) {
+    if (boot?.aborted) throw boot.reason;
+    const loaded = await assetReady(file, style);
+    if (boot?.aborted) throw boot.reason;
+    if (!loaded) await filesmissing(file);
   }
+
+  const loadScript = (file) => loadAsset(file, false);
+  const loadStyle = (file) => loadAsset(file, true);
 
   async function filesmissing(file) {
     console.error('Failed to load ' + file);
@@ -79,19 +95,19 @@
   }
 
   const emulatorClassLoaded = typeof window.EmulatorJS === 'function';
-  if ('undefined' != typeof EJS_DEBUG_XX && true === EJS_DEBUG_XX) {
-    if (!emulatorClassLoaded) {
-      for (let i = 0; i < scripts.length; i++) {
-        await loadScript(scripts[i]);
-      }
-    }
-    await loadStyle('emulator.css');
-  } else {
-    if (!emulatorClassLoaded) {
+  const debug = window.EJS_DEBUG_XX === true;
+  // A cancelled source fallback may already have defined the constructor
+  // while the remaining source files are still missing.
+  if (document.head.querySelector('script[data-kn-ejs-source]')) {
+    for (const file of scripts) await loadScript(file);
+  } else if (!emulatorClassLoaded) {
+    if (debug) {
+      for (const file of scripts) await loadScript(file);
+    } else {
       await loadScript('emulator.min.js');
     }
-    await loadStyle('emulator.min.css');
   }
+  await loadStyle(debug ? 'emulator.css' : 'emulator.min.css');
   const config = {};
   config.gameUrl = window.EJS_gameUrl;
   config.dataPath = scriptPath;
@@ -169,6 +185,7 @@
     }
   }
 
+  if (boot?.aborted) return;
   window.EJS_emulator = new EmulatorJS(EJS_player, config);
   window.EJS_adBlocked = (url, del) => window.EJS_emulator.adBlocked(url, del);
   if (typeof window.EJS_ready === 'function') {
@@ -189,5 +206,6 @@
   if (typeof window.EJS_onSaveSave === 'function') {
     window.EJS_emulator.on('saveSave', window.EJS_onSaveSave);
   }
+  script.dispatchEvent(new Event('kn-ejs-loader-complete'));
   window.dispatchEvent(new CustomEvent('kn-ejs-loader-complete'));
-})();
+});

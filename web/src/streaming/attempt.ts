@@ -119,3 +119,14 @@ export function answerApplies(
 export function reofferDue(host: boolean, listed: boolean, channelOpen: boolean): boolean {
   return host && listed && !channelOpen;
 }
+
+/** The host resends outstanding media SDP on the existing open input channel. */
+//@ ensures (!host || !listed) ==> \result === "none"
+//@ ensures host && listed && !channelOpen ==> \result === "replace"
+//@ ensures host && listed && channelOpen && mediaPending ==> \result === "media"
+//@ ensures host && listed && channelOpen && !mediaPending ==> \result === "none"
+export function retryOffer(host: boolean, listed: boolean, channelOpen: boolean, mediaPending: boolean): string {
+  if (reofferDue(host, listed, channelOpen)) return 'replace';
+  if (host && listed && mediaPending) return 'media';
+  return 'none';
+}
