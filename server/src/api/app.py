@@ -47,7 +47,7 @@ from typing import Literal
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import ColumnElement, Select, or_, select
 from starlette.middleware.gzip import GZipMiddleware
@@ -317,18 +317,12 @@ class SecurityHeadersMiddleware:
     def _cache_control(self, path: str, query: bytes = b"", status: int = 200) -> str:
         if not self._allow_cache:
             return "no-store, no-cache, must-revalidate, max-age=0"
-        # WASM core + data — content-addressed via /api/core-info?h=<hash>,
-        # so the URL itself changes when the file changes. Safe to cache for
-        # a year (browsers + Cloudflare both treat ?h=… as part of the cache
-        # key, so a new file = new URL = guaranteed cache miss).
-        if path == f"/{_CORE_RELATIVE_PATH}" or path.startswith("/static/ejs/cores/reports/"):
-            # Never pin a missing file for a year during a deployment.
+        if path.startswith(("/api/core-archive/", "/api/core-worker/", "/static/ejs/cores/")):
             if status >= 400:
                 return "no-store"
-            if not re.fullmatch(rb"h=[0-9a-f]{16}", query):
-                return "no-cache"
-        if path.startswith("/static/ejs/cores/"):
-            return "public, max-age=31536000, immutable"
+            if path.startswith(("/api/core-archive/", "/api/core-worker/")) or re.fullmatch(rb"h=[0-9a-f]{16}", query):
+                return "public, max-age=31536000, immutable"
+            return "no-cache"
         # JS/CSS — always revalidate via ETag (304 if unchanged)
         if path.endswith((".js", ".css")):
             return "no-cache"
@@ -521,19 +515,8 @@ def _get_landing_build_id() -> str:
 
 # ── WASM core auto-discovery + content hash ──────────────────────────────────
 #
-# The patched WASM core is served with `Cache-Control: immutable, max-age=1y`
-# so browsers and Cloudflare edge nodes will never refetch it on their own.
-# To force a rollout when the WASM changes, the URL itself must change.
-#
-# We compute a SHA-256 prefix from the file contents at server startup and
-# expose it via /api/core-info as `?h=<hash>`. The client (core-redirector.js)
-# fetches that URL once at boot and uses it as the canonical core URL.
-# Different content -> different hash -> different URL -> guaranteed cache miss
-# at every layer (browser, Cloudflare, IDB). No human bookkeeping required.
-#
-# Re-checked on every request via mtime so a new file dropped into prod is
-# picked up automatically without needing to restart the server.
-
+# The archive URL binds its SHA-256 prefix to the bytes served. Older tabs
+# can still request the legacy static URL with the same hash in the query.
 _CORE_RELATIVE_PATH = "static/ejs/cores/mupen64plus_next-wasm.data"
 _core_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "web", _CORE_RELATIVE_PATH)
 # The Mode 2 shadow worker loads the standalone core, not the .data archive.
@@ -565,17 +548,21 @@ def _compute_core_info() -> dict:
             h.update(chunk)
     hash_prefix = h.hexdigest()[:16]
     wh = hashlib.sha256()
+    worker_files = {}
     for path in _WORKER_CORE_PATHS:
         try:
             with open(path, "rb") as f:
-                for chunk in iter(lambda: f.read(65536), b""):
-                    wh.update(chunk)
+                data = f.read()
+                wh.update(data)
+                if path != _core_path:
+                    worker_files[os.path.basename(path)] = hashlib.sha256(data).hexdigest()[:16]
         except FileNotFoundError:
             wh.update(b"missing:" + os.path.basename(path).encode())
     return {
-        "url": f"/{_CORE_RELATIVE_PATH}?h={hash_prefix}",
+        "url": f"/api/core-archive/{hash_prefix}",
         "hash": hash_prefix,
         "workerHash": wh.hexdigest()[:16],
+        "workerFiles": worker_files,
         "size": st.st_size,
         "available": True,
     }
@@ -589,6 +576,23 @@ def _get_core_info() -> dict:
         _core_info_cache = _compute_core_info()
         _core_info_mtime = mtime
     return _core_info_cache
+
+
+def _serve_core_file(path: Path, digest: str, media_type: str) -> Response:
+    if not digest:
+        if not path.is_file():
+            raise HTTPException(404, "Core unavailable")
+        return FileResponse(path, media_type=media_type)
+    if not re.fullmatch(r"[0-9a-f]{16}", digest):
+        raise HTTPException(404, "Unknown core file")
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        raise HTTPException(404, "Core unavailable") from None
+    # Hash the very buffer we send, including if a file changes during boot.
+    if hashlib.sha256(data).hexdigest()[:16] != digest:
+        raise HTTPException(409, "Core changed; reload to get the current version")
+    return Response(data, media_type=media_type)
 
 
 class CacheBustMiddleware:
@@ -842,26 +846,45 @@ def create_app(lifespan=None) -> FastAPI:
         }
 
     # Patched WASM core auto-discovery. Returns the canonical URL of the
-    # current core file with a content-hash query param so cache-busting
-    # is automatic. See `_compute_core_info` for the rationale.
+    # current archive and the identity of the standalone worker files.
     @app.get("/api/core-info")
     async def core_info() -> dict:
         return _get_core_info()
 
-    # EmulatorJS fetches /static/ejs/cores/reports/<core>.json on boot to
-    # read a `buildStart` timestamp; if missing, it logs "Could not fetch
-    # core report JSON! Core caching will be disabled!" and falls back to a
-    # random key. We don't rely on EJS's IDB caching — core-redirector.js
-    # invalidates IDB whenever our content-addressed core hash changes — so
-    # all this needs to do is return a truthy, hash-stable buildStart so
-    # the warning stops firing. Derive it from the core hash so it only
-    # changes when the WASM actually changes.
+    @app.api_route("/api/core-archive/{h}", methods=["GET", "HEAD"])
+    @app.api_route(f"/{_CORE_RELATIVE_PATH}", methods=["GET", "HEAD"])
+    def core_archive(h: str = "") -> Response:
+        return _serve_core_file(Path(_core_path), h, "application/octet-stream")
+
+    @app.api_route("/api/core-worker/{h}/{name}", methods=["GET", "HEAD"])
+    @app.api_route("/static/ejs/cores/mupen64plus_next_libretro.js", methods=["GET", "HEAD"])
+    @app.api_route("/static/ejs/cores/mupen64plus_next_libretro.wasm", methods=["GET", "HEAD"])
+    def worker_core(request: Request, h: str = "") -> Response:
+        name = request.url.path.rsplit("/", 1)[-1]
+        types = {
+            "mupen64plus_next_libretro.js": "text/javascript",
+            "mupen64plus_next_libretro.wasm": "application/wasm",
+        }
+        if name not in types:
+            raise HTTPException(404, "Unknown core file")
+        digest = ""
+        if h:
+            info = _get_core_info()
+            if h != info.get("workerHash"):
+                raise HTTPException(409, "Worker build changed")
+            digest = info["workerFiles"].get(name)
+            if not digest:
+                raise HTTPException(404, "Core unavailable")
+        return _serve_core_file(Path(_core_path).with_name(name), digest, types[name])
+
+    # Older EJS loaders still consult buildStart as their cache version.
     @app.get("/static/ejs/cores/reports/{core_name}.json")
-    async def core_report(core_name: str) -> dict:  # noqa: ARG001
-        info = _get_core_info()
-        h = info.get("hash") or ""
-        # 16-char hex prefix → fits in a JS Number safely (52 bits).
-        build_start = int(h[:13], 16) if h else 1
+    async def core_report(core_name: str, h: str = "") -> dict:  # noqa: ARG001
+        current = _get_core_info().get("hash", "")
+        if h and h != current:
+            raise HTTPException(409, "Core report changed")
+        # Thirteen hex digits fit exactly in a JavaScript Number.
+        build_start = int(current[:13], 16) if current else 1
         return {"buildStart": build_start}
 
     # Asset version endpoint — used by the client-side stale-JS guard.

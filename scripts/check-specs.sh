@@ -846,6 +846,14 @@ $QUINT run "$SOLO" --main=solo_save_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
 # ── How a page's C engine starts ───────────────────────────────────────────
+ARCHIVE=specs/core_archive.qnt
+$QUINT typecheck "$ARCHIVE"
+for variant in core_archive_before core_archive_fixed; do
+  $QUINT test "$ARCHIVE" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$ARCHIVE" --main=core_archive_fixed --invariant=allHold \
+  --max-samples=10000 --max-steps=20 --backend="$BACKEND"
+
 START=specs/engine_start.qnt
 $QUINT typecheck "$START"
 for variant in engine_start_before engine_start_stop_only engine_start_jump_on_return engine_start_no_zero_bridge engine_start_no_rearm engine_start_current; do

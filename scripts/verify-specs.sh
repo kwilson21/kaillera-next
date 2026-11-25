@@ -662,6 +662,11 @@ solo_save() {
 }
 
 engine_start() {
+  local archive=specs/core_archive.qnt
+  verify "$archive" core_archive_fixed allHold init 6
+  expect_violation "$archive" core_archive_before startedArchiveMatches 3
+  expect_violation "$archive" core_archive_before unknownSkipsCache 2
+  expect_violation "$archive" core_archive_before workerHasKnownIdentity 4
   local START=specs/engine_start.qnt
   verify "$START" engine_start_current allHold
   # A tab that comes back while its page waits moves the page's frame:

@@ -3581,6 +3581,10 @@
 
   const _shadowMaybeStart = (reason = 'unknown') => {
     if (!RB_SHADOW_EMU || _isSpectator || _rbShadowReady || _rbShadowBooting || _rbShadowFailed) return false;
+    if (!window._knCoreWorkerHash) {
+      _shadowDisable('core-identity-unavailable');
+      return false;
+    }
     if (typeof Worker !== 'function') return false;
     if (typeof SharedArrayBuffer !== 'function' || !window.crossOriginIsolated) {
       _shadowDisable('sab-unavailable', 'SharedArrayBuffer requires cross-origin isolation');
@@ -3662,12 +3666,7 @@
             state: stateBuffer,
             frame: _frameNum,
             statusSab: _rbShadowStatusSab,
-            coreBase: '/static/ejs/cores/',
-            coreScript: '/static/ejs/cores/mupen64plus_next_libretro.js',
-            // Cores are served immutable for a year, so the worker's URLs
-            // carry a content hash of every core file it loads
-            // (/api/core-info workerHash; .data hash as a fallback).
-            coreVersion: window._knCoreWorkerHash || window._knCoreHash || '',
+            coreBase: `/api/core-worker/${window._knCoreWorkerHash}/`,
             coreSettings,
             controllerMask: _shadowControllerMask(),
             verbose: _urlParams.get('shadowVerbose') === '1',
