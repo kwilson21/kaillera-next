@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.72.9",
+    "date": "2026-11-25",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "preserve matches across room recovery and core upgrades (#341)"
+      }
+    ]
+  },
+  {
     "version": "0.72.8",
     "date": "2026-11-25",
     "changes": [
