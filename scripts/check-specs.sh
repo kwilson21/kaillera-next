@@ -590,6 +590,14 @@ $QUINT run "$BYSTANDER" --main=recovery_bystander_fixed --invariant=allHold \
 $QUINT run "$BYSTANDER" --main=recovery_bystander_broadcast_lossless --invariant=allHold \
   --max-samples=2000 --max-steps=150 --backend="$BACKEND"
 
+CONSENT=specs/capture_consent.qnt
+$QUINT typecheck "$CONSENT"
+for variant in capture_consent_current capture_consent_before; do
+  $QUINT test "$CONSENT" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$CONSENT" --main=capture_consent_current --invariant=allHold \
+  --max-samples=1000 --max-steps=25 --backend="$BACKEND"
+
 # Local controller discovery, seat changes and key remaps across engine lifetimes.
 LOCAL_INPUT=specs/local_input.qnt
 $QUINT typecheck "$LOCAL_INPUT"

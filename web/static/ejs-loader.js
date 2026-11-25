@@ -22,11 +22,11 @@
   let scriptPath =
     typeof window.EJS_pathtodata === 'string' ? window.EJS_pathtodata : folderPath(new URL(script.src).pathname);
   if (!scriptPath.endsWith('/')) scriptPath += '/';
-  function loadAsset(file, style) {
-    if (boot?.aborted) throw boot.reason;
+  function assetReady(file, style) {
     const url =
-      window.EJS_paths?.[file] ??
-      (style || file.endsWith('emulator.min.js') ? scriptPath + file : scriptPath + 'src/' + file);
+      typeof window.EJS_paths?.[file] === 'string'
+        ? window.EJS_paths[file]
+        : (style || file.endsWith('emulator.min.js') ? scriptPath : scriptPath + 'src/') + file;
     const asset = document.createElement(style ? 'link' : 'script');
     if (style) {
       asset.rel = 'stylesheet';
@@ -35,29 +35,38 @@
       asset.src = url;
     }
     const key = style ? asset.href : asset.src;
-    if (Array.from(document.head.querySelectorAll('[data-kn-ejs-loaded]')).some((el) => el.dataset.knEjsLoaded === key))
-      return Promise.resolve();
-    return new Promise((resolve, reject) => {
-      const discard = () => {
+    const existing = Array.from(document.head.querySelectorAll('[data-kn-ejs-asset]')).find(
+      (el) => el.dataset.knEjsAsset === key,
+    );
+    if (existing) return existing.knEjsReady;
+
+    // A removed script can still execute. Keep its request and result available
+    // to the next boot so script globals are installed once, in source order.
+    asset.dataset.knEjsAsset = key;
+    if (scripts.includes(file)) asset.dataset.knEjsSource = file;
+    const styleSignal = style ? boot : null;
+    asset.knEjsReady = new Promise((resolve) => {
+      const finish = (loaded) => {
+        styleSignal?.removeEventListener('abort', discard);
         asset.onload = null;
         asset.onerror = null;
-        asset.remove();
-        reject(boot.reason);
+        if (!loaded) asset.remove();
+        resolve(loaded);
       };
-      boot?.addEventListener('abort', discard, { once: true });
-      asset.onload = () => {
-        boot?.removeEventListener('abort', discard);
-        asset.dataset.knEjsLoaded = key;
-        if (scripts.includes(file)) asset.dataset.knEjsSource = file;
-        resolve();
-      };
-      asset.onerror = () => {
-        boot?.removeEventListener('abort', discard);
-        asset.remove();
-        filesmissing(file).then(resolve, reject);
-      };
-      document.head.appendChild(asset);
+      const discard = () => finish(false);
+      styleSignal?.addEventListener('abort', discard, { once: true });
+      asset.onload = () => finish(true);
+      asset.onerror = discard;
     });
+    document.head.appendChild(asset);
+    return asset.knEjsReady;
+  }
+
+  async function loadAsset(file, style) {
+    if (boot?.aborted) throw boot.reason;
+    const loaded = await assetReady(file, style);
+    if (boot?.aborted) throw boot.reason;
+    if (!loaded) await filesmissing(file);
   }
 
   const loadScript = (file) => loadAsset(file, false);

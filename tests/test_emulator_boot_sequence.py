@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -449,3 +448,65 @@ def test_end_during_boot_then_rematch_starts_one_emulator(browser, server_url, r
     finally:
         host.close()
         guest.close()
+
+
+@pytest.mark.parametrize("stage", ["minified", "fallback", "cancel-before-response", "cancel-after-response"])
+def test_emulator_scripts_are_shared_across_boots(browser, stage):
+    """A removed script may execute after the old boot has been cancelled."""
+    page = browser.new_page()
+    required = [
+        "emulator.js", "nipplejs.js", "shaders.js", "storage.js", "gamepad.js",
+        "GameManager.js", "socket.io.min.js", "compression.js",
+    ]
+    held = []
+    constructor = "window.EmulatorJS = class { constructor() { made.push([...executed]); } on() {} };"
+
+    def asset(route):
+        name = route.request.url.rsplit("/", 1)[-1]
+        if name == "loader.js":
+            route.fulfill(path=REPO_ROOT / "web/static/ejs-loader.js", content_type="text/javascript")
+        elif name.endswith(".css"):
+            route.fulfill(content_type="text/css", body="")
+        elif name == "emulator.min.js" and stage != "minified":
+            route.fulfill(status=404, body="")
+        elif name == "emulator.js" and stage.startswith("cancel") and not held:
+            held.append(route)
+        else:
+            body = f"executed.push('{name}');"
+            if name in ("emulator.js", "emulator.min.js"):
+                body += constructor
+            route.fulfill(content_type="text/javascript", body=body)
+
+    try:
+        page.route("http://boot.test/**", asset)
+        page.set_content('<base href="http://boot.test/">')
+        page.evaluate("""() => {
+            window.executed = []; window.made = []; window.loaders = 0;
+            window.EJS_player = '#game'; window.EJS_pathtodata = 'http://boot.test/assets/';
+            window.EJS_disableAutoLang = false;
+            window.boot = () => {
+                window.controller = new AbortController();
+                const script = document.createElement('script');
+                script.knBootSignal = controller.signal;
+                script.onload = () => ++window.loaders;
+                script.src = 'http://boot.test/loader.js';
+                document.head.append(script);
+            };
+        }""")
+        if stage.startswith("cancel"):
+            with page.expect_request("**/src/emulator.js"):
+                page.evaluate("boot()")
+            page.evaluate("controller.abort()")
+            if stage == "cancel-before-response":
+                page.evaluate("boot()")
+                page.wait_for_function("loaders === 2")
+            held[0].fulfill(content_type="text/javascript", body="executed.push('emulator.js');" + constructor)
+            page.wait_for_function("typeof window.EmulatorJS === 'function'")
+            if stage == "cancel-after-response":
+                page.evaluate("boot()")
+        else:
+            page.evaluate("boot()")
+        page.wait_for_function("made.length > 0", timeout=5000)
+        assert page.evaluate("made") == [["emulator.min.js"] if stage == "minified" else required]
+    finally:
+        page.close()

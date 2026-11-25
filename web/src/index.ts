@@ -155,6 +155,7 @@ import { createStickDeadband } from './stick-deadband.ts';
 import * as streamingAttempt from './streaming/attempt.ts';
 import * as streamingInput from './streaming/input.ts';
 import * as streamingReoffer from './streaming/reoffer.ts';
+import { startLogUpload } from './streaming/session-log.ts';
 import * as streamingRoster from './streaming/roster.ts';
 import * as streamingSignal from './streaming/signal.ts';
 import * as streamingVideo from './streaming/video.ts';
@@ -219,6 +220,7 @@ export const createSession = (
    * anAbandonedMatchIsEnded).
    */
   onMatchJoined: (matchId: string) => void = () => undefined,
+  onMatchChanged?: (matchId: string | null) => void,
 ) => {
   const scope = Effect.runSync(Scope.make());
   const ready = startActor(sink, scope, lateJoinReportAfterMs);
@@ -276,7 +278,9 @@ export const createSession = (
     joinedMidMatch && snapshot.value === 'running' ? snapshot.context.matchId : null;
   const send = (event: SessionEvent): void => {
     const before = joinedMatch();
+    const previousId = snapshot.context.matchId;
     [snapshot] = transition(sessionMachine, snapshot, event);
+    if (previousId !== snapshot.context.matchId) onMatchChanged?.(snapshot.context.matchId);
     if (snapshot.value === 'lobby') joinedMidMatch = false;
     else if (event.type === 'joined') joinedMidMatch = true;
     // A rejoin in flight belongs to the socket and the game it started
@@ -574,6 +578,7 @@ export const KNCore = {
     ...streamingSignal,
     ...streamingAttempt,
     ...streamingReoffer,
+    startLogUpload,
     ...streamingInput,
     ...streamingVideo,
   },

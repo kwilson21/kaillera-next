@@ -314,6 +314,59 @@ test('the URL override and the saved setting are read as the old script read the
   assert.equal(captureEnabledFrom('off'), false);
 });
 
+test('a production opt-out lasts through a cross-tab opt-in and a reload of the same game', () => {
+  const tab = page('', null, false);
+  const images = startCapture(tab.host);
+  images.setMatch('m1');
+  assert.equal(images.allowed(), true);
+  tab.button.handlers.get('click')?.();
+  assert.equal(images.allowed(), false);
+  assert.equal(tab.button.disabled, true);
+  images.setEnabled(true);
+  assert.equal(tab.stored.get(CAPTURE_KEY), 'off');
+  tab.otherTab('on');
+  assert.equal(images.allowed(), false);
+
+  const reloaded = startCapture(tab.host);
+  reloaded.setMatch('m1');
+  assert.equal(reloaded.allowed(), false);
+  reloaded.setMatch(null);
+  assert.equal(reloaded.allowed(), true);
+  assert.equal(tab.checkbox.disabled, false);
+  reloaded.setMatch('m2');
+  assert.equal(reloaded.allowed(), true);
+});
+
+test('a delayed cross-tab opt-out invalidates the image already encoding and locks the running game', () => {
+  const tab = page('', null, false);
+  const images = startCapture(tab.host);
+  images.setMatch('m1');
+  const began = images.revision;
+  tab.otherTab('on', 'off');
+  assert.ok(images.revision > began);
+  assert.equal(images.allowed(), false);
+  images.setMatch(null);
+  assert.equal(images.allowed(), true);
+});
+
+test('the lobby can opt in for the next match and local development keeps its in-game control', () => {
+  const tab = page('', 'off', false);
+  const images = startCapture(tab.host);
+  images.setMatch('m1');
+  images.setEnabled(true);
+  assert.equal(images.allowed(), false);
+  images.setMatch(null);
+  images.setEnabled(true);
+  images.setMatch('m2');
+  assert.equal(images.allowed(), true);
+
+  const dev = startCapture({ ...tab.host, KNDiag: { options: { local: true } } });
+  dev.setMatch('m2');
+  dev.setEnabled(false);
+  dev.setEnabled(true);
+  assert.equal(dev.allowed(), true);
+});
+
 test('a real window satisfies the host the policy asks for', () => {
   const accepts = (host: CaptureHost): CaptureHost => host;
   const check = (win: Window): CaptureHost => accepts(win);

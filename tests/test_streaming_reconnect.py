@@ -173,6 +173,40 @@ def test_media_negotiation_retries_on_the_open_input_channel(browser, server_url
         _close([host, guest])
 
 
+def test_streaming_session_logs_flush_automatically_and_keep_the_final_tail(browser, server_url):
+    def observe_acks(host, guest):
+        for page in (host, guest):
+            page.evaluate("""() => {
+                const socket = window.__test_socket, emit = socket.emit;
+                window.logAcks = [];
+                socket.emit = function(event, payload, callback, ...rest) {
+                    if (event !== 'session-log') return emit.apply(this, arguments);
+                    return emit.call(this, event, payload, (err, ack) => {
+                        if (!err && ack) logAcks.push({ epoch: payload.epoch, last: ack.lastSeq });
+                        callback(err, ack);
+                    }, ...rest);
+                };
+            }""")
+
+    host, guest = _start(browser, server_url, observe_acks)
+    try:
+        for page in (host, guest):
+            page.wait_for_function("window.logAcks.some(a => a.last >= 0)", timeout=10000)
+        host.locator("#toolbar-more").click()
+        # The close callback appends a line after the periodic batch was acknowledged.
+        host.evaluate("Object.values(KNState.peers).find(p => p.slot === 1).dc.close()")
+        with host.expect_response(lambda r: "/api/session-log?" in r.url and r.request.method == "POST") as final:
+            host.locator("#toolbar-end").click()
+        assert final.value.ok
+        body = final.value.request.post_data_json
+        last = host.evaluate("window.logAcks.at(-1)")
+        assert body["mode"] == "streaming" and body["slot"] == 0 and body["epoch"] == last["epoch"]
+        assert body["entries"][0]["seq"] == last["last"] + 1
+        assert any("peer disconnected:" in e["msg"] for e in body["entries"])
+    finally:
+        _close([host, guest])
+
+
 def test_host_return_banner_requires_fresh_video_on_the_current_connection(browser, server_url):
     host, guest = _start(browser, server_url)
     try:

@@ -120,9 +120,10 @@
   let _audioStreamDest = null; // MediaStreamAudioDestinationNode (host only)
   let _unmuteAbort = null; // AbortController for the unmute-banner gesture listeners; cleared in stop()
 
-  // -- Sync log ring buffer (matches lockstep — uploaded on game end) --------
+  // The match owns its log epoch through its last acknowledged upload.
   const SYNC_LOG_MAX = 5000;
-  const _syncLogRing = KNShared.createSyncLogRing(SYNC_LOG_MAX);
+  let _syncLogRing = KNShared.createSyncLogRing(SYNC_LOG_MAX);
+  let _logUpload = null;
 
   const _syncLog = (msg) => {
     _syncLogRing.push({ t: performance.now(), f: 0, msg });
@@ -130,6 +131,50 @@
   };
 
   const exportSyncLog = () => _syncLogRing.export();
+
+  const startSessionLog = (config) => {
+    if (config.isSpectator || config.playerSlot == null || !config.matchId) return null;
+    const { matchId, playerName, playerSlot: slot, sessionId: room, socket: connection } = config;
+    const boundary = window.KNCore.protocol.createBoundary((line) => console.warn(line));
+    let token = config.uploadToken;
+    const started = performance.now();
+    return _rules.startLogUpload(_syncLogRing, async (epoch, entries, keepalive) => {
+      if (_config === config && KNState.uploadToken) token = KNState.uploadToken;
+      const payload = {
+        matchId,
+        playerName,
+        slot,
+        mode: 'streaming',
+        epoch,
+        entries,
+        summary: { duration_sec: Math.round((performance.now() - started) / 1000) },
+      };
+      if (!keepalive && connection.connected) {
+        const ack = await new Promise((resolve) => {
+          connection.timeout(4000).emit('session-log', payload, (err, value) => resolve(err ? null : value));
+        });
+        const accepted = ack && boundary.ack('session-log', ack);
+        if (accepted) return accepted.lastSeq;
+      }
+      if (!token || !room) return -1;
+      const body = JSON.stringify(payload);
+      // An individual oversized line still belongs in the log. The normal
+      // HTTP path can carry it while the page remains open.
+      const canKeepAlive = keepalive && new Blob([body]).size <= 60 * 1024;
+      const response = await fetch(
+        `/api/session-log?token=${encodeURIComponent(token)}&room=${encodeURIComponent(room)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          keepalive: canKeepAlive,
+        },
+      );
+      if (!response.ok) return -1;
+      return boundary.ack('session-log', await response.json())?.lastSeq ?? -1;
+    });
+  };
+  const flushSyncLog = ({ keepalive = false } = {}) => _logUpload?.flush(keepalive);
 
   // Expose for Playwright
   window._playerSlot = _playerSlot;
@@ -1527,6 +1572,7 @@
     socket = config.socket;
     _playerSlot = config.playerSlot;
     _isSpectator = config.isSpectator;
+    _logUpload = startSessionLog(config);
 
     window._playerSlot = _playerSlot;
     window._isSpectator = _isSpectator;
@@ -1679,7 +1725,9 @@
     }
 
     // Reset sync log for next game
-    _syncLogRing.clear();
+    _logUpload?.stop();
+    _logUpload = null;
+    _syncLogRing = KNShared.createSyncLogRing(SYNC_LOG_MAX);
 
     _config = null;
   };
@@ -1714,6 +1762,7 @@
     stop,
     hostGameConnected,
     exportSyncLog,
+    flushSyncLog,
     getInfo: () => _cachedInfo,
     getPeerConnection: (sid) => {
       const p = _peers[sid];

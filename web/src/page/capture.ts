@@ -11,6 +11,7 @@ import type { SafeStorage } from '../kn-state.ts';
 
 /** localStorage key of the setting: 'on' or 'off'. Absent means on. */
 export const CAPTURE_KEY = 'kn-diagnostic-images';
+const DECLINED_MATCH_KEY = 'kn-diagnostic-images-declined-match';
 
 /** What the diagnostics, the engine and the vision client read. */
 export interface CapturePolicy {
@@ -71,6 +72,7 @@ interface CaptureStorageEvent {
 export interface CaptureHost {
   readonly location: { readonly search: string };
   readonly KNStorage?: SafeStorage | undefined;
+  readonly KNDiag?: { readonly options?: { readonly local: boolean } } | undefined;
   readonly localStorage: { readonly getItem: (key: string) => string | null };
   readonly document: {
     readonly readyState: string;
@@ -89,25 +91,57 @@ export interface CaptureHost {
  * in-game menu button, and return the policy. Changing it never changes the
  * host's separate room-listing consent.
  */
-export const startCapture = (host: CaptureHost): CapturePolicy => {
+export const startCapture = (host: CaptureHost): CapturePolicy & { setMatch: (id: string | null) => void } => {
   const forcedOff = urlForcesCaptureOff(host.location.search);
+  const matchOptOut = !host.KNDiag?.options?.local;
+  let matchId: string | null = null;
+  let declinedMatch: string | null = null;
   let enabled = true;
   try {
     enabled = captureEnabledFrom(host.KNStorage?.get('localStorage', CAPTURE_KEY));
+    if (matchOptOut) declinedMatch = host.KNStorage?.get('sessionStorage', DECLINED_MATCH_KEY) ?? null;
   } catch {
     /* storage is blocked: the default stands */
   }
   let revision = 0;
-  const allowed = (): boolean => enabled && !forcedOff;
-
-  const update = (value: boolean): void => {
-    if (enabled === value) return;
-    enabled = value;
-    revision++;
+  const declined = (): boolean => matchId !== null && declinedMatch === matchId;
+  const allowed = (): boolean => enabled && !forcedOff && !declined();
+  const notify = (): void => {
     host.dispatchEvent(new CustomEvent('kn-capture-change'));
   };
 
+  // A lobby in another tab may opt in for future matches. An opt-out in this
+  // match outlives that preference change and a reload of the playing tab.
+  const declineMatch = (): boolean => {
+    if (matchId === null || declined()) return false;
+    declinedMatch = matchId;
+    try {
+      host.KNStorage?.set('sessionStorage', DECLINED_MATCH_KEY, matchId);
+    } catch {
+      /* this tab still observes the opt-out when storage is blocked */
+    }
+    return true;
+  };
+
+  const setMatch = (id: string | null): void => {
+    if (!matchOptOut || id === matchId) return;
+    const wasAllowed = allowed();
+    matchId = id;
+    if (!enabled) declineMatch();
+    if (wasAllowed !== allowed()) revision++;
+    notify();
+  };
+
+  const update = (value: boolean, sawOptOut = !value): void => {
+    const declinedNow = sawOptOut && declineMatch();
+    if (enabled === value && !declinedNow) return;
+    enabled = value;
+    revision++;
+    notify();
+  };
+
   const setEnabled = (value: boolean): void => {
+    if (value && declined()) return;
     update(!!value);
     try {
       host.KNStorage?.set('localStorage', CAPTURE_KEY, enabled ? 'on' : 'off');
@@ -127,7 +161,8 @@ export const startCapture = (host: CaptureHost): CapturePolicy => {
       // Storage events can arrive behind a newer change made in this tab, so
       // the store is read again: an old 'on' never revives capture after a
       // newer opt-out.
-      update(captureEnabledFrom(storage.getItem(CAPTURE_KEY)));
+      const saved = captureEnabledFrom(storage.getItem(CAPTURE_KEY));
+      update(saved, !saved || event.newValue === 'off');
     } catch {
       /* storage is blocked: nothing another tab did can be read */
     }
@@ -140,12 +175,15 @@ export const startCapture = (host: CaptureHost): CapturePolicy => {
     const refresh = (): void => {
       if (checkbox) {
         checkbox.checked = allowed();
-        checkbox.disabled = forcedOff;
+        checkbox.disabled = forcedOff || declined();
       }
       if (button) {
         button.setAttribute('aria-checked', String(allowed()));
-        button.disabled = forcedOff;
-        button.textContent = captureButtonText(allowed(), forcedOff);
+        button.disabled = forcedOff || declined();
+        button.textContent =
+          declined() && !forcedOff
+            ? 'Diagnostic images: Off (enable in lobby)'
+            : captureButtonText(allowed(), forcedOff);
       }
       if (status) {
         status.textContent = captureStatusText(forcedOff);
@@ -163,6 +201,7 @@ export const startCapture = (host: CaptureHost): CapturePolicy => {
 
   return {
     allowed,
+    setMatch,
     setEnabled,
     forcedOff,
     get revision() {

@@ -150,8 +150,12 @@
     if (socket?.connected) socket.emit('match-joined', { matchId });
   };
   const _session =
-    window.KNCore?.createSession(({ type, ...meta }) => KNEvent(type, '', meta), undefined, _tellServerMatchJoined) ??
-    null;
+    window.KNCore?.createSession(
+      ({ type, ...meta }) => KNEvent(type, '', meta),
+      undefined,
+      _tellServerMatchJoined,
+      (matchId) => window.KNCapture?.setMatch?.(matchId),
+    ) ?? null;
   const isGameRunning = () => _session?.gameOn() ?? false;
   KNState.gameOn = isGameRunning;
   // What the server and peers send this page is decoded before a handler sees
@@ -745,7 +749,7 @@
     // Flush session log via HTTP keepalive (survives page close)
     if (engine?.exportSyncLog) {
       try {
-        engine.flushSyncLog?.();
+        engine.flushSyncLog?.({ keepalive: true });
       } catch (_) {}
     }
     // Notify peers this is intentional so they skip the 15s reconnect wait
