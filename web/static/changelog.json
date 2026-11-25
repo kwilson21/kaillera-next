@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.72.10",
+    "date": "2026-11-25",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "prevent duplicate rollback log uploads and measure multiplayer hitches (#340)"
+      }
+    ]
+  },
+  {
     "version": "0.72.9",
     "date": "2026-11-25",
     "changes": [
