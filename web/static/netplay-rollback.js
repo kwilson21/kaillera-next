@@ -7123,7 +7123,7 @@
     return base;
   };
 
-  const _buildFlushPayload = () => ({
+  const _buildFlushPayload = (final = false) => ({
     matchId: _cachedMatchId || KNState.matchId,
     slot: window._playerSlot,
     playerName: (() => {
@@ -7139,7 +7139,11 @@
     // ring (new epoch) that restarts seq at 0, and without this the server
     // would dedupe every new entry away against the old ring's last_seq.
     epoch: _syncLogRing.epoch,
-    entries: _syncLogRing.entriesAfter(_syncLogAckedSeq, SYNC_LOG_FLUSH_MAX_ENTRIES),
+    entries: _syncLogRing.entriesAfter(
+      _syncLogAckedSeq,
+      final ? Infinity : SYNC_LOG_FLUSH_MAX_ENTRIES,
+      final ? Infinity : undefined,
+    ),
     summary: {
       desyncs: KNState.sessionStats?.desyncs ?? 0,
       stalls: KNState.sessionStats?.stalls ?? 0,
@@ -7171,7 +7175,7 @@
       rbTransport: _useCRollback ? _rbTransport : 'n/a',
     },
     // Input audit records the server hasn't acked yet (see _auditPending).
-    audit: { epoch: _auditEpoch, entries: _auditPending.slice(0, AUDIT_FLUSH_MAX) },
+    audit: { epoch: _auditEpoch, entries: _auditPending.slice(0, final ? undefined : AUDIT_FLUSH_MAX) },
   });
 
   // Advance the flush cursor only from a server-confirmed lastSeq — never
@@ -7201,46 +7205,71 @@
     }
   };
 
-  // fetch(..., {keepalive:true}) bodies are capped at 64KB by the browser —
-  // silently dropped (not even a network error) past that. The periodic
-  // fallback (used while the socket is connected-but-failing) can carry a
-  // full flush without keepalive; only the pagehide/hidden safety-net flush
-  // needs keepalive (socket is already gone), so only that call site caps
-  // entries to fit the 64KB limit. It leaves out the input audit records,
-  // which wouldn't fit beside the log entries.
-  const _KEEPALIVE_ENTRY_BUDGET = 60 * 1024;
-  const _capPayloadEntriesForKeepalive = (payload) => {
-    const { audit: _audit, ...rest } = payload;
-    const entries = rest.entries || [];
-    let bytes = 0;
-    let start = entries.length;
-    while (start > 0) {
-      const size = (entries[start - 1].msg?.length || 0) + 64;
-      if (bytes + size > _KEEPALIVE_ENTRY_BUDGET) break;
-      bytes += size;
-      start--;
-    }
-    return start > 0 ? { ...rest, entries: entries.slice(start) } : rest;
-  };
-
-  const _flushViaHttp = (payload, { keepalive = false } = {}) => {
-    const token = _cachedUploadToken || KNState.uploadToken;
-    const room = _cachedRoom || KNState.room || '';
-    if (!token || !room) return;
-    const body = keepalive ? _capPayloadEntriesForKeepalive(payload) : payload;
+  const _KEEPALIVE_BUDGET = 60 * 1024;
+  const _logEncoder = new TextEncoder();
+  const _flushViaHttp = async (payload, { url, final }) => {
+    if (!url) return false;
     try {
-      fetch(`/api/session-log?token=${encodeURIComponent(token)}&room=${encodeURIComponent(room)}`, {
+      const body = JSON.stringify(payload);
+      const options = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        ...(keepalive ? { keepalive: true } : {}),
-      })
-        .then((res) => (res.ok ? res.json() : null))
-        // Ack against what was sent: a keepalive body has no audit, so its
-        // auditLastSeq (the server's stored position) must not move ours.
-        .then((json) => _ackSyncLogFlush(json, body))
-        .catch(() => {});
-    } catch (_) {}
+        body,
+        keepalive: final && _logEncoder.encode(body).length <= _KEEPALIVE_BUDGET,
+      };
+      let response = await fetch(url, options);
+      // A concurrent socket append may hold this slot's DB writer briefly.
+      if (final && response.status === 429) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        response = await fetch(url, options);
+      }
+      if (!response.ok) return false;
+      const ack = _peerBoundary().ack('session-log', await response.json());
+      if (!ack) return false;
+      _ackSyncLogFlush(ack, payload);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  // Keep contiguous prefixes of both streams; advancing past a gap would
+  // make the server deduplicate missing entries on a later flush.
+  const _finalBatchEnd = (entries, offset, maxCount, byteBudget) => {
+    let end = offset;
+    let bytes = 0;
+    while (end < entries.length && end - offset < maxCount) {
+      const size = _logEncoder.encode(JSON.stringify(entries[end])).length + 1;
+      if (end > offset && bytes + size > byteBudget) break;
+      bytes += size;
+      end++;
+    }
+    return end;
+  };
+
+  const _flushFinalLog = async (payload, target) => {
+    let logOffset = 0;
+    let auditOffset = 0;
+    const budget = target.keepalive ? _KEEPALIVE_BUDGET : 2 * 1024 * 1024;
+    // The envelope contains the same frozen summary and context on every batch.
+    const empty = { ...payload, entries: [], audit: { ...payload.audit, entries: [] } };
+    const available = budget - _logEncoder.encode(JSON.stringify(empty)).length;
+    do {
+      const logsRemain = logOffset < payload.entries.length;
+      const auditsRemain = auditOffset < payload.audit.entries.length;
+      const logBudget = auditsRemain ? Math.floor(available * 0.75) : available;
+      const auditBudget = logsRemain ? available - logBudget : available;
+      const logEnd = _finalBatchEnd(payload.entries, logOffset, SYNC_LOG_FLUSH_MAX_ENTRIES, logBudget);
+      const auditEnd = _finalBatchEnd(payload.audit.entries, auditOffset, AUDIT_FLUSH_MAX, auditBudget);
+      const batch = {
+        ...payload,
+        entries: payload.entries.slice(logOffset, logEnd),
+        audit: { epoch: payload.audit.epoch, entries: payload.audit.entries.slice(auditOffset, auditEnd) },
+      };
+      if (!(await _flushViaHttp(batch, target))) return;
+      logOffset = logEnd;
+      auditOffset = auditEnd;
+    } while (logOffset < payload.entries.length || auditOffset < payload.audit.entries.length);
   };
 
   // Drain the C engine's rb_log() buffer into the JS sync log, so its lines
@@ -7282,56 +7311,66 @@
       }
     } catch (_) {}
   };
-  const _flushSyncLog = () => {
+  const _flushSyncLog = ({ final = false, keepalive = false } = {}) => {
     const matchId = _cachedMatchId || KNState.matchId;
     if (!matchId) return;
+    const token = _cachedUploadToken || KNState.uploadToken;
+    const room = _cachedRoom || KNState.room;
+    const url =
+      token && room ? `/api/session-log?token=${encodeURIComponent(token)}&room=${encodeURIComponent(room)}` : null;
+    const target = { url, keepalive, final: final || keepalive };
     // Drain the C debug log into JS sync log BEFORE building the flush
     // payload so the new entries are included.
     _drainCDebugLog();
     try {
-      const payload = _buildFlushPayload();
+      const payload = _buildFlushPayload(target.final);
+      if (target.final) return _flushFinalLog(payload, target);
       if (socket?.connected) {
         let acked = false;
         socket.emit('session-log', payload, (ack) => {
+          if (payload.epoch !== _syncLogRing.epoch) return;
+          const accepted = _peerBoundary().ack('session-log', ack);
+          if (!accepted) return;
           acked = true;
           _socketFlushFails = 0;
-          // The server acks a flush it turned away with no data at all; an
-          // ack off its schema is dropped, and acks nothing.
-          _ackSyncLogFlush(_peerBoundary().ack('session-log', ack), payload);
+          _ackSyncLogFlush(accepted, payload);
         });
         // If no ack within 5s, count as failure and try HTTP next time
         setTimeout(() => {
-          if (!acked) {
+          if (!acked && payload.epoch === _syncLogRing.epoch) {
             _socketFlushFails++;
-            if (_socketFlushFails >= 2) _flushViaHttp(payload);
+            if (_socketFlushFails >= 2) void _flushViaHttp(payload, target);
           }
         }, 5000);
       } else {
-        _flushViaHttp(payload);
+        return _flushViaHttp(payload, target);
       }
     } catch (_) {
       // Payload construction failed — try HTTP with minimal payload
       try {
-        _flushViaHttp({
-          matchId,
-          slot: window._playerSlot,
-          playerName: 'Player',
-          mode: _modeName(),
-          entries: [],
-          summary: {
-            desyncs: 0,
-            stalls: 0,
-            reconnects: 0,
-            frames: _frameNum,
-            duration_sec: Math.round((performance.now() - _startTime) / 1000),
-            peers: 0,
+        return _flushViaHttp(
+          {
+            matchId,
+            slot: window._playerSlot,
+            playerName: 'Player',
+            mode: _modeName(),
+            entries: [],
+            summary: {
+              desyncs: 0,
+              stalls: 0,
+              reconnects: 0,
+              frames: _frameNum,
+              duration_sec: Math.round((performance.now() - _startTime) / 1000),
+              peers: 0,
+            },
+            context: {
+              ua: navigator.userAgent,
+              mobile: /Mobi|Android/i.test(navigator.userAgent),
+              forkedCore: !!window.EJS_emulator?.gameManager?.Module?._kn_set_deterministic,
+            },
           },
-          context: {
-            ua: navigator.userAgent,
-            mobile: /Mobi|Android/i.test(navigator.userAgent),
-            forkedCore: !!window.EJS_emulator?.gameManager?.Module?._kn_set_deterministic,
-          },
-        });
+          target,
+        );
       } catch (_2) {}
     }
   };
@@ -17139,26 +17178,11 @@
     setStatus('Connected -- game on!');
     _startTime = performance.now();
 
-    // Closing or backgrounding the page can interrupt the interval and
-    // disconnect the socket. Upload its last entries with HTTP keepalive.
-    if (!window._knFlushUnloadHandler) {
-      const handler = () => {
-        try {
-          // Drain C debug log one last time so we capture final rb_log entries
-          _drainCDebugLog();
-          const payload = _buildFlushPayload();
-          // Only use HTTP here — Socket.IO is already torn down. keepalive
-          // is required for delivery to survive unload, which caps the
-          // body at 64KB, so entries are capped to fit.
-          _flushViaHttp(payload, { keepalive: true });
-        } catch (_) {}
-      };
-      window._knFlushUnloadHandler = handler;
-      window.addEventListener('pagehide', handler);
-      // visibilitychange to 'hidden' is the mobile-Safari-friendly equivalent
-      // for app backgrounding (pagehide doesn't always fire there).
+    // play.js handles pagehide for both engines; some mobile browsers
+    // only signal an app switch with visibilitychange.
+    if (!_unloadVisChangeHandler) {
       _unloadVisChangeHandler = () => {
-        if (document.visibilityState === 'hidden') handler();
+        if (document.visibilityState === 'hidden') void _flushSyncLog({ keepalive: true });
       };
       document.addEventListener('visibilitychange', _unloadVisChangeHandler);
     }
@@ -22611,7 +22635,7 @@
     // The final flush covers anything a pending critical flush would send.
     clearTimeout(_criticalFlushTimer);
     _criticalFlushTimer = null;
-    _flushSyncLog();
+    _flushSyncLog({ final: true });
     _resetInputAudit();
     _cachedMatchId = null;
     _cachedRoom = null;
@@ -22621,14 +22645,6 @@
     if (_flushInterval) {
       clearInterval(_flushInterval);
       _flushInterval = null;
-    }
-    // Drop the unload/hidden flush listeners so their closure (which retains
-    // _drainCDebugLog, _buildFlushPayload, _flushViaHttp) can be GC'd between
-    // game cycles. The window flag is what guards re-registration in
-    // startGameSequence, so it must be cleared too.
-    if (window._knFlushUnloadHandler) {
-      window.removeEventListener('pagehide', window._knFlushUnloadHandler);
-      window._knFlushUnloadHandler = null;
     }
     if (_unloadVisChangeHandler) {
       document.removeEventListener('visibilitychange', _unloadVisChangeHandler);
