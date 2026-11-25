@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.73.2",
+    "date": "2026-11-25",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "preserve match input, emulator startup, and host returns (#344)"
+      }
+    ]
+  },
+  {
     "version": "0.73.1",
     "date": "2026-11-25",
     "changes": [
