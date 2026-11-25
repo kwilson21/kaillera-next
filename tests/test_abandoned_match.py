@@ -174,8 +174,9 @@ def test_fresh_owner_using_the_invite_reclaims_the_lobby_with_other_players(monk
     assert ack["owner"] == "sid-returning"
     assert ack["status"] == "lobby"
     assert ack["matchId"] is None
-    assert ack["players"]["pid-host"]["slot"] == 0
-    assert ack["players"]["pid-guest"]["slot"] == 1
+    assert ack["players"][f"pid-{owner}"]["slot"] == 0
+    other = "guest" if owner == "host" else "host"
+    assert ack["players"][f"pid-{other}"]["slot"] == 1
     assert events.count("game-ended") == 1
     emit.assert_any_await("game-ended", {"matchId": "match-1", "reason": "host-reload"}, room="ROOM1")
 
