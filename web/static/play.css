@@ -502,22 +502,10 @@ body {
 
 #dual-input-option {
   position: relative;
-  gap: 0;
-}
-
-#dual-input-info {
-  padding: 0;
-  width: 44px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 18px;
-}
-
-#dual-input-info:is(:hover, :focus-visible) {
-  color: var(--accent);
 }
 
 #dual-input-hint {
+  visibility: hidden;
   position: absolute;
   z-index: 1;
   inset: 100% auto auto 0;
@@ -530,6 +518,17 @@ body {
   border-radius: var(--radius);
   font-size: 13px;
   line-height: 1.4;
+}
+
+#dual-input-option label:focus-within + #dual-input-hint {
+  visibility: visible;
+}
+
+@media (any-hover: hover) {
+  #dual-input-option label:hover + #dual-input-hint,
+  #dual-input-hint:hover {
+    visibility: visible;
+  }
 }
 
 #start-btn {
