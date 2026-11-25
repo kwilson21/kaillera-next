@@ -159,6 +159,46 @@ test('a stuck simulation frame preserves the independent rate limit on each carr
   assert.deepEqual(f.channels().slice(-2), ['lockstep', 'rollback-input']);
 });
 
+test('the host negotiates the lobby choice unless diagnostics override it', () => {
+  const negotiate = (dualInputEnabled?: boolean, overrides: (string | null)[] = [], slot = 0) => {
+    const messages: string[] = [];
+    const context = {
+      _config: { dualInputEnabled },
+      _playerSlot: slot,
+      _peers: { peer: { dc: { readyState: 'open', send: (message: string) => messages.push(message) } } },
+      overrides,
+      window: {},
+    };
+    const transport = vm.runInNewContext(
+      `
+        const maxDelay = 2, _phase = 0, PHASE_RUNNING = 1, _syncLog = () => {};
+        let _rbTransport = 'reliable';
+        ${engineFunction('_sendInputTransport')}
+        const diag = { ${between('          setTransport(mode) {', '\n          },')} } };
+        for (const mode of overrides) diag.setTransport(mode);
+        ${between('    // Host broadcasts effective delay so all players', '    _syncLog(`${readyCount + 1} players lockstep-ready')}
+        _rbTransport;
+      `,
+      context,
+    );
+    return { transport, announcements: messages.filter((message) => message.startsWith('rb-transport:')) };
+  };
+  const ordered = { transport: 'reliable', announcements: ['rb-transport:reliable'] };
+  const dual = { transport: 'dual', announcements: ['rb-transport:reliable', 'rb-transport:dual'] };
+  assert.deepEqual(negotiate(), ordered);
+  assert.deepEqual(negotiate(false), ordered);
+  assert.deepEqual(negotiate(true), dual);
+  assert.deepEqual(negotiate(false, ['dual']), dual);
+  assert.deepEqual(negotiate(true, ['reliable']), ordered);
+  assert.deepEqual(negotiate(true, ['unreliable']), {
+    transport: 'unreliable',
+    announcements: ['rb-transport:unreliable'],
+  });
+  assert.deepEqual(negotiate(true, ['reliable', null]), dual);
+  assert.deepEqual(negotiate(false, ['dual', null]), ordered);
+  assert.deepEqual(negotiate(true, ['dual'], 1), { transport: 'reliable', announcements: [] });
+});
+
 test('a dual announcement moves a legacy unordered guest to reliable before announcing the new policy', () => {
   const messages: string[] = [];
   const sendPolicy = vm.runInNewContext(engineFunction('_sendInputTransport') + '; _sendInputTransport');

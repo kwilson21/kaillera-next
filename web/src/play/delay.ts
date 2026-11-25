@@ -118,8 +118,13 @@ export const delaySummary = (picker: DelayPicker, hint: string | undefined): str
 };
 
 /** The host's Advanced summary line. */
-export const hostOptionsSummary = (resyncOn: boolean, romSharingOn: boolean, delayText: string): string =>
-  `Resync ${resyncOn ? 'on' : 'off'} · ROM sharing ${romSharingOn ? 'on' : 'off'} · ${delayText}`;
+export const hostOptionsSummary = (
+  resyncOn: boolean,
+  romSharingOn: boolean,
+  delayText: string,
+  dualInputOn = false,
+): string =>
+  `Resync ${resyncOn ? 'on' : 'off'} · ${dualInputOn ? 'Backup copies on · ' : ''}ROM sharing ${romSharingOn ? 'on' : 'off'} · ${delayText}`;
 
 /**
  * The hint once a match has negotiated its delay: the room's delay when it is

@@ -43,8 +43,8 @@ def silence_inputs(page, ms, channels=("dc", "rbDc")):
     """For `ms` milliseconds, drop every input packet the page sends.
 
     Inputs are binary messages on a peer's reliable `dc` and unordered
-    `rbDc`. Both are silenced unless `channels` names one, so the default
-    race can be tested one copy at a time. Control strings still go through.
+    `rbDc`. Both are silenced unless `channels` names one, so dual transport
+    can be tested one copy at a time. Control strings still go through.
     The silence ends by itself. `window._knTestDropped` counts lost packets.
     """
     page.evaluate(

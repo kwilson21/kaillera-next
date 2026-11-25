@@ -145,6 +145,7 @@ class SetNamePayload(BaseModel):
 class StartGamePayload(BaseModel):
     mode: GameMode = "rollback"
     resyncEnabled: bool = True
+    dualInputEnabled: bool = False
     romHash: str | None = None
     gameId: str | None = Field(default=None, max_length=32)
 
@@ -352,6 +353,7 @@ class UsersUpdated(_ServerMessage):
     resumeFromMatchId: str | None = None
     resumePending: bool = False
     resyncEnabled: bool = True
+    dualInputEnabled: bool = False
     hostReturnDeadline: int | None = None
     serverTime: int | None = None
 
@@ -370,6 +372,7 @@ class GameStarted(_ServerMessage):
 
     mode: GameMode
     resyncEnabled: bool
+    dualInputEnabled: bool = False
     romHash: str | None
     romName: str | None
     rom_name: str | None

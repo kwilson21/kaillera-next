@@ -87,7 +87,9 @@ async def _room_life_steps() -> dict[str, dict | None]:
     assert await signaling.rom_ready("sid-host", rom) is None
     assert await signaling.rom_ready("sid-guest", {"ready": True, "hash": rom["hash"]}) is None
     assert await signaling.rom_sharing_toggle("sid-host", {"enabled": False}) is None
-    assert await _start_game_locked("sid-host", StartGamePayload(mode="rollback", gameId="ssb64")) is None
+    options = {"mode": "rollback", "gameId": "ssb64", "dualInputEnabled": True}
+    assert await signaling.start_game("sid-guest", options) == "Only the host can start the game"
+    assert await signaling.start_game("sid-host", options) is None
     # The guest's socket drops and comes back while the match runs.
     await join("rejoin", "sid-guest-2", "pid-guest")
     match_id = rooms["ROOM1"].match_id
@@ -209,6 +211,14 @@ def test_game_started_and_ended_name_the_same_match(room_life):
     assert started.matchId == ended.matchId
     assert ended.reason == "game-end"
     assert started.mode == "rollback"
+
+
+def test_dual_input_applies_to_the_host_selected_match_and_its_joiners(room_life):
+    emitted, acks = room_life
+    starts = [data["dualInputEnabled"] for event, data in emitted if event == "game-started"]
+    assert starts == [True, False]  # the second start omits the option
+    assert acks["rejoin"]["dualInputEnabled"] is True
+    assert acks["rewind"]["dualInputEnabled"] is False
 
 
 def test_game_ended_without_a_match_is_null():

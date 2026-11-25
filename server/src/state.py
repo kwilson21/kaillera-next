@@ -87,6 +87,7 @@ def _deserialize_room(d: dict):
         match_id=d.get("match_id"),
         match_participants={int(k): v for k, v in d.get("match_participants", {}).items()},
         resync_enabled=d.get("resync_enabled", True),
+        dual_input_enabled=d.get("dual_input_enabled", False),
         resume_from_match_id=d.get("resume_from_match_id"),
         resume_deadline=d.get("resume_deadline"),
         recovery_unverified_match_id=(

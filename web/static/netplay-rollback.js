@@ -4650,7 +4650,7 @@
           //   knDiag.setTransport('dual')        // reliable history plus fast current input
           //   knDiag.setTransport('unreliable')  // unordered + redundancy
           //   knDiag.setTransport('reliable')    // ordered TCP-like
-          //   knDiag.setTransport(null)          // reset to default
+          //   knDiag.setTransport(null)          // use the lobby choice at the next start
           setTransport(mode) {
             if (mode == null) {
               window._knTransportOverride = undefined;
@@ -13732,12 +13732,12 @@
 
     // Host broadcasts effective delay so all players use the same value.
     // Independent calculation can disagree due to asymmetric RTT/jitter.
-    //
-    // Race rollback input on both channels unless the host selected a single carrier.
     if (_playerSlot === 0) {
       const transportOverride = window._knTransportOverride;
-      const transportMode =
-        transportOverride === 'reliable' || transportOverride === 'unreliable' ? transportOverride : 'dual';
+      const lobbyTransport = _config?.dualInputEnabled === true ? 'dual' : 'reliable';
+      const transportMode = ['reliable', 'unreliable', 'dual'].includes(transportOverride)
+        ? transportOverride
+        : lobbyTransport;
       _rbTransport = transportMode;
       for (const p of Object.values(_peers)) {
         if (p.dc?.readyState === 'open') {

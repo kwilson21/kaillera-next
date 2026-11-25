@@ -6,7 +6,7 @@ more it went on with a zero input for the missing player (`INPUT-STALL
 resend-request` and `INPUT-STALL hard-timeout`). That path is gone: every
 frame runs on the C rollback engine, which does neither:
 
-- the default races a reliable input with an unordered copy. With the
+- the host can race a reliable input with an unordered copy. With the
   unreliable-only override (knDiag.setTransport('unreliable') on the host),
   packets can repeat recent unacknowledged inputs, so a short gap is filled by the next packet
   that gets through, with no request;

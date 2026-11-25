@@ -116,8 +116,9 @@ on `stop()`, and for a player when it asks to join late.
 - `_scheduledSyncRequests` (entries filtered by targetSid when provided)
 - `_lateJoinServing` (host: the entry for this sid when provided; the late-join pause ends with it if no other joiner is being served)
 
-Dual transport sends current input and its bounded history on the reliable
-channel, then races a bare copy on the peer’s available unordered channel.
+Rooms use reliable input by default. The host can enable dual delivery in
+the lobby to send current input and its bounded history on the reliable channel,
+then race a bare copy on the peer’s available unordered channel.
 Both channels feed the same receiver, which applies each identical input once.
 If the unordered channel closes, the reliable path continues. In explicit
 unreliable mode, closing the channel also resends unacknowledged inputs on

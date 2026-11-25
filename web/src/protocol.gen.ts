@@ -73,6 +73,7 @@ export type SetNamePayload = typeof SetNamePayload.Type;
 export const StartGamePayload = Schema.Struct({
   mode: Schema.optional(GameMode),
   resyncEnabled: Schema.optional(Schema.Boolean),
+  dualInputEnabled: Schema.optional(Schema.Boolean),
   romHash: Schema.optional(Schema.NullOr(Schema.String)),
   gameId: Schema.optional(Schema.NullOr(Schema.String.check(Schema.isMaxCodePoints(32)))),
 });
@@ -217,6 +218,7 @@ export const UsersUpdated = Schema.Struct({
   resumeFromMatchId: Schema.optional(Schema.NullOr(Schema.String)),
   resumePending: Schema.optional(Schema.Boolean),
   resyncEnabled: Schema.optional(Schema.Boolean),
+  dualInputEnabled: Schema.optional(Schema.Boolean),
   hostReturnDeadline: Schema.optional(Schema.NullOr(Schema.Int)),
   serverTime: Schema.optional(Schema.NullOr(Schema.Int)),
 });
@@ -244,6 +246,7 @@ export const JoinRoomAck = Schema.Struct({
   resumeFromMatchId: Schema.optional(Schema.NullOr(Schema.String)),
   resumePending: Schema.optional(Schema.Boolean),
   resyncEnabled: Schema.optional(Schema.Boolean),
+  dualInputEnabled: Schema.optional(Schema.Boolean),
   hostReturnDeadline: Schema.optional(Schema.NullOr(Schema.Int)),
   serverTime: Schema.optional(Schema.NullOr(Schema.Int)),
   rom_hash: Schema.NullOr(Schema.String),
@@ -255,6 +258,7 @@ export type JoinRoomAck = typeof JoinRoomAck.Type;
 export const GameStarted = Schema.Struct({
   mode: GameMode,
   resyncEnabled: Schema.Boolean,
+  dualInputEnabled: Schema.optional(Schema.Boolean),
   romHash: Schema.NullOr(Schema.String),
   romName: Schema.NullOr(Schema.String),
   rom_name: Schema.NullOr(Schema.String),

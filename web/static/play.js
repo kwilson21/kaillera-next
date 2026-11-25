@@ -137,6 +137,7 @@
   let _integrityNoticeAttempt = null;
   const RECOVERY_UNVERIFIED = 'Recovery unverified. The host can end this match.';
   let _gameResyncEnabled = true;
+  let _gameDualInputEnabled = false;
   let previousPlayers = {};
   let previousSpectators = {};
 
@@ -1345,6 +1346,7 @@
               _identity.discardRefused(savedHost.token);
             }
             const joinedStatus = joinData?.status ?? roomData.status;
+            if (joinedStatus === 'playing' && joinData) _gameDualInputEnabled = joinData.dualInputEnabled === true;
             keepRoomAddress();
             const hostShares = joinData?.romSharing ?? roomData.rom_sharing;
             mode = normalizeMode(joinData?.mode ?? roomData.mode ?? mode);
@@ -1577,6 +1579,7 @@
       if (endButton) endButton.style.display = isHost ? '' : 'none';
     }
     if (data.status === 'playing' && (data.matchId == null || data.matchId === KNState.matchId)) {
+      if (data.dualInputEnabled !== undefined) _gameDualInputEnabled = data.dualInputEnabled === true;
       _maybeReportMatchIntegrity();
     }
     if (!wasHost && isHost) {
@@ -1769,6 +1772,7 @@
     );
     mode = data.mode || mode;
     _gameResyncEnabled = data.resyncEnabled !== false;
+    _gameDualInputEnabled = data.dualInputEnabled === true;
     _takeRoomGameId(data.gameId);
     applyHostRomFromData(data);
     if (KNState.matchId !== (data.matchId || null)) _clearMatchIntegrity();
@@ -3898,6 +3902,7 @@
       playerName,
       gameElement: document.getElementById('game'),
       resyncEnabled,
+      dualInputEnabled: _gameDualInputEnabled,
       // Lockstep: the rollback engine with nothing predicted (every frame
       // waits for every player's input).
       lockstep: mode === 'lockstep',
@@ -4131,6 +4136,7 @@
       {
         mode: selectedMode,
         resyncEnabled: optResync ? optResync.checked : true,
+        dualInputEnabled: dualInputSelected(),
         romHash: _romHash ?? null,
         gameId: _gameId ?? null,
       },
@@ -5087,6 +5093,9 @@
   const selectedModeIsRollback = () =>
     everyoneRunsTheGame(normalizeMode(document.getElementById('mode-select')?.value || mode));
 
+  const dualInputSelected = () =>
+    selectedModeIsRollback() && document.getElementById('opt-dual-input')?.checked === true;
+
   const renderModeControls = () => {
     const select = document.getElementById('mode-select');
     if (select) select.value = mode;
@@ -5193,7 +5202,7 @@
     if (hostStatus) {
       const resyncOn = document.getElementById('opt-resync')?.checked ?? false;
       const romSharingOn = document.getElementById('opt-rom-sharing')?.checked ?? false;
-      hostStatus.textContent = _delay.hostOptionsSummary(resyncOn, romSharingOn, delayText);
+      hostStatus.textContent = _delay.hostOptionsSummary(resyncOn, romSharingOn, delayText, dualInputSelected());
     }
 
     const delayStatus = document.querySelector('#player-controls .advanced-options .summary-status');
@@ -5205,6 +5214,7 @@
   const wireAdvancedSummaryStatus = () => {
     const optResync = document.getElementById('opt-resync');
     if (optResync) optResync.addEventListener('change', updateAdvancedSummaryStatuses);
+    document.getElementById('opt-dual-input')?.addEventListener('change', updateAdvancedSummaryStatuses);
 
     const romShareCb = document.getElementById('opt-rom-sharing');
     if (romShareCb) romShareCb.addEventListener('change', () => requestAnimationFrame(updateAdvancedSummaryStatuses));

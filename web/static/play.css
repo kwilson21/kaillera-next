@@ -500,6 +500,14 @@ body {
   font-size: 12px;
 }
 
+#dual-input-hint {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 #start-btn {
   width: 100%;
   font-size: 15px;
