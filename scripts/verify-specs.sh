@@ -101,7 +101,8 @@ room_lifecycle_start() {
 
 room_disconnect_cleanup() {
   verify specs/room_hydration.qnt room_hydration_fixed allHold init 3
-  expect_violation specs/room_hydration.qnt room_hydration_before readyIncludesSavedRooms 2
+  expect_violation specs/room_hydration.qnt room_hydration_before readyIncludesSavedRooms 3
+  expect_violation specs/room_hydration.qnt room_hydration_before_order_fix readyIncludesRoomSavedDuringStartup 3
   verify specs/room_departure_log.qnt room_departure_log_fixed allHold init 1
   expect_violation specs/room_departure_log.qnt room_departure_log_before remainingPlayerOwnsRoom 1
   local seats=specs/room_owner_seat.qnt

@@ -129,6 +129,7 @@ done
 $QUINT run "$DISCONNECT" --main=room_disconnect_cleanup_fixed --invariant=allHold \
   --max-samples=1000 --max-steps=10 --backend="$BACKEND"
 
+$QUINT test specs/room_hydration.qnt --main=room_hydration_before_order_fix --backend="$BACKEND"
 for model in room_hydration room_expiry room_owner_seat room_departure_log room_member_return reconnect_attempt spectator_publication; do
   file="specs/${model}.qnt"
   $QUINT typecheck "$file"

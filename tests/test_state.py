@@ -185,3 +185,63 @@ def test_failed_configured_restore_cannot_become_ephemeral(monkeypatch, error, e
     monkeypatch.delenv("REDIS_PASSWORD", raising=False)
     assert asyncio.run(state.init()) == {}
     assert asyncio.run(state.ping())
+
+
+@pytest.mark.parametrize("failure", [None, "migration", "restore"])
+def test_lifespan_restores_after_database_startup_and_closes_storage(monkeypatch, tmp_path, failure):
+    from src import main, state_cache
+    from src.blobstore import LocalBlobStore
+    from src.dbbackend import BackendError
+    from src.dbbackend.sqlite import SqliteBackend
+
+    cache, store = AsyncMock(), AsyncMock()
+    if failure == "restore":
+        cache.ping.side_effect = AuthenticationError("cannot connect")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost")
+    monkeypatch.setattr(aioredis, "from_url", lambda url, *, decode_responses: store if decode_responses else cache)
+    monkeypatch.setattr(state_cache, "_redis", None)
+    monkeypatch.setattr(state, "_redis", None)
+    monkeypatch.setattr(main, "rooms", {})
+    monkeypatch.setattr(main, "restore_member_reservations", AsyncMock())
+    monkeypatch.setattr(main, "finish_room_shutdown", AsyncMock())
+
+    records = {}
+    backend = SqliteBackend(str(tmp_path / "test.db"))
+    initialize = main.db.init_db
+    if failure == "migration":
+        monkeypatch.setattr(main.db, "apply_migrations", AsyncMock(side_effect=BackendError("cannot migrate")))
+
+    async def open_database():
+        await initialize(backend=backend, blobs=LocalBlobStore(tmp_path))
+        # The serving process saves this lobby while its replacement starts.
+        records["kn:room:NEW"] = _serialize_room(Room("host", "New lobby", "", None, 4))
+
+    async def scan(pattern):
+        if failure == "restore":
+            raise AuthenticationError("cannot restore")
+        for key in records:
+            yield key
+
+    monkeypatch.setattr(main.db, "init_db", open_database)
+    store.scan_iter = scan
+    store.get.side_effect = records.__getitem__
+
+    async def check():
+        if failure:
+            with pytest.raises(BackendError if failure == "migration" else AuthenticationError):
+                async with main.lifespan(None):
+                    pytest.fail("served before room storage was restored")
+        else:
+            async with main.lifespan(None):
+                visible = "NEW" in main.rooms
+            assert visible
+        assert bool(records) == (failure != "migration")
+        assert backend._conn is None
+        assert not state.enabled() and state_cache._redis is None
+        cache.aclose.assert_awaited_once()
+        if failure == "migration":
+            store.aclose.assert_not_awaited()
+        else:
+            store.aclose.assert_awaited_once()
+
+    asyncio.run(check())
