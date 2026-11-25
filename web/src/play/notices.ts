@@ -1,27 +1,104 @@
-/**
- * What the play page tells the player in passing: toasts, the error card and
- * the "room is full" banner. Moved from web/static/play.js.
- */
+import { startDeadline } from '../start-deadline.ts';
 
-/** How long a toast stays before it fades, and how long the fade takes. */
-export const TOAST_VISIBLE_MS = 2700;
-export const TOAST_FADE_MS = 300;
-const BANNER_MS = 5000;
+type Tone = 'info' | 'success' | 'warn' | 'error';
 
-/** Show a short message that goes away by itself. */
-export const showToast = (message: string): void => {
+interface ToastOptions {
+  readonly key?: string;
+  readonly matchId?: string | null;
+}
+
+interface Toast {
+  readonly element: HTMLElement;
+  readonly matchId: string | null;
+  readonly tone: Tone;
+  readonly message: string;
+  cancel: () => void;
+}
+
+const MAX_TOASTS = 3;
+const active = new Map<string, Toast>();
+let currentMatch: string | null = null;
+
+const toastId = (key: string, matchId: string | null): string => JSON.stringify([matchId, key]);
+const isWarning = (tone: Tone): boolean => tone === 'warn' || tone === 'error';
+
+const removeToast = (id: string): void => {
+  const toast = active.get(id);
+  if (!toast) return;
+  active.delete(id);
+  toast.cancel();
+  toast.element.remove();
+  const announcer = document.getElementById('notice-announcer');
+  if (announcer?.textContent === toast.message) announcer.textContent = '';
+};
+
+export const dismissToast = (key: string, matchId: string | null = null): void => removeToast(toastId(key, matchId));
+
+export const clearNotices = (): void => {
+  for (const id of active.keys()) removeToast(id);
+};
+
+export const setNoticeMatch = (matchId: string | null): void => {
+  if (matchId === currentMatch) return;
+  currentMatch = matchId;
+  for (const [id, toast] of active) {
+    if (toast.matchId !== null && toast.matchId !== matchId) removeToast(id);
+  }
+};
+
+export const placeNotices = (inLobby: boolean): void => {
+  const stack = document.getElementById('toast-container');
+  const dock = document.getElementById(inLobby ? 'room-notices' : 'floating-notices');
+  if (stack && dock && stack.parentElement !== dock) dock.appendChild(stack);
+};
+
+/** Duplicate notices keep their original deadline. Routine updates yield to warnings. */
+export const showToast = (message: string, tone: Tone = 'info', options: ToastOptions = {}): void => {
   const container = document.getElementById('toast-container');
-  if (!container) return;
+  const matchId = options.matchId ?? null;
+  if (!container || (matchId !== null && matchId !== currentMatch)) return;
+  const id = toastId(options.key ?? message, matchId);
+  const previous = active.get(id);
+  if (previous?.message === message && previous.tone === tone) return;
+  if (previous) removeToast(id);
+  if (active.size >= MAX_TOASTS) {
+    const available = [...active].filter(([, toast]) => !toast.element.contains(document.activeElement));
+    const passive = available.find(([, toast]) => !isWarning(toast.tone));
+    const evict = passive?.[0] ?? (isWarning(tone) ? available[0]?.[0] : undefined);
+    if (evict === undefined) return;
+    removeToast(evict);
+  }
 
-  const toast = document.createElement('div');
-  toast.className = 'toast';
-  toast.textContent = message;
-  container.appendChild(toast);
+  const element = document.createElement('div');
+  element.className = 'toast';
+  element.dataset.tone = tone;
+  const text = document.createElement('span');
+  text.className = 'toast-message';
+  text.textContent = message;
+  const close = document.createElement('button');
+  close.className = 'toast-close';
+  close.type = 'button';
+  close.setAttribute('aria-label', 'Dismiss notification');
+  close.textContent = '×';
+  element.append(text, close);
 
-  setTimeout(() => {
-    toast.classList.add('fade-out');
-    setTimeout(() => toast.remove(), TOAST_FADE_MS);
-  }, TOAST_VISIBLE_MS);
+  const toast: Toast = { element, message, matchId, tone, cancel: () => {} };
+  const startExpiry = (): void => {
+    if (active.get(id) !== toast) return;
+    toast.cancel = startDeadline({
+      deadlineMs: isWarning(tone) ? 6000 : 4000,
+      onDeadline: () => removeToast(id),
+    }).cancel;
+  };
+  close.addEventListener('pointerdown', (event) => event.preventDefault());
+  close.addEventListener('click', () => removeToast(id));
+  close.addEventListener('focus', () => toast.cancel());
+  close.addEventListener('blur', startExpiry);
+  active.set(id, toast);
+  container.appendChild(element);
+  const announcer = document.getElementById('notice-announcer');
+  if (announcer) announcer.textContent = message;
+  startExpiry();
 };
 
 /** Fill and show the error card: the message and the way back to the lobby. */
@@ -48,21 +125,6 @@ export const showErrorCard = (message: string, joinUrl: string | null = null): v
     card.append(join);
   }
   card.append(back);
-};
-
-/** Tell a player who was put in the audience why. Closes itself. */
-export const showRoomFullBanner = (): void => {
-  const banner = document.createElement('div');
-  banner.className = 'room-full-banner';
-  const text = document.createElement('span');
-  text.textContent = 'Game is full — you’ve joined as a spectator';
-  const close = document.createElement('button');
-  close.className = 'banner-close';
-  close.textContent = '✕';
-  close.addEventListener('click', () => banner.remove());
-  banner.append(text, close);
-  document.body.appendChild(banner);
-  setTimeout(() => banner.remove(), BANNER_MS);
 };
 
 const warnBeforeLeaving = (event: BeforeUnloadEvent): void => {

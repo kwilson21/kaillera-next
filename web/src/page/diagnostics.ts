@@ -72,6 +72,7 @@ export interface DiagContext {
   log?: (line: string) => void;
   getFrame?: () => number;
   getSlot?: () => number;
+  isNativePaused?: () => boolean;
   sendScreenshot?: (shot: ScreenshotPayload) => void;
 }
 
@@ -158,12 +159,14 @@ export const createDiagnostics = () => {
   let log: (line: string) => void = () => {};
   let getFrame: () => number = () => 0;
   let getSlot: () => number = () => -1;
+  let isNativePaused: (() => boolean) | undefined;
   let sendScreenshot: ((shot: ScreenshotPayload) => void) | null = null;
 
   const init = (ctx: DiagContext): void => {
     log = ctx.log || log;
     getFrame = ctx.getFrame || getFrame;
     getSlot = ctx.getSlot || getSlot;
+    isNativePaused = ctx.isNativePaused;
     sendScreenshot = ctx.sendScreenshot || null;
   };
 
@@ -445,7 +448,11 @@ export const createDiagnostics = () => {
 
     // 1. RENDER-STALL: canvas pixel hash unchanged for 180+ frames.
     // WebGL readPixels is a GPU sync point, so determinism stress runs opt out.
-    if (captureAllowed()) {
+    if (isNativePaused?.()) {
+      renderLastHash = 0;
+      renderLastChangeFrame = frameNum;
+      renderStallLogged = false;
+    } else if (captureAllowed()) {
       const renderHash = captureCanvasHash();
       if (renderHash !== 0) {
         if (renderHash !== renderLastHash) {
@@ -554,6 +561,7 @@ export const createDiagnostics = () => {
       hookInstalled = false;
     }
     eventLog.length = 0;
+    isNativePaused = undefined;
     dropCanvasCaches();
     inputLastNonZeroFrame = -1;
     inputEverNonZero = false;

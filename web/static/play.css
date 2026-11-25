@@ -797,47 +797,6 @@ button:hover {
   color: #e66 !important;
 }
 
-/* Room-full banner */
-.room-full-banner {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 250;
-  background: rgba(42, 42, 64, 0.95);
-  color: #ccc;
-  font-size: 13px;
-  padding: 10px 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  animation: bannerSlideIn 0.3s ease;
-}
-.room-full-banner .banner-close {
-  background: transparent !important;
-  border: none;
-  color: #888;
-  min-width: 44px !important;
-  min-height: 44px !important;
-  font-size: 16px;
-  cursor: pointer;
-  padding: 0 4px !important;
-  min-height: auto !important;
-  line-height: 1;
-}
-.room-full-banner .banner-close:hover {
-  color: #eee;
-}
-@keyframes bannerSlideIn {
-  from {
-    transform: translateY(-100%);
-  }
-  to {
-    transform: translateY(0);
-  }
-}
-
 /* In-game info overlay */
 #info-overlay {
   position: fixed;
@@ -907,35 +866,122 @@ button:hover {
   }
 }
 
-/* Reconnecting banner */
+/* Notices sit below the room header or above the game without resizing it. */
+#play-notices {
+  position: fixed;
+  inset-block-start: max(10px, env(safe-area-inset-top));
+  inset-inline: max(12px, env(safe-area-inset-left)) max(12px, env(safe-area-inset-right));
+  z-index: 140;
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+
+#floating-notices,
 #host-wait-banner,
 #reconnecting-banner {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  padding: 8px 16px;
-  background: rgba(30, 30, 50, 0.95);
-  color: #ccc;
-  text-align: center;
-  font-size: 0.85rem;
-  z-index: 250;
-  animation: fadeIn 0.3s ease;
+  inline-size: min(100%, 27rem);
 }
-#reconnecting-banner.hidden {
+
+#host-wait-banner,
+#reconnecting-banner {
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  font: 500 0.875rem/1.4 var(--font-body);
+  padding: 8px 12px;
+  text-align: center;
+}
+
+#reconnecting-banner.hidden,
+#floating-notices:empty,
+#toast-container:empty {
   display: none;
 }
+
 #reconnecting-banner .spinner {
   display: inline-block;
-  width: 12px;
-  height: 12px;
-  border: 2px solid #555;
-  border-top-color: #aaf;
+  inline-size: 12px;
+  block-size: 12px;
+  border: 2px solid var(--line);
+  border-block-start-color: var(--accent);
   border-radius: 50%;
-  animation: spin 0.8s linear infinite;
   vertical-align: middle;
-  margin-right: 6px;
+  margin-inline-end: 6px;
 }
+
+#toast-container {
+  display: grid;
+  gap: 6px;
+  pointer-events: none;
+}
+
+#room-notices #toast-container:not(:empty) {
+  margin-block-end: 10px;
+}
+
+.toast {
+  --toast-tone: var(--accent);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-inline-start: 3px solid var(--toast-tone);
+  border-radius: var(--radius);
+  color: var(--text);
+  font: 500 0.875rem/1.35 var(--font-body);
+}
+
+.toast[data-tone='success'] {
+  --toast-tone: var(--p4);
+}
+
+.toast[data-tone='warn'] {
+  --toast-tone: var(--p3);
+}
+
+.toast[data-tone='error'] {
+  --toast-tone: var(--p1);
+}
+
+.toast-message {
+  padding: 8px 0 8px 12px;
+  overflow-wrap: anywhere;
+}
+
+.toast .toast-close {
+  pointer-events: auto;
+  display: grid;
+  place-items: center;
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  margin: 0;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  font: 400 22px/1 var(--font-body);
+  cursor: pointer;
+}
+
+.toast .toast-close:hover,
+.toast .toast-close:focus-visible {
+  color: var(--text);
+}
+
+#notice-announcer {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
@@ -947,53 +993,6 @@ button:hover {
   }
   to {
     opacity: 1;
-  }
-}
-
-/* Toast notifications */
-#toast-container {
-  position: fixed;
-  top: 50px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 200;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  pointer-events: none;
-}
-
-.toast {
-  background: rgba(0, 0, 0, 0.8);
-  color: #eee;
-  padding: 8px 16px;
-  border-radius: 6px;
-  font-size: 13px;
-  animation: toastIn 0.3s ease;
-}
-
-.toast.fade-out {
-  animation: toastOut 0.3s ease forwards;
-}
-
-@keyframes toastIn {
-  from {
-    opacity: 0;
-    transform: translateY(-10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@keyframes toastOut {
-  from {
-    opacity: 1;
-  }
-  to {
-    opacity: 0;
   }
 }
 
@@ -1673,6 +1672,9 @@ a.more-option {
   width: 100%;
   border-radius: 10px;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 #contextual-reset button[aria-pressed='true'] {
   background: #78dbb3;

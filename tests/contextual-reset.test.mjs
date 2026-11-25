@@ -69,14 +69,22 @@ test('contextual preview: stable gamepad, owner, delay, 12CB handoff and cancell
         await mkdir(process.env.OUT, { recursive: true });
         await page.screenshot({ path: `${process.env.OUT}/contextual-${viewport.width}x${viewport.height}.png` });
       }
-      await button.hover();
-      await page.mouse.down();
+      const cdp = await context.newCDPSession(page);
+      await cdp.send('Input.dispatchTouchEvent', {
+        type: 'touchStart',
+        touchPoints: [{ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }],
+      });
       assert.equal(await page.evaluate(() => window.KNState.resetComboHeld), true);
+      assert.equal(
+        await button.evaluate((el) => el.dispatchEvent(new MouseEvent('contextmenu', { cancelable: true }))),
+        false,
+        'the native callout must not take over a long press',
+      );
       await page.evaluate(() => window.previewRam.set(0x801317e4, 1 << 24));
-      await page.waitForTimeout(80);
-      assert.equal(await button.isVisible(), false);
+      await button.waitFor({ state: 'hidden' });
       assert.equal(await page.evaluate(() => window.KNState.resetComboHeld), false);
-      await page.mouse.up();
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await cdp.detach();
       await page.evaluate(() => window.previewRam.set(0x801317e4, 0));
       await button.waitFor({ state: 'visible' });
       await button.focus();
@@ -101,12 +109,11 @@ test('contextual preview: stable gamepad, owner, delay, 12CB handoff and cancell
         ])
           window.previewRam.set(a, v);
       });
-      await page.waitForTimeout(80);
-      await button.waitFor({ state: 'visible' });
+      await page.getByText(/12CB: request a reset/).waitFor({ state: 'visible' });
       await button.hover();
       await page.mouse.down();
       await page.evaluate(() => window.previewRam.set(0x80300004, 1));
-      await page.waitForTimeout(80);
+      await button.waitFor({ state: 'hidden' });
       assert.equal(
         await page.evaluate(() => window.KNState.resetComboHeld),
         false,
@@ -118,9 +125,8 @@ test('contextual preview: stable gamepad, owner, delay, 12CB handoff and cancell
       await button.hover();
       await page.mouse.down();
       await page.evaluate(() => window.previewRam.set(0x800a4d18, 1 << 16));
-      await page.waitForTimeout(80);
+      await button.waitFor({ state: 'hidden' });
       assert.equal(await page.evaluate(() => window.KNState.resetComboHeld), false);
-      assert.equal(await button.isVisible(), false);
       await page.mouse.up();
       await context.close();
     }

@@ -213,12 +213,13 @@ def test_lockstep_surfaces_and_recovers_browser_focus_loss():
     stop_idx = source.find("const stopSync = () => {")
     assert start_idx != -1
     assert stop_idx != -1
-    start_window = source[start_idx : start_idx + 1100]
+    start_window = source[start_idx : source.index("    _pageHideHandler =", start_idx)]
     stop_window = source[stop_idx : source.index("\n  };", stop_idx)]
 
-    assert "event?.target?.closest?.('#virtual-gamepad')" in start_window
-    assert "TAB-FOCUS recovered via virtual-gamepad" in start_window
-    assert "_clearEjsPauseFlagWithRetries(event?.type || 'virtual-gamepad', { guardInput: false })" in start_window
+    assert "if (target?.closest?.('#toast-container')) return;" in start_window
+    assert "target?.closest?.('#virtual-gamepad, #contextual-reset button, #reset-combo-hold')" in start_window
+    assert "TAB-FOCUS recovered via ${reason}" in start_window
+    assert "_clearEjsPauseFlagWithRetries(event?.type || reason, { guardInput: false })" in start_window
     assert "_restoreControlsFocus(event?.type || 'pointer')" in start_window
     assert "_clearEjsPauseFlagWithRetries(event?.type || 'pointer')" in start_window
     assert "document.addEventListener('pointerdown', _focusRestoreHandler, true)" in start_window

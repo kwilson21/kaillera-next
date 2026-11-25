@@ -206,6 +206,7 @@ export interface ControllerSettingsHost {
   readonly NetplayRollback?: { readonly refreshKeyMap?: () => void } | undefined;
   /** play.js's toast, on the play page. */
   readonly showToast?: ((message: string) => void) | undefined;
+  readonly knShowToast?: ((message: string, tone: 'success') => void) | undefined;
   /** play.js's remap wizard. */
   readonly _startIngameRemap?: (() => void) | undefined;
   readonly Switch2USB?: { readonly isSupported: () => boolean } | undefined;
@@ -273,6 +274,10 @@ export const startControllerSettings = (host: ControllerSettingsHost): Controlle
   // ── Toast ──────────────────────────────────────────────────────────────────
   const showSavedToast = (): void => {
     // play.js's toast on the play page; the demo page has none, so the panel shows its own.
+    if (host.knShowToast) {
+      host.knShowToast('Settings saved', 'success');
+      return;
+    }
     if (host.showToast) {
       host.showToast('Settings saved');
       return;

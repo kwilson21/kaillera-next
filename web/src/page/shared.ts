@@ -232,7 +232,8 @@ export const createShared = () => {
           typeof Element !== 'undefined' &&
           target instanceof Element &&
           (target.closest('#host-leave-dialog[open], #reset-combo-dialog[open], #more-dropdown:not(.hidden)') ||
-            (target.closest('#toolbar-more, #contextual-reset:not([hidden])') && (e.key === 'Enter' || e.key === ' ')))
+            (target.closest('#toolbar-more, #contextual-reset:not([hidden]), .toast-close') &&
+              (e.key === 'Enter' || e.key === ' ')))
         )
           return;
         if (_activeHeldKeys) _activeHeldKeys.add(e['keyCode']);
@@ -632,12 +633,10 @@ export const createShared = () => {
     const { EJS_emulator: ejs, _kn_ejsTouchDisabled: ejsTouchDisabled } = page();
     // The EmulatorJS toolbar can reopen during play. Its visibility only
     // controls touch input when EmulatorJS owns the touch controls.
-    const ejsMenuOpen =
-      ejs &&
-      (ejs.settingsMenuOpen ||
-        ejs.isPopupOpen?.() ||
-        (!ejsTouchDisabled && ejs.elements?.menu && !ejs.elements.menu.classList.contains('ejs_menu_bar_hidden')));
-    if (ejsMenuOpen) {
+    const ejsDialogOpen = ejs?.settingsMenuOpen || ejs?.isPopupOpen?.();
+    const ejsTouchToolbarOpen =
+      !ejsTouchDisabled && ejs?.elements?.menu && !ejs.elements.menu.classList.contains('ejs_menu_bar_hidden');
+    if (ejsDialogOpen || ejsTouchToolbarOpen) {
       for (const ck in touch) {
         if (Object.hasOwn(touch, ck)) touch[ck] = 0;
       }
@@ -687,7 +686,7 @@ export const createShared = () => {
       state.gameOn() &&
       state.slot !== null &&
       state.slot >= 0 &&
-      !ejsMenuOpen &&
+      !ejsDialogOpen &&
       !state.remapActive
     ) {
       input.buttons |= RESET_COMBO_MASK;

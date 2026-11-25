@@ -2181,7 +2181,13 @@ const install = async (p, role) => {
             last.held !== window.KNState.resetComboHeld
           ) {
             if (samples.length >= 100) samples.shift();
-            samples.push({ frame: frameNow(), scene, buttons: liveInput.buttons, held: window.KNState.resetComboHeld });
+            samples.push({
+              frame: frameNow(),
+              scene,
+              buttons: liveInput.buttons,
+              held: window.KNState.resetComboHeld,
+              at: performance.now(),
+            });
           }
           return liveInput;
         }

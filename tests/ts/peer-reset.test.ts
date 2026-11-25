@@ -235,6 +235,7 @@ const keptRuntime = () => {
     const mod={_kn_rollback_slot_reset(){resets++},_kn_feed_input(){sent++}};
     const window={KNCore,EJS_emulator:{gameManager:{Module:mod}},dispatchEvent(){}};
     const CustomEvent=class {};
+    const _config={matchId:"match"};
     const _syncLog=()=>{},_testRunPastEdgeFrame=()=>-1,_pushTickProfile=()=>{},_markTickReturn=()=>{};
     let _rbInputStallKey='',_rbInputStallStartTime=0,_rbStallLogged=0,_predictedKnownCount=0;
     const clearPeerStallTimers=()=>{_rbInputStallKey='';_rbInputStallStartTime=0};

@@ -39,6 +39,7 @@
           <button id="copy-link" class="copy-btn" title="Invite players">Invite</button>
         </div>
 
+        <div id="room-notices"></div>
         <p id="host-reload-notice" role="status" hidden></p>
 
         <div class="card-section name-section">
@@ -384,18 +385,20 @@
     <!-- Tap-to-unmute banner for streaming guests on mobile -->
     <div id="unmute-banner" class="hidden">Tap to unmute</div>
 
-    <!-- Reconnecting banner -->
-    <div id="host-wait-banner" hidden>
-      <span role="status">The host disconnected. Waiting for them to return.</span>
-      <span role="timer" aria-label="Time left for the host to return"></span>
+    <div id="play-notices">
+      <div id="host-wait-banner" hidden>
+        <span role="status">The host disconnected. Waiting for them to return.</span>
+        <span role="timer" aria-label="Time left for the host to return"></span>
+      </div>
+      <div id="reconnecting-banner" class="hidden" role="status">
+        <span class="spinner" aria-hidden="true"></span>
+        <span id="reconnecting-text"></span>
+      </div>
+      <div id="floating-notices">
+        <div id="toast-container"></div>
+      </div>
     </div>
-    <div id="reconnecting-banner" class="hidden">
-      <span class="spinner"></span>
-      <span id="reconnecting-text">Reconnecting to server&hellip;</span>
-    </div>
-
-    <!-- Toast notifications -->
-    <div id="toast-container"></div>
+    <div id="notice-announcer" role="status"></div>
 
     <!-- Error overlay -->
     <div id="error-msg" class="hidden">

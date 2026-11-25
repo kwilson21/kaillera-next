@@ -1,7 +1,7 @@
 /**
  * What the play page tells the player while its connection to the server is
  * down: the reconnecting banner, the "server is unreachable" note in a game,
- * the error in the lobby, and the toast when the first connection is slow.
+ * the error in the lobby, and a notice when the first connection is slow.
  *
  * These were bare timers in play.js, each cleared by hand on reconnect. Here
  * every notice is an Effect fiber that a reconnect interrupts, so none can
@@ -13,7 +13,7 @@
  *   unreachable after 15 s, and stays up until the socket returns;
  * - in the lobby, where nothing works without the server, the page gives up
  *   with an error after 30 s;
- * - a first connection that has not come up after 10 s gets a toast.
+ * - a first connection that has not come up after 10 s gets a notice.
  * Whether an outage is in a game or the lobby is decided when it starts.
  */
 import { Duration, Effect, Fiber } from 'effect';
@@ -66,7 +66,7 @@ export interface ConnectionNotices {
 
 /**
  * Start the notices for a page whose first connection is under way (the
- * slow-first-connection toast starts counting now).
+ * slow-first-connection notice starts counting now).
  */
 export const startConnectionNotices = (
   effects: NoticeEffects,

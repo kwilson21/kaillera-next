@@ -49,7 +49,7 @@ def test_a_full_room_takes_a_fifth_person_as_a_spectator(browser, server_url, ro
 
         fifth = _open(browser, f"{server_url}/play.html?room={room}&name=Fifth")
         pages.append(fifth)
-        expect(fifth.locator(".room-full-banner")).to_be_visible(timeout=10000)
+        expect(fifth.locator("#toast-container .toast", has_text="joined as a spectator")).to_be_visible(timeout=10000)
         expect(host.locator("#spectator-list")).to_have_text("Watching: Fifth", timeout=10000)
 
         # What went on the wire: one request each, in the shape the server's models describe.

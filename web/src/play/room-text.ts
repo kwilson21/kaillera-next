@@ -47,18 +47,18 @@ export const rosterToasts = (
   if (Object.keys(previousPlayers).length === 0 && Object.keys(previousSpectators).length === 0) return [];
   const toasts: string[] = [];
   for (const [pid, player] of Object.entries(players)) {
-    if (!previousPlayers[pid] && !previousSpectators[pid]) toasts.push(`${escapeHtml(player.playerName)} joined`);
+    if (!previousPlayers[pid] && !previousSpectators[pid]) toasts.push(`${player.playerName} joined`);
   }
   for (const [pid, player] of Object.entries(previousPlayers)) {
-    if (!players[pid] && !spectators[pid]) toasts.push(`${escapeHtml(player.playerName)} left`);
+    if (!players[pid] && !spectators[pid]) toasts.push(`${player.playerName} left`);
   }
   for (const [pid, spectator] of Object.entries(spectators)) {
     if (!previousSpectators[pid] && !previousPlayers[pid]) {
-      toasts.push(`${escapeHtml(spectator.playerName)} is watching`);
+      toasts.push(`${spectator.playerName} is watching`);
     }
   }
   for (const [pid, spectator] of Object.entries(previousSpectators)) {
-    if (!spectators[pid] && !players[pid]) toasts.push(`${escapeHtml(spectator.playerName)} left`);
+    if (!spectators[pid] && !players[pid]) toasts.push(`${spectator.playerName} left`);
   }
   return toasts;
 };

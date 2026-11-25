@@ -609,7 +609,7 @@ def query_network_health(df: pl.DataFrame) -> None:
         ack_lag = ack_entries.with_columns(
             lag=pl.col("msg").str.extract(r"lag=(\d+)", 1).cast(pl.Int64),
             confirmed=pl.col("msg").str.extract(r"confirmed=(-?\d+)", 1).cast(pl.Int64),
-        ).filter(pl.col("lag").is_not_null())
+        ).filter(pl.col("lag").is_not_null() & (pl.col("confirmed") != -1).fill_null(True))
 
         if ack_lag.height > 0:
             print("  Ack lag distribution (frames behind):")
@@ -1623,7 +1623,7 @@ def query_input_analysis(df: pl.DataFrame) -> None:
             continue
 
         # Parse input values for this slot's own controller
-        marker = f"s{slot_val}["
+        sample = re.compile(rf"\b(?:L{slot_val}@-?\d+|s{slot_val})\[(-?\d+),(-?\d+),(-?\d+)(?:,|\])")
         total = 0
         zero_count = 0
         button_frames = 0
@@ -1632,43 +1632,39 @@ def query_input_analysis(df: pl.DataFrame) -> None:
         last_nonzero_f = None
 
         for row in slot_inputs.iter_rows(named=True):
-            msg = row.get("msg", "")
-            f = row.get("f", 0)
-            if marker not in msg:
+            match = sample.search(row.get("msg", ""))
+            if not match:
                 continue
+            buttons, lx, ly = map(int, match.groups())
             total += 1
-            idx = msg.index(marker) + len(marker)
-            segment = msg[idx: msg.index("]", idx)]
-            parts = segment.split(",")
-            if len(parts) >= 3:
-                buttons = int(parts[0])
-                lx = int(parts[1])
-                ly = int(parts[2])
-                if buttons == 0 and lx == 0 and ly == 0:
-                    zero_count += 1
-                else:
-                    if first_nonzero_f is None:
-                        first_nonzero_f = f
-                    last_nonzero_f = f
-                    if buttons != 0:
-                        button_frames += 1
-                    if lx != 0 or ly != 0:
-                        stick_frames += 1
+            if buttons == 0 and lx == 0 and ly == 0:
+                zero_count += 1
+            else:
+                if first_nonzero_f is None:
+                    first_nonzero_f = row.get("f", 0)
+                last_nonzero_f = row.get("f", 0)
+                if buttons:
+                    button_frames += 1
+                if lx or ly:
+                    stick_frames += 1
 
+        if not total:
+            print(f"  slot={slot_val}: no local controller samples in input trace")
+            continue
         active = total - zero_count
-        pct = (active / total * 100) if total > 0 else 0
+        pct = active / total * 100
         print(f"  slot={slot_val}: {total} input samples, {active} active ({pct:.0f}%), "
               f"{zero_count} zero ({100-pct:.0f}%)")
         print(f"    buttons active: {button_frames} samples, stick active: {stick_frames} samples")
         if first_nonzero_f is not None:
             print(f"    first input at f={first_nonzero_f}, last input at f={last_nonzero_f}")
         else:
-            print(f"    !! NO INPUT EVER DETECTED — player may not have had focus/device")
+            print("    All recorded local inputs were neutral")
 
     # INPUT-FIRST events (when each peer's input first arrived)
     input_firsts = df.filter(pl.col("msg").str.contains("INPUT-FIRST"))
     if input_firsts.height > 0:
-        print(f"\n  First remote input received per peer:")
+        print("\n  First remote input received per peer:")
         for row in input_firsts.iter_rows(named=True):
             print(f"    slot={row.get('slot')} f={row.get('f')} {row['msg'][:150]}")
 

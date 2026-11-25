@@ -38,7 +38,7 @@ export const copyToClipboard = async (text: string, label: string): Promise<void
   if (window.isSecureContext && typeof navigator.clipboard?.writeText === 'function') {
     try {
       await navigator.clipboard.writeText(text);
-      showToast(`${label} copied!`);
+      showToast(`${label} copied!`, 'success');
       return;
     } catch {
       /* fall through to the textarea */
@@ -53,7 +53,7 @@ export const copyToClipboard = async (text: string, label: string): Promise<void
   // The only copy there is on an insecure origin (plain-http LAN play).
   document.execCommand('copy');
   area.remove();
-  showToast(`${label} copied!`);
+  showToast(`${label} copied!`, 'success');
 };
 
 /** Open the share sheet on a phone that has one; otherwise copy the link. */
@@ -66,7 +66,7 @@ export const shareOrCopy = async (link: ShareLink, mobile: boolean): Promise<voi
     await navigator.share({ title: link.title, url: link.url });
   } catch (err) {
     const name = err instanceof Error ? err.name : '';
-    if (shareFailureIsWorthTelling(name)) showToast('Share failed');
+    if (shareFailureIsWorthTelling(name)) showToast('Share failed', 'warn');
   }
 };
 

@@ -230,6 +230,43 @@ test('window.KNDiag measures, crops and logs what kn-diagnostics.js did', () => 
   assert.ok(solid.includes(true) && solid.includes(false));
 });
 
+test('the render-stall window starts over on leaving a native pause', () => {
+  const messages: string[] = [];
+  const window: DiagWindow = {
+    KNCapture: { allowed: () => true },
+    KNAudio: { ctx: { state: 'running' } },
+    addEventListener: () => undefined,
+  };
+  const document = {
+    querySelector: () => ({
+      width: 320,
+      height: 240,
+      getContext: () => null,
+    }),
+    createElement: () => ({
+      getContext: () => ({
+        drawImage: () => undefined,
+        getImageData: () => ({ data: solid(50, 50, 100) }),
+      }),
+    }),
+  };
+  vm.runInContext(pageScript(), vm.createContext({ window, document, navigator: {} }));
+  const diag = window.KNDiag ?? assert.fail('missing diagnostics');
+  let frame = 360;
+  let paused = true;
+  diag.init({ log: (message) => messages.push(message), getFrame: () => frame, isNativePaused: () => paused });
+  const neutral = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
+  for (; frame <= 660; frame += 60) diag.checkFreeze(neutral);
+  paused = false;
+  for (; frame <= 840; frame += 60) diag.checkFreeze(neutral);
+  assert.equal(
+    messages.some((message) => message.startsWith('RENDER-STALL')),
+    false,
+  );
+  diag.checkFreeze(neutral);
+  assert.ok(messages.some((message) => message.startsWith('RENDER-STALL start=720 cur=900 ')));
+});
+
 test('neutral input reports touch activity at the gap and when input resumes', () => {
   const window: DiagWindow = {
     KNCapture: { allowed: () => false },

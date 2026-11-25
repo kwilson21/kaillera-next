@@ -81,6 +81,7 @@ export function startContextualReset(host: Window, state: PageState, read: ReadW
   const close = (): void => {
     send({ type: 'cancel' });
   };
+  button.addEventListener('contextmenu', (event) => event.preventDefault());
   button.addEventListener('pointerdown', (event) => {
     if (!event.isPrimary || event.button !== 0) return;
     event.preventDefault();
