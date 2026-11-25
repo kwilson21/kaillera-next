@@ -1,387 +1,131 @@
 # kaillera-next
 
-Play retro games online with friends — no downloads, no emulator setup. Visit the URL, drop your ROM, and play.
-
-kaillera-next is a browser-based netplay platform built on [EmulatorJS](https://emulatorjs.org) (mupen64plus-next WASM core). Players connect through WebRTC for low-latency peer-to-peer gameplay, with the server handling only room management and signaling.
+Play Super Smash Bros. for Nintendo 64 or Smash Remix with friends in your
+browser. Bring a compatible ROM from your device. The game runs in EmulatorJS
+with a patched mupen64plus-next WebAssembly core.
+[Open Kaillera Next](https://kaillera-next.thesuperhuman.us/) ·
+[Supported ROMs](server/config/known_roms.json) · [EmulatorJS](https://emulatorjs.org)
 
 ## How it works
 
-1. One player creates a room and shares the invite link
-2. Others join by clicking the link or entering the room code
-3. Players whose browsers run the emulator bring their own compatible game file.
-   The browser can cache the file locally in IndexedDB. Spectators do not need a game file.
-4. Host picks a netplay mode and starts the game
+1. Create a room and share its invite link or room code.
+2. Friends can join as players or watch as spectators. Each browser running the
+   emulator needs its own copy of the same ROM. Streaming guests and spectators
+   can join without a ROM.
+3. The host selects a netplay mode and starts the game.
 
-The public Kaillera Next service does not host, distribute, or link to ROMs.
-Peer-to-peer ROM transfer between players is disabled on the public service.
+Drop a `.z64`, `.n64`, `.v64`, or `.zip` file into the room. The browser can
+keep ROMs in its local library using IndexedDB. The public
+service does not host, distribute, or link to ROMs, and peer-to-peer ROM sharing
+is disabled there.
 
 ### Netplay modes
 
-**Rollback** — All players run the emulator in sync. Inputs are exchanged every frame over WebRTC DataChannels in a full mesh (up to 4 players, 6 connections). Uses a [patched mupen64plus-next WASM core](build/) with deterministic timing (`_kn_set_deterministic`, `_kn_set_frame_time`) and a [C-level GGPO-style rollback engine](build/kn_rollback/) (`_kn_pre_tick` / `_kn_post_tick`) that predicts remote inputs and replays on misprediction, keeping responsive play under ~150 ms RTT. Every frame of every match runs on that engine, solo play included; a core without it stops at the start and says so. Delay is symmetrically negotiated via host-authoritative broadcast at game start and works mobile↔mobile with bit-identical state across iOS Safari and desktop Chrome.
+| Mode | How it plays |
+| --- | --- |
+| **Rollback** (default) | Up to four players run the emulator locally and exchange inputs over WebRTC. The GGPO-style rollback engine predicts missing inputs and replays frames when a prediction is wrong. |
+| **Lockstep** | Uses the same emulator and engine. Each frame waits for all players’ inputs before it runs. |
+| **Streaming** | The host runs the emulator and sends live video and audio over WebRTC. Guests send their controller inputs back to the host. |
 
-**Streaming** — Host runs the only emulator and streams the canvas as video to guests via WebRTC MediaStream. Guests send controller input back over a DataChannel. Zero desync by design — only one emulator instance exists. SDP is optimized for low-latency gaming (H264/VP9 preference, high bitrate floor, minimal jitter buffer).
-
-Both modes support:
-- Spectators (receive video stream, no input)
-- Late join (mid-game state sync via compressed save state)
-- Desync detection and opt-in resync (rollback)
-- Virtual gamepad for mobile/touch devices
-- Mode switching between games without page reload (WASM module hibernates between sessions)
+Spectators can watch a live match. In Rollback and Lockstep, a player joining
+mid-match loads the host’s emulator state before catching up.
 
 ### Controller support
 
-Gamepads work alongside keyboard controls; phones and tablets also get on-screen touch controls.
+Use a keyboard, a browser-recognized gamepad, or the on-screen controls on touch
+devices. In the room, open **Configure Controller → Quick Setup** to remap
+buttons. The panel also has stick deadzone and sensitivity settings.
 
-- **Tested:** a modern Xbox controller.
-- **Should work, untested:** gamepads your browser recognizes with the standard layout (PlayStation, original Switch Pro, 8BitDo, or any generic pad that reports it).
-- **Switch 2 Pro Controller (experimental):** tested on macOS in Chrome over USB-C (buttons and both sticks). Wired only. Only macOS with Chrome has been tested.
-
-If a controller's buttons land in the wrong place, open **Configure Controller** in the room, before the game starts, and press **Quick Setup** to remap them one at a time. Mappings are saved in your browser, and the same panel has stick deadzone and sensitivity settings.
-
-To use a Switch 2 Pro Controller:
-
-1. Plug it in with a USB-C cable
-2. In the room, before the game starts, click **Connect Switch 2 Pro** (next to **Configure Controller**) and choose the controller in the browser's dialog
-3. Press any button
-
-You only do this once. After that first permission grant the controller is re-enabled automatically each time it is plugged in, and the Connect button hides itself while a granted controller is plugged in; press any button to wake it, as with any controller.
-
-Limits: this needs a browser with WebUSB (Chrome; Edge should work), so Safari and Firefox are out. Bluetooth is not supported (the controller uses a custom BLE protocol). On Windows the browser may need the WinUSB driver to open the controller (for example installed with Zadig), and on Linux it may need a udev rule; neither is tested.
+Switch 2 Pro Controller support is experimental and has been tested in Chrome
+on macOS over USB-C. Connect the cable, choose **Connect Switch 2 Pro** in the
+room before starting a game, then select the controller in the browser prompt
+and press a button. This uses WebUSB.
 
 ## Quick start
 
-Requires Python 3.11+, Node.js 24 with npm, [uv](https://docs.astral.sh/uv/), and [just](https://github.com/casey/just).
+Install Python 3.11 or later, Node.js 24 with npm, uv, and just. Run these
+commands from the repository root. [uv](https://docs.astral.sh/uv/) ·
+[just](https://github.com/casey/just)
 
 ```bash
-# Install dependencies
 just setup
-
-# Start the server (HTTP, no Redis)
-just serve
-# → http://localhost:27888/
+DISABLE_HTTPS=1 just serve
 ```
 
-The server sends the headers required for cross-origin isolation. On
-`http://localhost:27888/` the browser treats loopback as a secure context,
-so the rollback capability check can pass over HTTP. Use HTTPS when
-connecting from another device over the network.
+`just setup` installs locked Python and Node dependencies and builds the
+frontend bundles.
 
-### Full setup (HTTPS + Redis)
+Open <http://localhost:27888/> on the machine running the server. Rollback and
+Lockstep require cross-origin isolation for `SharedArrayBuffer`. The server
+sends the required headers on the play page, and browsers treat
+`http://localhost` as a secure context. Use trusted HTTPS when accessing the
+server from another device.
 
-```bash
-# One-time: generate HTTPS certs (see HTTPS setup below)
-just certs
+### HTTPS and Redis
 
-# Start dev server (Redis + HTTPS)
-just dev
-# → https://<your-domain>:27888/
-```
+The server enables HTTPS when `certs/cert.pem` and `certs/key.pem` are present
+and `DISABLE_HTTPS` is unset.
 
-### HTTPS setup for other devices
+- For a trusted certificate on a LAN, install lego. Set `LEGO_EMAIL`,
+  `LEGO_DOMAIN`, and `CLOUDFLARE_DNS_API_TOKEN` in `server/.env`. The token needs
+  DNS edit access for the domain’s Cloudflare zone. Run `just certs` to issue or
+  renew the certificate. Point the hostname at the server’s LAN IP in local DNS.
+  [lego](https://go-acme.github.io/lego/)
+- Run `just serve` and open `https://<your-domain>:27888/`. To include Redis,
+  run `just dev` with Docker Compose available. Redis lets room state survive
+  server restarts. Use `just redis-stop` to stop the container.
 
-`just certs` issues a real Let's Encrypt certificate via [lego](https://go-acme.github.io/lego/) using the Cloudflare DNS-01 challenge, so the cert is trusted by every device (including mobile) without installing a local CA. The subdomain never needs to resolve publicly — point it at your LAN IP via local DNS (AdGuard, Pi-hole, `/etc/hosts`, etc.).
-
-#### 1. Install lego
-
-```bash
-brew install lego  # macOS
-# or download a release: https://github.com/go-acme/lego/releases
-```
-
-#### 2. Create a Cloudflare API token
-
-In the [Cloudflare dashboard](https://dash.cloudflare.com/profile/api-tokens), create a token with **Zone:DNS:Edit** scoped to the zone you'll use.
-
-#### 3. Configure and generate certs
-
-Add to `server/.env`:
-
-```bash
-LEGO_EMAIL=you@example.com
-LEGO_DOMAIN=kn-test.example.com
-CLOUDFLARE_DNS_API_TOKEN=your-scoped-token-here
-```
-
-Then:
-
-```bash
-just certs
-```
-
-Certs land in `certs/`. Re-run `just certs` to renew (Let's Encrypt certs expire every ~90 days).
-
-#### Alternative: mkcert (localhost only)
-
-[mkcert](https://github.com/FiloSottile/mkcert) works for localhost but requires installing its CA on every mobile device. Prefer the lego flow for cross-device testing.
-
-### Docker
+### Docker and deployment
 
 ```bash
 docker build -t kaillera-next .
-docker run -p 27888:27888 -e ALLOWED_ORIGIN="https://yourdomain.com" kaillera-next
+docker run --rm -p 127.0.0.1:27888:27888 kaillera-next
 ```
 
-The Docker image runs as a non-root user with a health check on `/health`.
+The image builds the frontend bundles and serves `/health` for health checks.
+For hosting, use the [VPS setup](deploy/vps/README.md), [Render setup](deploy/render/README.md),
+[Cloudflare Worker setup for the landing pages](deploy/static/README.md), or
+[Docker Swarm stack](docker-compose.prod.yml).
 
-### Production (Docker Swarm / Portainer)
+The server entry point defines `PORT`, TLS, and `ALLOWED_ORIGIN`.
+Room persistence reads `REDIS_URL` or the `REDIS_*` settings.
+The database defaults to SQLite and can use Cloudflare D1.
+[Server entry point](server/src/main.py) · [Room persistence](server/src/state.py) ·
+[Database backend](server/src/dbbackend/__init__.py)
 
-```bash
-docker stack deploy -c docker-compose.prod.yml kaillera-next
-```
-
-Includes Redis for session persistence (blue-green deploys, reconnect survival) and persistent log volumes.
+The HTTP routes define the API and admin access, which requires `ADMIN_KEY`.
+Socket.IO handlers define room and signaling events.
+[HTTP routes](server/src/api/app.py) · [Socket.IO handlers](server/src/api/signaling.py)
 
 ## Architecture
 
-```
-┌──────────────────┐         ┌──────────────────┐
-│ Browser A        │         │ Browser B        │
-│ EmulatorJS +     │◄──P2P──►│ EmulatorJS +     │
-│ WebRTC mesh      │  WebRTC │ WebRTC mesh      │
-└────────┬─────────┘         └────────┬─────────┘
-         │  Socket.IO                 │
-         └────────────┬───────────────┘
-                      ▼
-           ┌─────────────────────┐
-           │ kaillera-next       │
-           │ FastAPI + Socket.IO │
-           │ + Redis             │
-           │ :27888              │
-           └─────────────────────┘
-```
+FastAPI serves the web app and HTTP API. Socket.IO coordinates rooms, relays
+WebRTC signaling, and carries game coordination messages. Player inputs and
+streaming media travel over WebRTC, using a TURN relay when needed. The server
+also stores match diagnostics and feedback.
 
-The server handles room creation, player coordination, and WebRTC signaling. Once peers are connected, game data flows directly between browsers — the server is idle during rollback gameplay. Redis persists room state across deploys and reconnects.
+- TypeScript implements the room and connection state machines. The build
+  writes browser bundles to `web/static/dist/`. The gameplay scripts integrate
+  those bundles with EmulatorJS. [TypeScript](web/src/) · [Gameplay scripts](web/static/)
+- The Python server’s Socket.IO payload models generate the browser’s
+  protocol types with `npm run protocol`. [Python server](server/src/) ·
+  [Payload models](server/src/api/payloads.py)
+- The repository includes the patched emulator core. If you change the core
+  or C rollback engine, rebuild it using the build script and copy the
+  resulting `.data`, `.js`, and `.wasm` files from `build/output/` into
+  `web/static/ejs/cores/` together. [Build script](build/build.sh) ·
+  [C rollback engine](build/kn_rollback/)
+- Quint models cover room and connection behavior.
+  [Models](specs/) · [Netcode diagrams](docs/netcode-diagrams.md) ·
+  [Netplay invariants](docs/netplay-invariants.md)
 
-All frontend assets are self-hosted (EmulatorJS, Socket.IO) — zero CDN dependencies. The server sends `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` headers to enable `crossOriginIsolated` on all browsers, unlocking SharedArrayBuffer and high-resolution `performance.now()`.
+## Contributing
 
-## Project structure
-
-```
-server/              Python signaling server (FastAPI + Socket.IO + uvloop)
-  src/
-    main.py            Entry point — serves API, Socket.IO, and static frontend
-    state.py           Redis-backed room persistence
-    state_cache.py     Redis-backed save-state cache for late joiners
-    ratelimit.py       Per-IP rolling-window rate limiting
-    db.py              Database: SQLite or Cloudflare D1 backend, SQL migrations in server/migrations/
-    migrate.py         Plain-SQL schema migrations shared by SQLite/D1 (replaces Alembic)
-    retention.py       Flags matches with a crash/freeze/desync; sweeps expired ones
-    match_rotation.py  Rolls up ended session logs into Parquet + match_metrics rows
-    blobstore.py       Blob storage for screenshots (R2 in prod, local folder in dev)
-    stats.py           "Matches started in last 7 days" counter for the front page
-    landing_build.py   Content-hash build id shared by the server and the landing Worker
-    api/
-      app.py           REST endpoints, security headers (COOP/COEP/CSP), admin API
-      signaling.py     Socket.IO events — rooms, WebRTC relay, ROM sharing, game data
-      payloads.py      Pydantic v2 payload models + @validated decorator
-      og.py            Open Graph meta-tag injection + build-time-rendered OG cards (no runtime browser)
-      og_card.py       Live per-room invite card composed from the host's latest frame (PIL)
-      turn.py          Cloudflare Realtime TURN credentials for /ice-servers
-      desync_vision.py   Claude vision endpoint for screenshot diff
-      desync_prompts.py  Prompt templates for vision-based desync analysis
-web/                 Static frontend (HTML + JS, served by FastAPI)
-  index.html           Lobby — create/join rooms, invite links
-  join.html            Invite page (/join?room=CODE) — who invited you, Join vs Watch, waking
-  play.html            Game page — overlay, EmulatorJS embed, toolbar
-  admin.html           Admin dashboard (session logs, events, feedback, screenshots)
-  privacy.html         Privacy notice — what's collected (diagnostics, screenshots), opt-out
-  demo.html            Interactive rollback demo (user-supplied ROM required)
-  error.html           Error/fallback page
-  static/
-    play.js            Play page orchestrator (Socket.IO, overlay, ROM handling, engine dispatch)
-    landing.css        Front-page styles (direction A tokens)
-    dist/kn-landing.js Front-page board controller (room creation, open-rooms board), built from web/src/landing/front.ts
-    dist/kn-join.js    Invite-page controller (room lookup, join/watch states), built from web/src/landing/join.ts
-    dist/kn-wake-art.js Standalone TypeScript bundle for waking-state art on the static landing pages
-    dist/kn-site.js    Small TypeScript bundle for pages without the core (safe storage wrapper, window.KNSite)
-    admin.js           Admin dashboard logic (sessions, events, feedback, screenshots)
-    admin.css          Admin dashboard styles
-    play.css           Play page styles (room overlay tokens, direction A)
-    netplay-rollback.js    Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay); lockstep mode is the same engine with predictions off
-    rollback-shadow-worker.js  Shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
-    netplay-lockstep.js    Deprecated compat shim (re-fetches netplay-rollback.js for cached play.html pages that still request the old filename)
-    netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream); its decisions are observed from web/src/streaming
-    switch2-usb.js         Starts the WebUSB handshake for the Switch 2 Pro Controller (web/src/page/switch2-usb.ts)
-    controller-settings.js Starts the in-game controller settings panel (logic in web/src/page/controller-settings/)
-    virtual-gamepad.js     Starts the on-screen touch controls (web/src/page/virtual-gamepad/)
-    kn-audio.js            Starts the AudioWorklet pump + rollback audio capture (web/src/page/audio.ts)
-    kn-capture.js          Diagnostic gameplay-canvas capture opt-out policy (localStorage flag)
-    kn-vision-client.js    Starts the desync-vision client (web/src/page/vision-client.ts)
-    audio-worklet-processor.js  AudioWorklet ring buffer for rollback audio
-    core-redirector.js     Redirect EJS core download to patched WASM, IDB cache management
-    api-sandbox.js         Browser API interception (rAF, performance.now, getGamepads)
-    feedback.js            In-app feedback collection; starts web/src/site/feedback.ts
-    version.js             Version display + changelog modal; starts web/src/site/version.ts
-    version-guard.js       Cross-tab version mismatch guard (forces reload after deploys); starts web/src/site/version-guard.ts
-    ejs-loader.js          EmulatorJS loader shim (boot + script setup hooks)
-    demo.js                Demo page orchestrator (fake peer + menu autopilot); its options, network settings and HUD text are web/src/demo
-    fake-peer.js           Synthetic P2 for the demo page (logic in web/src/page/fake-peer.ts)
-    ssb64-menu-autopilot.js  Closed-loop menu driver for the demo (logic in web/src/page/menu-autopilot.ts)
-    rollback-timeline.js   Demo page's live rollback-metrics HUD (logic in web/src/page/rollback-timeline.ts)
-    socket.io.min.js       Self-hosted Socket.IO client (v4.8.4)
-    vendor/fflate.min.js   Self-hosted compression lib used to extract ROM ZIP archives
-    ejs/                   Self-hosted EmulatorJS runtime, compression libs, localization
-    ejs/cores/             Patched mupen64plus-next WASM core
-  src/                    Strict TypeScript frontend, including standalone landing-page waking art
-build/               WASM core build system (Docker + C patches)
-tests/               E2E tests (pytest + Playwright) + VGP visual regression
-docs/                Roadmap, MVP plan, design specs
-certs/               TLS certificates for HTTPS dev (gitignored)
-```
-
-## Building the WASM core
-
-The pre-built patched core is included at `web/static/ejs/cores/`. You only need to rebuild if you modify the C patches.
-
-The build compiles a patched mupen64plus-next core with:
-- Deterministic timing exports (`_kn_set_deterministic`, `_kn_set_frame_time`)
-- C-level resync exports (`_kn_sync_hash`, `_kn_sync_read`, `_kn_sync_write`, `_kn_rdram_block_hashes`)
-- Frame-locked audio exports (`_kn_get_audio_ptr`, `_kn_get_audio_samples`, `_kn_reset_audio`, `_kn_get_audio_rate`)
-- Strict IEEE 754 floating-point (`-fno-fast-math`, `-ffp-contract=off`)
-- NaN canonicalization via `wasm-opt --denan` (injected before `--asyncify`)
-- Deterministic RNG (`srand(0)`) and RTC
-
-### Build steps
-
-```bash
-# 1. Build the Docker image with Emscripten SDK (one-time, ~10 min)
-docker build -t emulatorjs-builder build/
-
-# 2. Compile the patched core (~5-15 min depending on CPU)
-docker run --rm -v $(pwd)/build:/build emulatorjs-builder bash /build/build.sh
-
-# 3. Deploy to web/static/ejs/cores/ (all three must come from the same build)
-cp build/output/mupen64plus_next-wasm.data web/static/ejs/cores/
-cp build/output/mupen64plus_next_libretro.js web/static/ejs/cores/
-cp build/output/mupen64plus_next_libretro.wasm web/static/ejs/cores/
-```
-
-The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, applies patches from `build/patches/`, compiles to LLVM bitcode, links through RetroArch with asyncify, and packages into a 7z `.data` archive that EmulatorJS loads at runtime.
-
-### Patches
-
-| Patch | Description |
-|---|---|
-| `mupen64plus-kn-all.patch` | Core exports: deterministic timing, resync hash/read/write, audio capture |
-| `audio-backend-skip-output.patch` | Bypasses the libretro audio output path (sinc resampler + `audio_batch_cb`) during netplay — confirmed cross-engine noisy |
-| `mupen64plus-deterministic-timing.patch` | `features_cpu.c` and `profile.c` timing fixes |
-| `mupen64plus-wasm-determinism.patch` | Strict FP compile flags, FPU NaN canonicalization, `srand(0)`, deterministic RTC |
-| `mupen64plus-ai-determinism.patch` | AI DMA deterministic audio interface timing |
-| `mupen64plus-cheat-set-overflow.patch` | Fixes a one-byte stack buffer overflow in `retro_cheat_set`'s hex parsing |
-| `mupen64plus-fpu-trace.patch` | FPU operation tracing for cross-platform determinism verification |
-| `mupen64plus-headless-tick.patch` | Skips `video_cb` presentation in `retro_run()` during rollback replay while keeping GLSM/GL state in sync |
-| `mupen64plus-glsm-uniform-bounds.patch` | Bounds-checks GLSM uniform/program-id lookups (Emscripten GL ids pass 1024 within a match) |
-| `mupen64plus-rdp-replay-skip.patch` | Skips GLideN64 raster submission and framebuffer/depth copybacks during masked replay |
-| `mupen64plus-static-save-scratch.patch` | Static reusable buffer for `savestates_save_m64p` instead of malloc/free; records the RDRAM offset for taint-aware hashing |
-| `mupen64plus-rsp-taint.patch` | Taints RDRAM blocks written by direct RSP HLE memcpys so `kn_game_state_hash` can skip them |
-| `gliden64-rdram-taint.patch` | Taints RDRAM blocks written by GLideN64's color/depth buffer readback |
-| `gliden64-pbo-scope.patch` | Keeps GLideN64's `GL_PIXEL_PACK_BUFFER` binding scoped to its own readback calls |
-| `gliden64-vertex-bounds.patch` | Backports two upstream GLideN64 fixes for out-of-bounds vertex-buffer indexing from malformed display lists |
-| `mupen64plus-softfloat.patch` | SoftFloat FPU for bit-exact cross-platform floating point |
-| `retroarch-deterministic-timing.patch` | RetroArch `_emscripten_get_now()` override + AUDIO_FLAG_SUSPENDED bypass |
-
-## Configuration
-
-| Variable | Default | Description |
-|---|---|---|
-| `ALLOWED_ORIGIN` | `*` | CORS origin — set to your domain in production |
-| `PORT` | `27888` | Server listen port |
-| `MAX_ROOMS` | `100` | Maximum concurrent rooms |
-| `MAX_SPECTATORS` | `20` | Maximum spectators per room |
-| `REDIS_URL` | — | Redis connection URL (required for session persistence) |
-| `REDIS_HOST` | `redis` | Redis host (used if REDIS_URL not set) |
-| `REDIS_PORT` | `6379` | Redis port |
-| `REDIS_PASSWORD` | — | Redis password |
-| `REDIS_DB` | `0` | Redis logical DB index (used if REDIS_URL not set) |
-| `ADMIN_KEY` | — | Admin API key for management endpoints |
-| `LOG_RETENTION_DAYS` | `7` | Auto-delete old session data after N days |
-| `FLAGGED_STALE_DAYS` | `180` | Auto-delete unresolved flagged matches after N days |
-| `DB_PATH` | `data/kn.db` | SQLite database file path |
-| `D1_DATABASE_ID`, `D1_API_TOKEN`, `CF_ACCOUNT_ID` | — | Switch to the Cloudflare D1 backend instead of SQLite |
-| `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (with `CF_ACCOUNT_ID`) | — | Switch screenshot blob storage to Cloudflare R2 instead of a local folder |
-| `IP_HASH_SALT` | random | Salt for IP address hashing (random per restart if unset) |
-| `KN_PROXY_SECRET` | — | Shared secret trusting the landing Worker's forwarded client IP |
-| `PUBLIC_ORIGINS` | — | Extra origins allowed to read `/health`, `/list`, `/room/*`, `/api/stats/public` |
-| `TRUSTED_PROXY_IPS` | — | Comma-separated trusted proxy IPs for X-Forwarded-For |
-| `TURN_SECRET` | — | HMAC secret for time-limited TURN credentials |
-| `TURN_SERVERS` | — | Comma-separated TURN server URLs |
-| `ICE_SERVERS` | — | Legacy static ICE server config (JSON) |
-| `CF_TURN_KEY_ID`, `CF_TURN_API_TOKEN` | — | Cloudflare Realtime TURN credentials for `/ice-servers` |
-| `PER_IP_SPECTATOR_CAP` | `3` | Max spectator slots one IP can hold in a room |
-| `ROM_SHARING_ENABLED` | `true` | Server option for peer-to-peer ROM transfer. The public deployment sets this to `false`. |
-| `ANTHROPIC_API_KEY`, `DESYNC_VISION_ENABLED` | — | Enable the Claude desync-vision endpoint (`DESYNC_VISION_ENABLED=1`) |
-| `DISABLE_HTTPS` | — | Set to disable HTTPS even when certs are present |
-| `DISABLE_RATE_LIMIT` | — | Set to `1` to disable per-IP rate limiting (dev only) |
-| `DEBUG_MODE` | — | Enables `debug-sync` and local log files; `debug-logs` writes to stdout even when unset |
-| `GIT_VERSION` | — | Override version string (set automatically in Docker) |
-| `KEEPALIVE_SECONDS` | `0` (off) | How often play pages ping `/health` |
-| `RENDER_EXTERNAL_URL`, `RENDER` | — | Render.com-provided external URL / platform flag (CORS origin, trusted-proxy behavior) |
-| `BUDGET_AUTO_FLAGGED_BYTES` | `200 MiB` | Byte budget for auto-flagged match blob retention |
-| `PARQUET_DIR` | `data/parquet` | Output dir for rolled-up match-log Parquet files |
-
-## REST endpoints
-
-**Public:**
-
-| Endpoint | Description |
-|---|---|
-| `GET /health` | Health check |
-| `GET /list?game_id=...` | Room listing (EmulatorJS-Netplay compatible) |
-| `GET /room/{room_id}` | Room info (rate-limited) |
-| `GET /ice-servers` | ICE/TURN server configuration |
-| `GET /api/cached-state/{rom_hash}` | Retrieve cached save state |
-| `POST /api/cache-state/{rom_hash}` | Upload save state to cache |
-| `POST /api/session-log` | HTTP fallback for session log flush |
-| `POST /api/client-event` | Client event logging |
-| `POST /api/feedback` | Feedback submission |
-| `GET /api/rom-hashes` | Known ROM hashes |
-| `GET /api/core-info` | Content-hashed WASM core build info |
-| `GET /api/version` | Static asset version |
-| `GET /api/landing-build` | Content-hash build id shared with the landing Worker |
-| `GET /api/stats/public` | Matches-started-this-week counter for the front page |
-| `GET /room/{room_id}/card.jpg` | Invite card image (room name + live frame) for social sharing |
-| `GET /room/{room_id}/frame.jpg` | Latest board frame for a listed, in-game room |
-| `GET /privacy`, `GET /privacy.html` | Privacy notice page |
-
-**Admin** (requires `ADMIN_KEY`):
-
-| Endpoint | Description |
-|---|---|
-| `GET /admin/api/stats` | Server statistics |
-| `GET /admin/api/session-logs` | List session logs |
-| `GET /admin/api/session-logs/{log_id}` | Download a session log |
-| `GET /admin/api/client-events` | List client events |
-| `GET /admin/api/client-events/{event_id}` | Client event detail |
-| `GET /admin/api/feedback` | List feedback |
-| `GET /admin/api/feedback/{feedback_id}` | Feedback detail |
-| `GET /admin/api/screenshots/{match_id}` | List screenshots for a match |
-| `GET /admin/api/screenshots/img/{screenshot_id}` | Serve screenshot image |
-| `GET /admin/api/session-logs/{log_id}/export` | Stream a session log's entries as newline-delimited JSON |
-| `GET /admin/api/session-logs/{log_id}/client-events` | A session's client events (as the detail bundles them), without its log |
-| `GET /admin/api/matches` | List recently-rotated matches with precomputed metrics |
-| `GET /admin/api/matches/{match_id}` | One match's precomputed metrics row |
-| `GET /admin/api/input-audit/{match_id}` | Per-slot input audit for a match |
-| `GET /admin/api/session-timeline` | Session timeline; requires `match_id` or `room` query parameter |
-| `GET /admin/api/desync-events` | List vision-validated desync events; requires `match_id` query parameter |
-
-## Current status
-
-V1 is feature-complete and deployment-ready:
-
-- Lobby with room creation, invite links, and spectator support
-- 4-player deterministic rollback netcode (GGPO-style C-level engine, mobile↔mobile bit-identical)
-- Streaming mode (host video → guests) with SDP optimization
-- Spectators and late join (mid-game state sync)
-- Desync detection with opt-in star-topology resync
-- P2P ROM sharing with legal consent flow
-- True analog gamepad input (3-stage pipeline matching RMG-K/N-Rage)
-- Virtual gamepad for mobile/touch devices
-- Cross-origin isolation (COOP/COEP) for high-res timers on all browsers
-- Per-IP rate limiting and security hardening (CSP, non-root Docker)
-- Save state caching to eliminate host/guest boot asymmetry
-- Redis-backed session persistence for zero-downtime deploys
-- Self-hosted EmulatorJS and Socket.IO (zero CDN dependencies)
+Run `just build` to type-check, run the TypeScript tests, and bundle the
+frontend. Run `just spec` to check the Quint models. For browser
+tests, development conventions, and release history, see
+[CONTRIBUTING.md](CONTRIBUTING.md) and the [changelog](CHANGELOG.md).
 
 ## License
 
-GPL-3.0
+[GPL-3.0](LICENSE)
