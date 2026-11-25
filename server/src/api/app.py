@@ -534,7 +534,7 @@ _core_info_mtime: tuple = ()
 def _compute_core_info() -> dict:
     """Read the WASM core file and compute a content-addressed URL."""
     try:
-        st = os.stat(_core_path)
+        archive = Path(_core_path).read_bytes()
     except FileNotFoundError:
         return {
             "url": "/" + _CORE_RELATIVE_PATH,
@@ -542,28 +542,25 @@ def _compute_core_info() -> dict:
             "size": 0,
             "available": False,
         }
-    h = hashlib.sha256()
-    with open(_core_path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    hash_prefix = h.hexdigest()[:16]
-    wh = hashlib.sha256()
+    # Both identities describe the same read even if the archive is replaced.
+    wh = hashlib.sha256(archive)
+    hash_prefix = wh.hexdigest()[:16]
     worker_files = {}
-    for path in _WORKER_CORE_PATHS:
+    for path in _WORKER_CORE_PATHS[1:]:
+        member = Path(path)
         try:
-            with open(path, "rb") as f:
-                data = f.read()
-                wh.update(data)
-                if path != _core_path:
-                    worker_files[os.path.basename(path)] = hashlib.sha256(data).hexdigest()[:16]
+            data = member.read_bytes()
         except FileNotFoundError:
-            wh.update(b"missing:" + os.path.basename(path).encode())
+            wh.update(b"missing:" + member.name.encode())
+        else:
+            wh.update(data)
+            worker_files[member.name] = hashlib.sha256(data).hexdigest()[:16]
     return {
         "url": f"/api/core-archive/{hash_prefix}",
         "hash": hash_prefix,
         "workerHash": wh.hexdigest()[:16],
         "workerFiles": worker_files,
-        "size": st.st_size,
+        "size": len(archive),
         "available": True,
     }
 
