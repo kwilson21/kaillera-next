@@ -197,9 +197,10 @@
  * pauses and resync frame jumps count in this rate. With &tickProfile=1,
  * tickProfile describes the last 1,200 recorded ticks at most. Its
  * droppedSlots and catchupFrames counters span the engine session, including
- * the menus. KN_QUERY='&canvasCadence=1' also measures foreground capture
- * video presentation intervals. Leave Diagnostic images enabled for this
- * probe. A late rejoin starts a new canvas sample for that peer.
+ * the menus. CANVAS_CADENCE_SLOT=0 measures foreground capture video
+ * presentation intervals on the host. Select 1..PLAYERS-1 for a guest, or
+ * use KN_QUERY='&canvasCadence=1' to measure every peer. Leave Diagnostic
+ * images enabled for this probe. A late rejoin starts a new canvas sample.
  * OUT/p<n>-hashes.json has every page's hashes.
  *
  * The simulated network (LAT, JITTER, LINK_KBPS, the answer hold) is
@@ -252,6 +253,7 @@ const DROP_LINK_SLOT = Number(process.env.DROP_LINK_SLOT || 1);
 const DROP_LINK_AT = Number(process.env.DROP_LINK_AT || 600);
 const RECOVERY_SETTLE_MS = 120000;
 const QUERY = process.env.KN_QUERY || '';
+const CANVAS_CADENCE_SLOT = process.env.CANVAS_CADENCE_SLOT;
 const OUT = process.env.OUT || '/tmp/rb-mesh';
 const HEADLESS = process.env.HEADED !== '1';
 const CHROMIUM_GPU = process.env.CHROMIUM_GPU === '1';
@@ -285,6 +287,12 @@ if (
   fail(`ROSTER_HOLD_SLOT=${process.env.ROSTER_HOLD_SLOT} invalid: a guest's slot other than the removed one`);
 if (!ROM || !fs.existsSync(ROM)) fail('KN_ROM must name the ROM file');
 if (![3, 4].includes(PLAYERS)) fail(`PLAYERS=${process.env.PLAYERS} invalid: 3 or 4`);
+if (CANVAS_CADENCE_SLOT !== undefined) {
+  if (!/^\d$/.test(CANVAS_CADENCE_SLOT) || Number(CANVAS_CADENCE_SLOT) >= PLAYERS)
+    fail(`CANVAS_CADENCE_SLOT must be a player slot from 0 to ${PLAYERS - 1}`);
+  if (new URLSearchParams(QUERY).has('canvasCadence'))
+    fail('Use CANVAS_CADENCE_SLOT for one peer or canvasCadence in KN_QUERY for all peers');
+}
 const BROWSERS = process.env.BROWSERS?.split(',') ?? Array.from({ length: PLAYERS }, () => 'chromium');
 if (BROWSERS.length !== PLAYERS || BROWSERS.some((name) => name !== 'chromium' && name !== 'webkit'))
   fail('BROWSERS requires one chromium or webkit entry per player');
@@ -439,7 +447,8 @@ const pages = [];
 for (let i = 0; i < PLAYERS; i++) {
   const page = await mkPage(`P${i + 1}`, browsers.get(BROWSERS[i]));
   const host = i === 0 ? '&host=1&mode=rollback' : '';
-  await page.goto(`${URL}/play.html?room=${room}${host}&name=P${i + 1}${QUERY}`);
+  const cadence = String(i) === CANVAS_CADENCE_SLOT ? '&canvasCadence=1' : '';
+  await page.goto(`${URL}/play.html?room=${room}${host}&name=P${i + 1}${cadence}${QUERY}`);
   await page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
   pages.push(page);
 }
