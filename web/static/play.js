@@ -5212,31 +5212,18 @@
   };
 
   const wireDualInputHelp = () => {
-    const dualRow = document.getElementById('dual-input-option');
-    const dualInfo = document.getElementById('dual-input-info');
-    const dualHint = document.getElementById('dual-input-hint');
-    if (!dualRow || !dualInfo || !dualHint) return;
-    const showDualHint = (open) => {
-      dualHint.hidden = !open;
-      dualInfo.setAttribute('aria-expanded', String(open));
-    };
-    dualRow.addEventListener('pointerenter', (e) => {
-      if (e.pointerType === 'mouse') showDualHint(true);
-    });
-    dualRow.addEventListener('pointerleave', (e) => {
-      if (e.pointerType === 'mouse' && !dualInfo.matches(':focus-visible')) showDualHint(false);
-    });
-    dualInfo.addEventListener('focus', () => {
-      if (dualInfo.matches(':focus-visible')) showDualHint(true);
-    });
-    dualInfo.addEventListener('blur', () => showDualHint(false));
-    dualInfo.addEventListener('click', (e) => showDualHint(e.pointerType !== 'touch' || dualHint.hidden));
+    const option = document.getElementById('opt-dual-input');
+    const hint = document.getElementById('dual-input-hint');
+    if (!option || !hint) return;
 
-    document.addEventListener('click', (e) => {
-      if (!dualHint.hidden && !dualRow.contains(e.target)) showDualHint(false);
-    });
+    // Escape dismisses the tooltip until the next hover or focus.
+    const allowHint = () => {
+      hint.hidden = false;
+    };
+    option.labels[0].addEventListener('pointerenter', allowHint);
+    option.addEventListener('focus', allowHint);
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && !dualHint.hidden) showDualHint(false);
+      if (e.key === 'Escape') hint.hidden = true;
     });
   };
 
