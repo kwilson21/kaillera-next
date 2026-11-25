@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.73.0",
+    "date": "2026-11-25",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "add optional dual input mode for netplay (#342)"
+      }
+    ]
+  },
+  {
     "version": "0.72.10",
     "date": "2026-11-25",
     "changes": [
