@@ -310,6 +310,8 @@ resync_mesh() {
 input_transport() {
   local INPUTS=specs/input_transport.qnt
   verify "$INPUTS" input_transport_fixed allHold
+  # Three sends, each followed by at most one delivery on each channel.
+  verify "$INPUTS" input_transport_dual allHold init 9
   verify "$INPUTS" input_transport_current noInputIsLostForGood
   # Inputs lost on the unreliable channel, then the switch: 3 to 5 steps.
   expect_violation "$INPUTS" input_transport_current unackedInputsAreSentAgainAtTheSwitch

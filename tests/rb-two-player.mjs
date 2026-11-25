@@ -1904,6 +1904,8 @@ if (delayBootSyncAnswer) {
 }
 // LOSE_INPUTS_BEFORE_FALLBACK: the host broadcasts the transport when the game starts.
 if (LOSE_INPUTS_BEFORE_FALLBACK) await host.evaluate(() => (window._knTransportOverride = 'unreliable'));
+// This scenario orders a control request behind the held inputs on the same stream.
+if (SYNC_FOLLOW_UP === 'direct') await host.evaluate(() => (window._knTransportOverride = 'reliable'));
 if (FORCE_DELAY !== null) {
   for (const p of [host, guest]) {
     await p.evaluate((n) => {

@@ -20,22 +20,18 @@ def _slot_clear(src):
 
 def test_the_same_frames_input_goes_out_again_at_most_every_100_ms():
     src = _src()
-    send = src[src.index("const shouldSendRedundancy = _useCRollback") :]
-    send = send[: send.index("_rbTransportPacketsSent++;")]
-    # The skip is decided before the packet is built, and remembers the
-    # channel: a new channel (a reconnect, a fallback) always gets the frame.
-    assert "lastSend.dc === inputDc &&" in send
-    assert "lastSend.frame === _frameNum &&" in send
-    assert (
-        "nowSend - lastSend.at < (inputDc === peer.dc ? INPUT_RESEND_RELIABLE_MS : INPUT_RESEND_EVERY_MS)"
-        in send
-    )
-    assert send.index("continue;") < send.index("KNShared.encodeInput(")
-    assert "peer._knInputSend = { dc: inputDc, frame: _frameNum, at: nowSend };" in src
+    send = src[src.index("const _sendFrameInput =") :]
+    send = send[: send.index("\n  };")]
+    # Only a successful send stamps the channel. Replaced channels and inputs
+    # authored anew after a rewind are eligible without waiting on the old send.
+    assert "const last = inputDc._knInputSend;" in send
+    assert "last.frame === _frameNum" in send and "last.input === localInput" in send
+    assert "nowSend - last.at < (reliable ? INPUT_RESEND_RELIABLE_MS : INPUT_RESEND_EVERY_MS)" in send
+    assert send.index("last.frame === _frameNum") < send.index("KNShared.encodeInput(")
+    assert send.index("inputDc.send(") < send.index("inputDc._knInputSend =")
     assert "const INPUT_RESEND_EVERY_MS = 16;" in src
     assert "const INPUT_RESEND_RELIABLE_MS = 100;" in src
-    # Each change of a peer's input channel is logged.
-    assert "`INPUT-CHANNEL f=${_frameNum} slot=${peer.slot} label=" in send
+    assert "`INPUT-CHANNEL f=${_frameNum} slot=${peer.slot} label=" in src
 
 
 def test_the_host_resets_the_peer_when_a_reconnect_opens():

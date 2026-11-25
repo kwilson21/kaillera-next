@@ -22,7 +22,9 @@ def test_both_triggers_go_through_the_one_switch():
 
     # Only the switch itself and the match start (host broadcast, guest
     # adopting it, a late joiner told it) set the transport.
-    assigns = re.findall(r"^\s+_rbTransport = ([^;]+);", src, re.M)
+    stop = _function_body(src, "stop")
+    assert "_rbTransport = 'reliable';" in stop, "new guests wait for the host policy"
+    assigns = re.findall(r"^\s+_rbTransport = ([^;]+);", src.replace(stop, ""), re.M)
     assert "'reliable'" in assigns, "the switch sets the reliable transport"
     assert assigns.count("'reliable'") == 1, f"another place switches to reliable on its own: {assigns}"
 
@@ -48,7 +50,9 @@ def test_the_switch_sends_every_unacked_input_from_the_kept_inputs():
     )
     assert "window.KNCore.framesToSendAgain(ack, newest, RB_RESEND_AT_SWITCH_MAX)" in body
     assert "const ack = peer.lastAckFromPeer ?? -1;" in body
-    assert "_resendAtSwitch[peer.slot] = { from: frames[0], upTo: frames.at(-1), ack };" in body
+    assert "_keepReliableInputs(peer, frames[0], frames.at(-1), ack);" in body
+    keep = _function_body(src, "_keepReliableInputs")
+    assert "_resendAtSwitch[peer.slot] = { from, upTo, ack };" in keep
     assert "_sendResendAtSwitch(peer);" in body
 
     send = _function_body(src, "_sendResendAtSwitch")
@@ -67,19 +71,19 @@ def test_a_resend_a_send_cut_short_is_finished_on_the_next_ticks():
     # frames from there on stay kept and each tick sends them first.
     src = ENGINE_JS.read_text()
     send = _function_body(src, "_sendResendAtSwitch")
-    loop = send[send.index("while (kept.from <= kept.upTo) {") : send.index("} catch (err) {")]
+    loop = send[send.index("while (kept.from <= end) {") : send.index("} catch (err) {")]
     # The kept start moves past a frame only once its send returned.
     assert loop.index("peer.dc.send(") < loop.index("kept.from++;")
     # Done: forgotten. Cut short: kept.
-    assert loop.rstrip().endswith("delete _resendAtSwitch[peer.slot];")
+    assert "if (kept.from > kept.upTo) delete _resendAtSwitch[peer.slot];" in loop
     catch = send[send.index("} catch (err) {") :]
     assert "delete _resendAtSwitch" not in catch
     # Every kept frame is sent, not only those after the ack: on the reliable
     # channel the ack can pass a frame the peer is missing.
     assert "lastAckFromPeer" not in send
 
-    tick_send = src[src.index("let _sendFails = 0;") :]
-    tick_send = tick_send[: tick_send.index("const peerBuf = KNShared.encodeInput(")]
+    tick_send = src[src.index("const shouldSendRedundancy = _useCRollback") :]
+    tick_send = tick_send[: tick_send.index("const sentPrimary = _sendFrameInput(")]
     assert "if (_resendAtSwitch[peer.slot]) _sendResendAtSwitch(peer);" in tick_send
 
 

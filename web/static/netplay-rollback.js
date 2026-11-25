@@ -1952,20 +1952,17 @@
   let _rbTaintBufPtr = 0; // WASM heap pointer for taint bitmap (128 × uint8)
   let _rbFatalBuf = 0; // RF7 (R3): WASM heap pointer for kn_get_fatal_stale out params (3 × int32)
   let _rbLiveMismatchBuf = 0; // 3 × uint32: frame, ring hash, live hash
-  // P2/T4: host-negotiated transport mode for rollback input packets.
-  //  'reliable'   — use ordered lockstep DC (default, lockstep mode)
-  //  'unreliable' — use unordered rollback-input DC (rollback mode, host's call)
+  // Guests use reliable input until the host announces its send policy.
   let _rbTransport = 'reliable';
-  // P2: GGPO-style ack-driven redundancy — every packet carries ALL inputs
-  // since the peer's last acknowledged frame. This guarantees no input is
-  // permanently lost unless the connection drops entirely: even if 50
-  // packets are lost in a row, the 51st carries the full unconfirmed
-  // history. Capped at the rollback window depth (inputs older than that
-  // can't be rolled back anyway). Fixed 8-frame window was too small —
-  // match 002ad0f6 lost inputs at f=3441-3444 during a ~133ms WiFi drop
-  // and never recovered them, causing permanent state divergence.
-  const RB_REDUNDANCY_MAX = 30; // hard cap (rollback window + margin)
-  const _rbLocalHistory = []; // {frame, buttons, lx, ly, cx, cy} — newest last
+  // Both channel receive handlers accept at most 256 bytes. Each history record
+  // adds four words to the six-word header (24 + 14 * 16 = 248 bytes).
+  const RB_INPUT_HISTORY_MAX = 14;
+  const _sendInputTransport = (peer, mode) => {
+    // Older guests ignore 'dual'. The ordered prefix also moves them off a
+    // previous unreliable override and replays their unacknowledged inputs.
+    if (mode === 'dual') peer.dc.send('rb-transport:reliable');
+    peer.dc.send(`rb-transport:${mode}`);
+  };
   // T4: transport stats — periodic flush counts packets and dedup rate.
   let _rbTransportPacketsSent = 0;
   let _rbTransportDupsRecv = 0;
@@ -4650,6 +4647,7 @@
           // during a match it also takes effect now and is broadcast, as at
           // the start: only the host's word sets the transport.
           //
+          //   knDiag.setTransport('dual')        // reliable history plus fast current input
           //   knDiag.setTransport('unreliable')  // unordered + redundancy
           //   knDiag.setTransport('reliable')    // ordered TCP-like
           //   knDiag.setTransport(null)          // reset to default
@@ -4659,18 +4657,18 @@
               console.log('transport override cleared');
               return null;
             }
-            if (mode !== 'reliable' && mode !== 'unreliable') {
-              console.error('setTransport: mode must be reliable or unreliable');
+            if (mode !== 'dual' && mode !== 'reliable' && mode !== 'unreliable') {
+              console.error('setTransport: mode must be dual, reliable or unreliable');
               return null;
             }
             window._knTransportOverride = mode;
             if (_playerSlot === 0 && _phase === PHASE_RUNNING) {
-              if (mode === 'reliable' && _rbTransport === 'unreliable') _switchInputsToReliable('knDiag');
+              if (mode !== 'unreliable' && _rbTransport === 'unreliable') _switchInputsToReliable('knDiag');
               _rbTransport = mode;
               for (const p of Object.values(_peers)) {
                 if (p.dc?.readyState !== 'open') continue;
                 try {
-                  p.dc.send(`rb-transport:${mode}`);
+                  _sendInputTransport(p, mode);
                 } catch (_) {}
               }
               _syncLog(`rb-transport: host broadcast=${mode} (knDiag, mid-match)`);
@@ -5657,7 +5655,7 @@
   // every input after each peer's ack goes out again now, on the reliable
   // channel, ahead of the next tick's packet. They come from the inputs this
   // page keeps, not from the history, which holds only the newest
-  // RB_REDUNDANCY_MAX: a stuck channel can leave more than that unacked.
+  // RB_INPUT_HISTORY_MAX: a stuck channel can leave more than that unacked.
   // Which frames is KNCore.framesToSendAgain (web/src/input-resend.ts,
   // proved), up to the newest input this page has made: a switch between
   // ticks (rb-dc-close, `rb-transport:`) comes after _frameNum has moved on
@@ -5665,6 +5663,15 @@
   // the oldest frame in range for one that does not exist. A frame the peer
   // already holds is dropped there as a duplicate. One send per frame, no wait.
   const RB_RESEND_AT_SWITCH_MAX = 120;
+  const _keepReliableInputs = (peer, from, upTo, ack) => {
+    const kept = _resendAtSwitch[peer.slot];
+    if (kept) {
+      kept.from = Math.min(kept.from, from);
+      kept.upTo = Math.max(kept.upTo, upTo);
+    } else {
+      _resendAtSwitch[peer.slot] = { from, upTo, ack };
+    }
+  };
   const _switchInputsToReliable = (reason) => {
     _rbTransport = 'reliable';
     _syncLog(`DC-FALLBACK: switched to reliable DC (${reason}) — inputs now via primary channel`);
@@ -5674,11 +5681,7 @@
       if (_isPeerPendingLateJoin(sid, peer) || peer.dc?.readyState !== 'open') continue;
       const ack = peer.lastAckFromPeer ?? -1;
       const frames = window.KNCore.framesToSendAgain(ack, newest, RB_RESEND_AT_SWITCH_MAX);
-      if (frames.length === 0) {
-        delete _resendAtSwitch[peer.slot];
-        continue;
-      }
-      _resendAtSwitch[peer.slot] = { from: frames[0], upTo: frames.at(-1), ack };
+      if (frames.length) _keepReliableInputs(peer, frames[0], frames.at(-1), ack);
       _sendResendAtSwitch(peer);
     }
   };
@@ -5696,15 +5699,17 @@
     const start = kept.from;
     let count = 0;
     try {
-      while (kept.from <= kept.upTo) {
+      const end = Math.min(kept.upTo, kept.from + RB_RESEND_AT_SWITCH_MAX - 1);
+      while (kept.from <= end) {
         const input = _localInputs[kept.from];
         if (input !== undefined) {
           peer.dc.send(KNShared.encodeInput(kept.from, input, peer.lastFrameFromPeer ?? -1).buffer);
+          peer.dc._knInputSend = { frame: kept.from, input, at: performance.now() };
           count++;
         }
         kept.from++;
       }
-      delete _resendAtSwitch[peer.slot];
+      if (kept.from > kept.upTo) delete _resendAtSwitch[peer.slot];
     } catch (err) {
       // Once per frame it stopped at: a full buffer can throw tick after tick.
       if (kept.stoppedAt !== kept.from) {
@@ -5851,6 +5856,7 @@
       cy: input.cy | 0,
     });
     if (_auditPending.length > AUDIT_PENDING_MAX) _auditPending.splice(0, _auditPending.length - AUDIT_PENDING_MAX);
+    if (!last) return;
     last.b = input.buttons;
     last.lx = input.lx;
     last.ly = input.ly;
@@ -5867,9 +5873,18 @@
     }
   };
   const _auditRecordRemote = (slot, frame, input) => {
-    if (!_auditLastRemote[slot]) _auditLastRemote[slot] = { b: null, lx: null, ly: null, cx: null, cy: null };
-    if (_inputEq(input, _auditLastRemote[slot])) return;
-    _auditPush(slot, frame, input, _auditLastRemote[slot]);
+    const last = (_auditLastRemote[slot] ??= { frame: -1 });
+    if (frame < last.frame) {
+      // A backfill belongs at its own frame. Leave the current delta baseline
+      // alone and restore the following frame if this late value changes it.
+      _auditPush(slot, frame, input, null);
+      const next = _remoteInputs[slot]?.[frame + 1];
+      if (next && next !== KNShared.ZERO_INPUT && !_inputEq(input, next)) _auditPush(slot, frame + 1, next, null);
+      return;
+    }
+    const gap = frame > last.frame + 1;
+    last.frame = frame;
+    if (gap || !_inputEq(input, last)) _auditPush(slot, frame, input, last);
   };
   let _peerInputStarted = {}; // slot -> true once first input received (survives buffer drain)
   let _activeRoster = null; // Set<number> of active slots — host-authoritative, null until first roster
@@ -10632,7 +10647,7 @@
     peer.syncDc = pc.createDataChannel('sync-state', { ordered: true, priority: 'very-low' });
     setupSyncDataChannel(remoteSid, peer.syncDc);
     // P2: unordered input channel — always created, only used when the
-    // host broadcasts rb-transport:unreliable. Cheap to leave idle.
+    // host selects unreliable or dual input delivery.
     peer.rbDc = pc.createDataChannel('rollback-input', { ordered: false, maxRetransmits: 0 });
     peer.rbDcUnreliable = false;
     setupRollbackInputDataChannel(remoteSid, peer.rbDc);
@@ -11171,7 +11186,6 @@
     if (!_lastKnownInput[peer.slot] || recvFrame >= (_lastKnownInput[peer.slot].frame ?? -1)) {
       _lastKnownInput[peer.slot] = { ...recvInput, frame: recvFrame };
     }
-    _auditRecordRemote(peer.slot, recvFrame, recvInput);
 
     // P2 redundancy: queue piggy-backed prior frames ONLY if we don't
     // already have a real input for that frame. Without this guard, every
@@ -11187,13 +11201,6 @@
     if (decoded.redundant && decoded.redundant.length > 0) {
       for (const r of decoded.redundant) {
         if (r.frame < admissionFloor) continue;
-        const redundantInput = {
-          buttons: r.buttons,
-          lx: r.lx,
-          ly: r.ly,
-          cx: r.cx,
-          cy: r.cy,
-        };
         const existingRedundantInput = _remoteInputs[peer.slot][r.frame];
         const redundantWasSeeded = _consumeLateJoinSeededInput(peer.slot, r.frame);
         // Already have real input for this frame? Skip — just a dup.
@@ -11203,9 +11210,17 @@
           continue;
         }
         if (r.frame < _checkpointFloor) continue;
+        const redundantInput = {
+          buttons: r.buttons,
+          lx: r.lx,
+          ly: r.ly,
+          cx: r.cx,
+          cy: r.cy,
+        };
         if (_checkpoint && _peers[remoteSid] === peer)
           _checkpoint.witness(peer.slot, _currentSid(remoteSid), r.frame, _ownerTuple(redundantInput));
         _remoteInputs[peer.slot][r.frame] = redundantInput;
+        _auditRecordRemote(peer.slot, r.frame, redundantInput);
         if (
           _useCRollback &&
           (!existingRedundantInput || redundantPlaceholder || !_inputEq(existingRedundantInput, redundantInput))
@@ -11223,6 +11238,8 @@
         }
       }
     }
+
+    if (!headerDuplicate || headerWasSeeded) _auditRecordRemote(peer.slot, recvFrame, recvInput);
 
     // Queue for C-level rollback engine — drained at tick boundary
     if (_useCRollback && (!headerDuplicate || (headerWasSeeded && !_inputEq(existingHeaderInput, recvInput)))) {
@@ -11323,7 +11340,7 @@
 
   // Unordered input DC for rollback mode — set up alongside the lockstep DC.
   // Receiving is identical to lockstep binary input; sending is gated by
-  // _rbTransport === 'unreliable' (host-negotiated).
+  // the host's unreliable or dual input policy.
   const setupRollbackInputDataChannel = (remoteSid, ch) => {
     ch._knPc = _peers[remoteSid]?.pc;
     ch.binaryType = 'arraybuffer';
@@ -11339,9 +11356,9 @@
         peer.rbDcUnreliable = ordered === false && maxRetransmits === 0;
       }
       _syncLog(`rb-input DC open sid=${remoteSid} ordered=${ordered} maxRetransmits=${maxRetransmits}`);
-      if (_rbTransport === 'unreliable' && (ordered !== false || maxRetransmits !== 0)) {
+      if (_rbTransport !== 'reliable' && (ordered !== false || maxRetransmits !== 0)) {
         _syncLog(
-          `TRANSPORT-MISMATCH sid=${remoteSid} requested=unreliable actual=ordered:${ordered},maxRetrans:${maxRetransmits} — inputs will fall back to reliable DC`,
+          `TRANSPORT-MISMATCH sid=${remoteSid} requested=${_rbTransport} actual=ordered:${ordered},maxRetrans:${maxRetransmits} — inputs will fall back to reliable DC`,
         );
       }
     };
@@ -11361,7 +11378,7 @@
     ch.onerror = () => {};
     ch.onmessage = (e) => {
       const peer = _peers[remoteSid];
-      if (!peer || (_reconnectProofStatus(remoteSid) === true && peer.rbDc !== ch)) return;
+      if (!peer || peer.pc !== ch._knPc || (_reconnectProofStatus(remoteSid) === true && peer.rbDc !== ch)) return;
       if (
         e.data instanceof ArrayBuffer &&
         e.data.byteLength >= 16 &&
@@ -12025,8 +12042,7 @@
           return;
         }
         // P2/T4: host-authoritative transport mode for rollback input packets.
-        // Parallel to rb-delay — host broadcasts, guests adopt. Any value
-        // other than 'unreliable' is treated as reliable (the safe default).
+        // Parallel to rb-delay: guests adopt the host's policy.
         if (e.data.startsWith('rb-transport:')) {
           const mode = e.data.slice('rb-transport:'.length);
           // Only the host's word sets the transport. A guest's would let any
@@ -12039,7 +12055,7 @@
           // Told to leave the unreliable channel: the same switch as a
           // fallback, so the inputs not acked go out again.
           if (mode !== 'unreliable' && _rbTransport === 'unreliable') _switchInputsToReliable('rb-transport');
-          _rbTransport = mode === 'unreliable' ? 'unreliable' : 'reliable';
+          _rbTransport = mode === 'dual' || mode === 'unreliable' ? mode : 'reliable';
           _syncLog(`rb-transport: host=${mode} adopted=${_rbTransport}`);
           return;
         }
@@ -13717,28 +13733,17 @@
     // Host broadcasts effective delay so all players use the same value.
     // Independent calculation can disagree due to asymmetric RTT/jitter.
     //
-    // P2/Fix 2: host also broadcasts the transport mode for rollback input
-    // packets. Reliable suffers WebRTC head-of-line blocking under network
-    // jitter (one delayed packet stalls the whole stream); unreliable +
-    // per-packet redundancy defeats this entirely.
-    //
-    // History: shipped unreliable, hit cascading rollback bug because
-    // redundant inputs were re-fed without dedup → re-triggered prediction
-    // checks → spiral. Reverted to reliable. Then shipped the dedup fix
-    // that skips redundant entries we already have. Now safe to re-enable
-    // unreliable on rollback-mode connections.
-    //
-    // Override: knDiag.setTransport('reliable'|'unreliable') for testing.
+    // Race rollback input on both channels unless the host selected a single carrier.
     if (_playerSlot === 0) {
       const transportOverride = window._knTransportOverride;
       const transportMode =
-        transportOverride === 'reliable' || transportOverride === 'unreliable' ? transportOverride : 'reliable';
+        transportOverride === 'reliable' || transportOverride === 'unreliable' ? transportOverride : 'dual';
       _rbTransport = transportMode;
       for (const p of Object.values(_peers)) {
         if (p.dc?.readyState === 'open') {
           try {
             p.dc.send(`rb-delay:${maxDelay}`);
-            p.dc.send(`rb-transport:${transportMode}`);
+            _sendInputTransport(p, transportMode);
           } catch (_) {}
         }
       }
@@ -15174,9 +15179,7 @@
       // joiner's C engine aligned with the host on the same simulation
       // frame for input exchange.
       window._rbHostInitFrame = msg.frame;
-      if (msg.rbTransport) {
-        _rbTransport = msg.rbTransport === 'unreliable' ? 'unreliable' : 'reliable';
-      }
+      _rbTransport = msg.rbTransport === 'dual' || msg.rbTransport === 'unreliable' ? msg.rbTransport : 'reliable';
 
       startLockstep();
       if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
@@ -16498,6 +16501,37 @@
     _syncLog(`MATCH-INPUT-CLEAR reason=${reason} local=${localBuffered} remote=${remoteBuffered}`);
   };
 
+  const _sendFrameInput = (peer, inputDc, localInput, ackFrame, redundantTail, nowSend) => {
+    if (inputDc?.readyState !== 'open') return false;
+    const reliable = inputDc === peer.dc;
+    const last = inputDc._knInputSend;
+    // Stalled ticks retry each physical channel at its own cadence. A new
+    // connection or a changed input at a rewound frame must send immediately.
+    if (
+      last &&
+      last.frame === _frameNum &&
+      last.input === localInput &&
+      nowSend - last.at < (reliable ? INPUT_RESEND_RELIABLE_MS : INPUT_RESEND_EVERY_MS)
+    )
+      return false;
+    try {
+      inputDc.send(KNShared.encodeInput(_frameNum, localInput, ackFrame, redundantTail).buffer);
+    } catch (_) {
+      if (reliable && _rbTransport === 'dual') {
+        _keepReliableInputs(peer, _frameNum, _frameNum, peer.lastAckFromPeer ?? -1);
+      }
+      return false;
+    }
+    inputDc._knInputSend = { frame: _frameNum, input: localInput, at: nowSend };
+    _rbTransportPacketsSent++;
+    if (_catchUpTo >= 0) {
+      if (reliable) _catchUpSendsReliable++;
+      else _catchUpSendsUnreliable++;
+    }
+    if (!peer.lastAckAdvanceTime) peer.lastAckAdvanceTime = nowSend;
+    return true;
+  };
+
   const _sendPendingRollbackInitInput = () => {
     const activePeers = getActivePeers();
     if (!activePeers.length) return;
@@ -16518,14 +16552,6 @@
       if (_frameNum === 0 && socket?.id)
         _checkpointBootInput = { match: KNState.matchId, sid: socket.id, value: _ownerTuple(localInput) };
       _checkpoint?.journal.witness(_playerSlot, _frameNum, _ownerTuple(localInput));
-      _rbLocalHistory.push({
-        frame: _frameNum,
-        buttons: localInput.buttons,
-        lx: localInput.lx,
-        ly: localInput.ly,
-        cx: localInput.cx,
-        cy: localInput.cy,
-      });
     }
 
     let sent = 0;
@@ -18709,108 +18735,54 @@
       _localInputs[_frameNum] = localInput;
       _auditRecordLocal(_frameNum, localInput);
       _checkpoint?.journal.witness(_playerSlot, _frameNum, _ownerTuple(localInput));
-      // Append to history ring once per logical frame. If the sim stalls on
-      // this frame, resend the cached input below without mutating history.
-      _rbLocalHistory.push({
-        frame: _frameNum,
-        buttons: localInput.buttons,
-        lx: localInput.lx,
-        ly: localInput.ly,
-        cx: localInput.cx,
-        cy: localInput.cy,
-      });
     }
-    const shouldSendRedundancy = _useCRollback && _rbTransport === 'unreliable';
-    let minPeerAck = _frameNum; // conservative: assume all acked up to now
+    const shouldSendRedundancy = _useCRollback && _rbTransport !== 'reliable';
+    let minPeerAck = _frameNum;
     if (shouldSendRedundancy) {
-      for (const p of activePeers) {
-        const ack = p.lastAckFromPeer ?? -1;
-        if (ack < minPeerAck) minPeerAck = ack;
-      }
+      for (const peer of activePeers) minPeerAck = Math.min(minPeerAck, peer.lastAckFromPeer ?? -1);
     }
-    // Trim: keep everything after minPeerAck (peer hasn't confirmed these),
-    // but never more than RB_REDUNDANCY_MAX to bound packet size.
-    while (
-      _rbLocalHistory.length > 0 &&
-      (_rbLocalHistory[0].frame <= minPeerAck || _rbLocalHistory.length > RB_REDUNDANCY_MAX)
-    ) {
-      _rbLocalHistory.shift();
-    }
-    // Tail excludes the current frame (it's already in the packet header).
-    // Build lazily so reliable-only sends don't pay for Array.slice().
     let redundantTail = null;
-    let _sendFails = 0;
-    for (let i = 0; i < activePeers.length; i++) {
-      const peer = activePeers[i];
+    const nowSend = performance.now();
+    for (const peer of activePeers) {
       if (peer.synthetic === true) continue;
-      // A resend at the switch to the reliable channel that a send cut short.
       if (_resendAtSwitch[peer.slot]) _sendResendAtSwitch(peer);
-      try {
-        // Use unreliable rb-input DC when available, fall back to primary DC
-        const inputDc =
-          _rbTransport === 'unreliable' && peer.rbDc?.readyState === 'open' && peer.rbDcUnreliable
-            ? peer.rbDc
-            : peer.dc;
-        // The same frame's input goes out again at most once every
-        // INPUT_RESEND_RELIABLE_MS on the reliable channel and once a slot
-        // on the unreliable one. A tick that ran again on the same frame (a
-        // stall, a catch-up waiting on a hole) sent it every time, and on
-        // the reliable channel the asks for a hole queued behind them
-        // (specs/catch_up_wait.qnt, reliableResendsAreSpaced). Not never:
-        // a page far behind drops inputs as too far ahead (INPUT-OOR), even
-        // on the reliable channel, and this resend is what brings them back
-        // once it has caught up. That masks a receiver bug (the receiver
-        // should ask for what it dropped once it reaches it): a follow-up.
-        const lastSend = peer._knInputSend;
-        const nowSend = performance.now();
-        if (
-          lastSend &&
-          lastSend.dc === inputDc &&
-          lastSend.frame === _frameNum &&
-          nowSend - lastSend.at < (inputDc === peer.dc ? INPUT_RESEND_RELIABLE_MS : INPUT_RESEND_EVERY_MS)
-        ) {
-          continue;
+      const fastDc = peer.rbDcUnreliable && peer.rbDc?.readyState === 'open' ? peer.rbDc : null;
+      const inputDc = _rbTransport === 'unreliable' && fastDc ? fastDc : peer.dc;
+      if (inputDc && peer._knInputDc !== inputDc) {
+        _syncLog(
+          `INPUT-CHANNEL f=${_frameNum} slot=${peer.slot} label=${inputDc.label} id=${inputDc.id ?? -1} ` +
+            `state=${inputDc.readyState} pc=${peer.pc?.connectionState ?? 'none'}`,
+        );
+        peer._knInputDc = inputDc;
+      }
+      const ackFrame = peer.lastFrameFromPeer ?? -1;
+      const needsRedundancy = shouldSendRedundancy && (peer.lastAckFromPeer ?? -1) < _frameNum - 1;
+      if (needsRedundancy && redundantTail === null) {
+        // Resync can rewind into a previously authored range. Only this match's
+        // inputs strictly before the packet header belong in its history.
+        redundantTail = [];
+        for (const frame of window.KNCore.framesToSendAgain(minPeerAck, _frameNum - 1, RB_INPUT_HISTORY_MAX)) {
+          const input = _localInputs[frame];
+          if (input !== undefined) redundantTail.push({ ...input, frame });
         }
-        if (inputDc && peer._knInputDc !== inputDc) {
-          // Which channel this peer's inputs go out on, each time it
-          // changes (a reconnect, a fallback): a channel the peer has
-          // dropped loses what is sent on it.
-          _syncLog(
-            `INPUT-CHANNEL f=${_frameNum} slot=${peer.slot} label=${inputDc.label} id=${inputDc.id ?? -1} ` +
-              `state=${inputDc.readyState} pc=${peer.pc?.connectionState ?? 'none'}`,
-          );
-          peer._knInputDc = inputDc;
-        }
-        const ackFrame = peer.lastFrameFromPeer ?? -1;
-        const needsRedundancy = shouldSendRedundancy && (peer.lastAckFromPeer ?? -1) < _frameNum - 1;
-        if (needsRedundancy && redundantTail === null) {
-          redundantTail = _rbLocalHistory.slice(0, _rbLocalHistory.length - 1);
-        }
-        const peerBuf = KNShared.encodeInput(
-          _frameNum,
-          localInput,
-          ackFrame,
-          needsRedundancy ? redundantTail : null,
-        ).buffer;
-        if (inputDc?.readyState === 'open') {
-          inputDc.send(peerBuf);
-          if (recordAuthorOnSend) {
-            _recordAuthoredOwnerInput(_frameNum, localInput);
-            recordAuthorOnSend = false;
-          }
-          peer._knInputSend = { dc: inputDc, frame: _frameNum, at: nowSend };
-          _rbTransportPacketsSent++;
-          if (_catchUpTo >= 0) {
-            if (inputDc === peer.dc) _catchUpSendsReliable++;
-            else _catchUpSendsUnreliable++;
-          }
-          // Initialize ack tracking on first send to avoid false positive
-          if (!peer.lastAckAdvanceTime) peer.lastAckAdvanceTime = performance.now();
-        } else {
-          _sendFails++;
-        }
-      } catch (_) {
-        _sendFails++;
+      }
+      const sentPrimary = _sendFrameInput(
+        peer,
+        inputDc,
+        localInput,
+        ackFrame,
+        needsRedundancy ? redundantTail : null,
+        nowSend,
+      );
+      // The optional copy must never wait behind a congested unordered stream.
+      const sentFast =
+        _rbTransport === 'dual' &&
+        fastDc &&
+        fastDc.bufferedAmount <= DC_BUFFER_THRESHOLD &&
+        _sendFrameInput(peer, fastDc, localInput, ackFrame, null, nowSend);
+      if (recordAuthorOnSend && (sentPrimary || sentFast)) {
+        _recordAuthoredOwnerInput(_frameNum, localInput);
+        recordAuthorOnSend = false;
       }
     }
 
@@ -22782,6 +22754,7 @@
     _menuStartReleaseAt = 0;
     _menuStartReadyPeers = {};
     _menuStartReadyLastBroadcast = 0;
+    _rbTransport = 'reliable';
     _localInputs = {};
     _frameNum = 0;
     _funnelMilestoneSent = false;

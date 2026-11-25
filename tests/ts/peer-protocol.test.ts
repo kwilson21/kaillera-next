@@ -94,9 +94,11 @@ test('block, region and sub-hash lists are hex', () => {
   bad('lockstep', 'rb-subhash:1200:aa,bb');
 });
 
-test('the transport is one of two words', () => {
+test('only the lockstep channel admits the three input transport modes', () => {
   ok('lockstep', 'rb-transport:reliable');
   ok('lockstep', 'rb-transport:unreliable');
+  ok('lockstep', 'rb-transport:dual');
+  bad('sync-state', 'rb-transport:dual');
   bad('lockstep', 'rb-transport:fast');
 });
 
