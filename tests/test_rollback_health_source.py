@@ -180,6 +180,18 @@ def test_a_trap_while_arming_ends_the_match():
     assert "_handleCoreFatal('not-armed'" in hold
 
 
+def test_session_log_interval_covers_failed_starts_and_is_released_on_stop():
+    src = LOCKSTEP_JS.read_text()
+    start = src.split("const startLockstep = () => {", 1)[1].split("\n  };\n", 1)[0]
+    stop = src.split("const stop = () => {", 1)[1].split("\n  };\n", 1)[0]
+    # A second registration overwrites the only handle stop can cancel.
+    assert src.count("setInterval(_periodicSyncLog,") == 1
+    assert "setInterval(_flushSyncLog," not in src
+    assert start.index("_flushInterval = setInterval(_periodicSyncLog,") < start.index("_stopAtStart('core'")
+    assert not re.search(r"setTimeout\(\s*(?:\(\)\s*=>\s*)?_(?:periodicSyncLog|flushSyncLog)\b", start)
+    assert "clearInterval(_flushInterval);" in stop
+
+
 def test_a_stopped_start_keeps_its_message():
     """A later start on a page whose start stopped (a late join) showed "The
     emulator crashed" in place of why it stopped."""

@@ -61,6 +61,7 @@ import {
 } from './protocol.ts';
 import { startAudio } from './page/audio.ts';
 import { startCapture } from './page/capture.ts';
+import * as canvasCadence from './page/canvas-cadence.ts';
 import { startFakePeer } from './page/fake-peer.ts';
 import { menuAutopilot } from './page/menu-autopilot.ts';
 import { rollbackTimeline } from './page/rollback-timeline.ts';
@@ -337,6 +338,7 @@ export const createSession = (
 };
 
 export const KNCore = {
+  canvasCadence,
   matchSave,
   startEvery,
   checkpoint: { CheckpointRecovery, CHECKPOINT_CAP, CHECKPOINT_MESSAGE },

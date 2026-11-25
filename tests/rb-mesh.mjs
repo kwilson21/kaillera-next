@@ -21,6 +21,9 @@
  * PLAYERS: 3 or 4 (default 4). Four emulators share the machine: in a cloud
  *   container each runs at a few frames a second, so the menus take minutes.
  *   MENU_TIMEOUT_S bounds them (default 1800).
+ * BROWSERS: comma-separated Playwright engines in slot order, such as
+ *   chromium,webkit,chromium,webkit. Defaults to Chromium for every slot.
+ * CHROMIUM_GPU=1: let Chromium use the system GPU instead of forcing SwiftShader.
  * MISSING_RECIPIENT=1 (PLAYERS=3|4): fail recovery to MISSING_RECIPIENT_SLOT
  *   (default last guest, slot 2 or 3). MISSING_RECIPIENT_FAILURES=1|2 defaults
  *   to one failed header; two exercises sustained loss through the final retry.
@@ -189,12 +192,20 @@
  * in `battleUnrecorded`.
  * summary.json lists the differing frames and, per page, the stops of its
  * main thread of 4 s or more (`LOCAL-FREEZE`), which get a page dropped as a
- * phantom; OUT/p<n>-hashes.json has every page's hashes.
+ * phantom. battlePerformance.gameFps is each peer's net frame advancement
+ * per wall second after every player first reaches battle. Intentional
+ * pauses and resync frame jumps count in this rate. With &tickProfile=1,
+ * tickProfile describes the last 1,200 recorded ticks at most. Its
+ * droppedSlots and catchupFrames counters span the engine session, including
+ * the menus. KN_QUERY='&canvasCadence=1' also measures foreground capture
+ * video presentation intervals. Leave Diagnostic images enabled for this
+ * probe. A late rejoin starts a new canvas sample for that peer.
+ * OUT/p<n>-hashes.json has every page's hashes.
  *
  * The simulated network (LAT, JITTER, LINK_KBPS, the answer hold) is
  * tests/rb-page-network.mjs, the two-player run's.
  */
-import { chromium } from 'playwright';
+import { chromium, webkit } from 'playwright';
 import fs from 'fs';
 import { fileURLToPath } from 'node:url';
 import { requireCurrentBundle } from './bundle-check.mjs';
@@ -243,6 +254,7 @@ const RECOVERY_SETTLE_MS = 120000;
 const QUERY = process.env.KN_QUERY || '';
 const OUT = process.env.OUT || '/tmp/rb-mesh';
 const HEADLESS = process.env.HEADED !== '1';
+const CHROMIUM_GPU = process.env.CHROMIUM_GPU === '1';
 const SCREEN_SIZE = process.env.SCREEN_SIZE || '320x240';
 // The guest's own deadline on a resync request (netplay-rollback.js).
 const RESYNC_REQUEST_TIMEOUT_MS = 8000;
@@ -273,6 +285,9 @@ if (
   fail(`ROSTER_HOLD_SLOT=${process.env.ROSTER_HOLD_SLOT} invalid: a guest's slot other than the removed one`);
 if (!ROM || !fs.existsSync(ROM)) fail('KN_ROM must name the ROM file');
 if (![3, 4].includes(PLAYERS)) fail(`PLAYERS=${process.env.PLAYERS} invalid: 3 or 4`);
+const BROWSERS = process.env.BROWSERS?.split(',') ?? Array.from({ length: PLAYERS }, () => 'chromium');
+if (BROWSERS.length !== PLAYERS || BROWSERS.some((name) => name !== 'chromium' && name !== 'webkit'))
+  fail('BROWSERS requires one chromium or webkit entry per player');
 if (!/^\d+x\d+$/.test(SCREEN_SIZE)) fail(`SCREEN_SIZE=${SCREEN_SIZE} invalid: WIDTHxHEIGHT, e.g. 320x240`);
 for (const [name, v] of Object.entries({ LAT, JITTER, LINK_KBPS, BATTLE_SECONDS, MENU_TIMEOUT_S, CATCH_UP_MS })) {
   if (!(Number.isFinite(v) && v >= 0)) fail(`${name}=${process.env[name]} invalid: a finite number >= 0`);
@@ -343,14 +358,23 @@ fs.mkdirSync(OUT, { recursive: true });
 await requireCurrentBundle(fileURLToPath(new globalThis.URL('..', import.meta.url)), URL);
 
 const room = 'MS' + Math.random().toString(36).slice(2, 8).toUpperCase();
-const launch = {
-  headless: HEADLESS,
-  args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--autoplay-policy=no-user-gesture-required'],
-};
-if (process.env.CHROMIUM_PATH) launch.executablePath = process.env.CHROMIUM_PATH;
-const browser = await chromium.launch(launch);
+const browsers = new Map();
+const chromiumArgs = ['--autoplay-policy=no-user-gesture-required'];
+if (CHROMIUM_GPU) chromiumArgs.push('--enable-gpu');
+else chromiumArgs.push('--use-angle=swiftshader', '--enable-unsafe-swiftshader');
+for (const name of new Set(BROWSERS)) {
+  const browser =
+    name === 'webkit'
+      ? await webkit.launch({ headless: HEADLESS })
+      : await chromium.launch({
+          headless: HEADLESS,
+          executablePath: process.env.CHROMIUM_PATH || undefined,
+          args: chromiumArgs,
+        });
+  browsers.set(name, browser);
+}
 
-const mkPage = async (name) => {
+const mkPage = async (name, browser) => {
   const ctx = await browser.newContext({ viewport: { width: 960, height: 720 } });
   await addNetworkInitScript(ctx, { lat: LAT, jitter: JITTER, kbps: LINK_KBPS });
   if (RECOVERY_BYSTANDER && RECOVERY_MODE === 'reconnect' && name === 'P1') {
@@ -413,7 +437,7 @@ const mkPage = async (name) => {
 // One page per player, joined in turn so each takes the next slot.
 const pages = [];
 for (let i = 0; i < PLAYERS; i++) {
-  const page = await mkPage(`P${i + 1}`);
+  const page = await mkPage(`P${i + 1}`, browsers.get(BROWSERS[i]));
   const host = i === 0 ? '&host=1&mode=rollback' : '';
   await page.goto(`${URL}/play.html?room=${room}${host}&name=P${i + 1}${QUERY}`);
   await page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
@@ -708,6 +732,15 @@ const recovery = {
   protectedRequest: null,
   reconnectUnresolved: null,
 };
+const battleStart = await Promise.all(
+  pages.map((page) =>
+    page.evaluate(() => {
+      if (window.__knTickProfile) window.__knTickProfile.length = 0;
+      window.NetplayRollback.resetCanvasCadence();
+      return { frame: window.__mesh.lastR, at: performance.now() };
+    }),
+  ),
+);
 const tBattle = Date.now();
 if (MISSING_RECIPIENT) {
   await host.waitForTimeout((BATTLE_SECONDS * 1000) / 3);
@@ -1441,9 +1474,11 @@ await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - (Date.now() - tBat
 // Collect, then compare every guest with the host.
 const P = await Promise.all(
   pages.map(async (p) => ({
-    sync: await syncLogOf(p),
     ...(await p.evaluate(() => ({
       checkpoint: window.__meshCheckpoint?.() ?? null,
+      battleEnd: { frame: window.__mesh.lastR, at: performance.now() },
+      tickProfile: window.__knTickProfile?.length ? window.knTickProfileSummary(1200) : null,
+      canvasCadence: window.NetplayRollback.getCanvasCadence(),
       nativeInputs: window.__knNativeInputObserver?.export() ?? null,
       missingRecipientWire: window.__meshMissingRecipient ?? null,
       rosterHold: window.__meshRosterHold ?? null,
@@ -1465,6 +1500,7 @@ const P = await Promise.all(
         return { kind: (w >>> 8) & 0xff, fkind: w & 0xff };
       }),
     }))),
+    sync: await syncLogOf(p),
   })),
 );
 P.forEach((x, i) => {
@@ -1477,7 +1513,7 @@ if (process.env.HOST_END_CHECK === '1') {
   const { checkHostEnd } = await import('./rb-end-game.mjs');
   hostEnd = await checkHostEnd(pages, OUT);
 }
-await browser.close();
+await Promise.all([...browsers.values()].map((browser) => browser.close()));
 
 const catchUpsOf = (log, afterSeq = -1) =>
   log
@@ -2357,6 +2393,8 @@ const summary = {
   joinInput: joinInput ? { ...joinInput, problems: joinInputProblems } : undefined,
   room,
   players: PLAYERS,
+  browsers: BROWSERS,
+  chromiumGpuRequested: CHROMIUM_GPU,
   latencyMs: LAT,
   jitterMs: JITTER,
   linkKbps: LINK_KBPS,
@@ -2370,6 +2408,19 @@ const summary = {
     ticksWithoutLag: x.ticksWithoutLag,
   })),
   screenSize: SCREEN_SIZE,
+  battlePerformance: P.map(({ battleEnd, tickProfile, canvasCadence }, slot) => {
+    const start = battleStart[slot];
+    const elapsed = battleEnd.at - start.at;
+    const frames = battleEnd.frame - start.frame;
+    return {
+      slot,
+      gameFps: elapsed > 0 && frames >= 0 ? Number(((frames * 1000) / elapsed).toFixed(1)) : null,
+      frames,
+      seconds: Number((elapsed / 1000).toFixed(2)),
+      tickProfile,
+      canvasCadence,
+    };
+  }),
   fighters: H.fighters,
   fighterProblems,
   stops,

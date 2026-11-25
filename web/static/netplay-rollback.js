@@ -1262,14 +1262,40 @@
   // circular buffer at window.__knTickProfile so a probe can identify
   // which phase dominates tick time. Off by default; recording costs
   // ~5 performance.now() calls per tick when on, ~0 when off.
-  const RB_TICK_PROFILE = (() => {
-    try {
-      const raw = _urlParams.get('tickProfile') ?? localStorage.getItem('kn-tick-profile');
-      if (raw === '1') return true;
-    } catch (_) {}
-    return false;
-  })();
+  const RB_CANVAS_CADENCE = _urlParams.get('canvasCadence') === '1';
+  const RB_TICK_PROFILE =
+    RB_CANVAS_CADENCE ||
+    (() => {
+      try {
+        const raw = _urlParams.get('tickProfile') ?? localStorage.getItem('kn-tick-profile');
+        if (raw === '1') return true;
+      } catch (_) {}
+      return false;
+    })();
   if (RB_TICK_PROFILE) window.__knTickProfile = [];
+  let _canvasCadence = null;
+  const _resetCanvasCadence = () => {
+    if (!RB_CANVAS_CADENCE || _phase !== PHASE_RUNNING) return;
+    _canvasCadence?.stop();
+    _canvasCadence = window.KNCore.canvasCadence.start(document.querySelector('#game canvas'), {
+      frame: () => _frameNum,
+      captureAllowed: _knScreenshots,
+      ticks: () => window.__knTickProfile,
+    });
+  };
+  const _logCanvasCadence = () => {
+    if (_canvasCadence) _syncLog('CANVAS-CADENCE ' + JSON.stringify(_canvasCadence.summary()));
+  };
+  const _stopCanvasCadence = () => {
+    if (!_canvasCadence) return;
+    _logCanvasCadence();
+    _canvasCadence.stop();
+    _canvasCadence = null;
+  };
+  const _periodicSyncLog = () => {
+    _logCanvasCadence();
+    _flushSyncLog();
+  };
   const _pushTickProfile = (rec) => {
     if (!RB_TICK_PROFILE) return;
     const buf = window.__knTickProfile;
@@ -16211,6 +16237,7 @@
     queueMicrotask(() => _config?.onLeftOutOfStart?.());
   };
   const _notifyCoreFatal = (message) => {
+    _stopCanvasCadence();
     try {
       _config?.onFatal?.(message);
     } catch (cbErr) {
@@ -16608,22 +16635,15 @@
     window._knPreventRetroArchVisibilityPause = true;
     _checkStateTransition();
 
-    // Ensure session log flushing is active. startGameSequence() sets this
-    // up for normal joins, but late-joiners return early from that function
-    // and resume here via handleLateJoinState() → startLockstep(). Without
-    // this, late-joiners produce zero session logs and zero screenshots.
+    // Normal starts and late joins meet here. Arm the first flush before
+    // checking the core so a failed start can still upload its diagnostics.
     if (!_flushInterval) {
       _cachedMatchId = _cachedMatchId || KNState.matchId;
       _cachedRoom = _cachedRoom || KNState.room;
       _cachedUploadToken = _cachedUploadToken || KNState.uploadToken;
       _socketFlushFails = 0;
       _syncLogAckedSeq = -1;
-      _flushInterval = setInterval(_flushSyncLog, SYNC_LOG_FLUSH_MS);
-      // Early flush at 5s so short matches (that freeze, crash, or are
-      // aborted before the 30s interval fires) still leave a DB row. This
-      // caught a real bug where room 4A2NMSLS was completely invisible
-      // after a match froze and the tab was closed before 30s elapsed.
-      setTimeout(() => _flushSyncLog(), 5000);
+      _flushInterval = setInterval(_periodicSyncLog, SYNC_LOG_FLUSH_MS);
       _startTime = _startTime || performance.now();
     }
 
@@ -17129,23 +17149,9 @@
 
     setStatus('Connected -- game on!');
     _startTime = performance.now();
-    _cachedMatchId = KNState.matchId;
-    _cachedRoom = KNState.room;
-    _cachedUploadToken = KNState.uploadToken;
-    _socketFlushFails = 0;
-    _syncLogAckedSeq = -1;
-    _flushInterval = setInterval(_flushSyncLog, SYNC_LOG_FLUSH_MS);
-    // Early flush at 5s so short matches (freeze/crash/abort before 30s)
-    // still leave a DB row. See also the lockstep-ready path above.
-    setTimeout(() => _flushSyncLog(), 5000);
 
-    // Page-unload safety net: force-flush via HTTP keepalive on pagehide.
-    // Without this, a tab crash / user closing the tab / mobile Safari
-    // backgrounding mid-match causes 100% of in-memory log entries to be
-    // lost since the 30s interval never fires. Socket.IO disconnect also
-    // races with page unload — the HTTP path with keepalive:true is the
-    // only reliable delivery during unload. Using pagehide (not beforeunload)
-    // because it works on mobile Safari where beforeunload is ignored.
+    // Closing or backgrounding the page can interrupt the interval and
+    // disconnect the socket. Upload its last entries with HTTP keepalive.
     if (!window._knFlushUnloadHandler) {
       const handler = () => {
         try {
@@ -17484,6 +17490,7 @@
       }
     }, TICK_PUMP_INTERVAL_MS);
     _syncLog(`tick scheduler target=${TICK_TARGET_MS.toFixed(2)}ms pump=${TICK_PUMP_INTERVAL_MS}ms`);
+    _resetCanvasCadence();
 
     // Live RTT probe — runs every 5s to catch latency spikes (e.g. 5G jitter).
     // Delay is fixed for the session — no live RTT probes.
@@ -22664,6 +22671,7 @@
   };
 
   const stop = () => {
+    _stopCanvasCadence();
     _savedGame = _pendingSave = null;
     _droppedThisMatch = new Set();
     _droppedByHost = false;
@@ -23205,6 +23213,8 @@
       return _demoMode;
     },
     isDemoMode: () => _demoMode,
+    resetCanvasCadence: _resetCanvasCadence,
+    getCanvasCadence: () => _canvasCadence?.summary() ?? null,
     getHudCounters: () => {
       const now = performance.now();
       _pruneHudEvents(now);

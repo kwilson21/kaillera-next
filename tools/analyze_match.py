@@ -23,6 +23,9 @@ Usage:
     python tools/analyze_match.py <match_id> --base PROD_URL --key PROD_KEY
     python tools/analyze_match.py <match_id> --keep   # keep downloaded files
 
+For local capture-video cadence in section 11a, join with &canvasCadence=1
+and enable the existing capture consent for that client.
+
 Requires: pip install duckdb polars requests
 """
 
@@ -30,11 +33,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
 import tempfile
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 
 try:
@@ -1748,62 +1753,141 @@ def query_c_debug_highlights(df: pl.DataFrame) -> None:
         print(f"  {t}: {n}")
 
 
-def query_tick_performance(jsonl_dir: str) -> None:
-    """Per-peer FPS and tick timing from TICK-PERF entries."""
-    _print_section("11a. TICK PERFORMANCE (per peer)")
-    import glob as _glob
+_TICK_REPORT_FRAMES = 300  # TICK-PERF cadence in netplay-rollback.js
+_TICK_REPORT = re.compile(r"TICK-PERF f=(\d+) fps=(\d+(?:\.\d+)?) tickMs median=(\d+(?:\.\d+)?) p95=(\d+(?:\.\d+)?)\b")
+_FRAME_RESET = re.compile(
+    r"^(?:sync frame reset:|sync #\d+ applied |SYNC-CATCH-UP from=|late-join loaded at frame |tick scheduler target=)"
+)
 
-    for path in sorted(_glob.glob(f"{jsonl_dir}/session-*.jsonl")):
+
+def _print_canvas_cadence(summary: dict) -> None:
+    print(f"    Capture-video cadence: {summary['status']}", end="")
+    if not summary.get("samples"):
+        print()
+        return
+    age = summary.get("lastFrameAgeMs")
+    age_label = f" lastFrameAgeMs={age}" if age is not None else ""
+    print(
+        f" samples={summary['samples']} missedCallbacks={summary['missedCallbacks']} "
+        f"p95GapMs={summary['p95GapMs']} (last {summary['recentSamples']} samples) "
+        f"maxGapMs={summary['maxGapMs']}{age_label}"
+    )
+    gaps = summary.get("worstGaps")
+    if not isinstance(gaps, list) or not gaps or not isinstance(gaps[0], dict):
+        return
+    gap = gaps[0]
+    print(f"      Worst gap: {gap.get('ms')}ms f={gap.get('fromFrame')}–{gap.get('toFrame')}", end="")
+    ticks = gap.get("ticks")
+    if isinstance(ticks, dict):
+        print(f" tickMaxMs={ticks.get('maxMs')} paths={json.dumps(ticks.get('paths'), sort_keys=True)}", end="")
+    print()
+
+
+def _print_peer_tick_performance(lines: Iterable[str]) -> None:
+    slot, device = "?", "unknown device"
+    previous = previous_seq = None
+    cadence = None
+    windows = []
+    median_vals, p95_vals = [], []
+    for line in lines:
         try:
-            with open(path) as f:
-                first = json.loads(f.readline())
-                slot = first.get("slot", "?")
-                ua = (first.get("context") or {}).get("ua", "")
-                mobile = (first.get("context") or {}).get("mobile", False)
-                f.seek(0)
-                fps_vals = []
-                median_vals = []
-                p95_vals = []
-                for line in f:
-                    d = json.loads(line)
-                    msg = d.get("msg", "")
-                    if "TICK-PERF" not in msg:
-                        continue
-                    m = re.search(r"fps=([0-9.]+).*median=([0-9.]+).*p95=([0-9.]+)", msg)
-                    if m:
-                        fps_vals.append(float(m.group(1)))
-                        median_vals.append(float(m.group(2)))
-                        p95_vals.append(float(m.group(3)))
-                if fps_vals:
-                    avg_fps = sum(fps_vals) / len(fps_vals)
-                    avg_med = sum(median_vals) / len(median_vals)
-                    avg_p95 = sum(p95_vals) / len(p95_vals)
-                    device = "mobile" if mobile else "desktop"
-                    print(
-                        f"  Slot {slot} ({device}): fps={avg_fps:.1f} "
-                        f"tickMs median={avg_med:.1f} p95={avg_p95:.1f} "
-                        f"({len(fps_vals)} samples)"
-                    )
-                    if avg_fps < 55:
-                        # Check C-PERF total to see how much is code vs browser
-                        f.seek(0)
-                        totals = []
-                        for line2 in f:
-                            d2 = json.loads(line2)
-                            msg2 = d2.get("msg", "")
-                            if "C-PERF" in msg2:
-                                m2 = re.search(r"total=([0-9.]+)ms", msg2)
-                                if m2:
-                                    totals.append(float(m2.group(1)))
-                        if totals:
-                            avg_total = sum(totals) / len(totals)
-                            gap = avg_med - avg_total
-                            print(f"    !! BELOW 60fps: tick={avg_med:.1f}ms but code={avg_total:.1f}ms → {gap:.1f}ms idle gap")
-                            if gap > 5:
-                                print(f"    Browser scheduling at {avg_fps:.0f}Hz — not a code performance issue")
-                            else:
-                                print(f"    Code is near budget — optimization may help")
-        except Exception:
+            row = json.loads(line)
+        except ValueError:
+            row = None
+        if not isinstance(row, dict):
+            previous = previous_seq = None
+            continue
+        if slot == "?":
+            slot = row.get("slot", "?")
+        if row.get("_kind") == "meta":
+            context = row.get("context")
+            if isinstance(context, dict) and isinstance(context.get("mobile"), bool):
+                device = "mobile" if context["mobile"] else "desktop"
+            previous = previous_seq = None
+            continue
+        seq = row.get("seq")
+        if previous_seq is not None and seq != previous_seq + 1:
+            previous = None  # Missing log rows could contain a frame reset.
+        previous_seq = seq if isinstance(seq, int) else None
+        msg = row.get("msg")
+        if not isinstance(msg, str) or _FRAME_RESET.match(msg):
+            previous = None
+            continue
+        if msg.startswith("CANVAS-CADENCE "):
+            try:
+                sample = json.loads(msg.removeprefix("CANVAS-CADENCE "))
+            except ValueError:
+                continue
+            if not isinstance(sample, dict) or not isinstance(sample.get("status"), str):
+                continue
+            samples = sample.get("samples")
+            measured = (
+                isinstance(samples, int)
+                and samples > 0
+                and all(
+                    isinstance(sample.get(key), (int, float))
+                    for key in ("missedCallbacks", "recentSamples", "p95GapMs", "maxGapMs")
+                )
+            )
+            if measured or (samples == 0 and not (cadence and cadence["samples"])):
+                cadence = sample
+            continue
+        if not msg.startswith("TICK-PERF "):
+            continue
+        match = _TICK_REPORT.match(msg)
+        if not match:
+            previous = None
+            continue
+        frame = int(match[1])
+        median_vals.append(float(match[3]))
+        p95_vals.append(float(match[4]))
+        now = row.get("t")
+        if not isinstance(now, (int, float)) or not math.isfinite(now):
+            previous = None
+            continue
+        dropped = re.search(r"\bdroppedSlots=(\d+)", msg)
+        dropped_slots = int(dropped[1]) if dropped else None
+        if previous:
+            prev_frame, prev_time, prev_dropped = previous
+            elapsed = now - prev_time
+            skipped = dropped_slots - prev_dropped if dropped_slots is not None and prev_dropped is not None else None
+            if frame - prev_frame == _TICK_REPORT_FRAMES and elapsed > 0 and (skipped is None or skipped >= 0):
+                windows.append((elapsed, prev_frame, frame, float(match[2]), skipped))
+        previous = (frame, now, dropped_slots)
+    if not median_vals and cadence is None:
+        return
+    print(f"  Slot {slot} ({device}):", end="")
+    if median_vals:
+        frames_ms = _TICK_REPORT_FRAMES * 1000
+        game_rate = f"{frames_ms * len(windows) / sum(w[0] for w in windows):.1f}" if windows else "unavailable"
+        window_label = "window" if len(windows) == 1 else "windows"
+        print(
+            f" gameFps={game_rate} ({len(windows)} {window_label}) mean reported tickMs "
+            f"median={sum(median_vals) / len(median_vals):.1f} p95={sum(p95_vals) / len(p95_vals):.1f}"
+        )
+        for elapsed, start, end, tick_hz, skipped in sorted(windows, reverse=True, key=lambda w: w[0])[:3]:
+            fps = frames_ms / elapsed
+            if fps >= 55:
+                break
+            dropped_label = f" droppedSlots={skipped}" if skipped is not None else ""
+            print(
+                f"    f={start}–{end}: {fps:.1f} game fps over {elapsed / 1000:.1f}s "
+                f"(reported tick rate {tick_hz:.1f}Hz){dropped_label}"
+            )
+    else:
+        print()
+    if cadence is not None:
+        _print_canvas_cadence(cadence)
+
+
+def query_tick_performance(jsonl_dir: str) -> None:
+    """Measure game frame advancement and show the client's optional capture-video cadence."""
+    _print_section("11a. TICK PERFORMANCE (per peer)")
+    for path in sorted(Path(jsonl_dir).glob("session-*.jsonl")):
+        try:
+            with path.open() as f:
+                _print_peer_tick_performance(f)
+        except OSError:
             continue
 
 
