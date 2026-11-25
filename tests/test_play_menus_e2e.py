@@ -37,9 +37,44 @@ def test_a_toast_shows_then_removes_itself(browser, server_url, room):
         toast = page.locator("#toast-container .toast", has_text="Hello")
         expect(toast).to_be_visible()
         # Text, never markup.
-        assert toast.inner_html() == "Hello &lt;b&gt;there&lt;/b&gt;"
-        expect(toast).to_have_class("toast fade-out", timeout=4000)
-        expect(toast).to_have_count(0, timeout=2000)
+        assert toast.locator(".toast-message").inner_html() == "Hello &lt;b&gt;there&lt;/b&gt;"
+        expect(page.locator("#notice-announcer")).to_have_text("Hello <b>there</b>")
+        expect(toast).to_have_count(0, timeout=5000)
+    finally:
+        page.close()
+
+
+def test_mobile_notices_are_bounded_and_keyboard_dismissible(browser, server_url, room):
+    page = _open(browser, server_url, room)
+    try:
+        page.set_viewport_size({"width": 393, "height": 852})
+        page.clock.install()
+        page.evaluate("""() => {
+            const {showToast} = KNCore.play.notices;
+            showToast('Connection interrupted', 'warn');
+            showToast('Connection interrupted', 'warn');
+            showToast('First update');
+            showToast('Second update');
+            showToast('Third update');
+        }""")
+        stack = page.locator("#room-notices #toast-container")
+        expect(stack.locator(".toast-message")).to_have_text(
+            ["Connection interrupted", "Second update", "Third update"]
+        )
+        warning = stack.locator(".toast", has_text="Connection interrupted")
+        expect(warning).to_have_attribute("data-tone", "warn")
+        invite = page.locator("#copy-link").bounding_box()
+        box = warning.bounding_box()
+        assert invite and box and invite["y"] + invite["height"] <= box["y"]
+        assert box["x"] >= 0 and box["x"] + box["width"] <= 393
+
+        close = warning.get_by_role("button", name="Dismiss notification")
+        close.focus()
+        page.clock.run_for(6200)
+        expect(warning).to_be_visible()
+        expect(close).to_be_focused()
+        page.keyboard.press("Enter")
+        expect(warning).to_have_count(0)
     finally:
         page.close()
 

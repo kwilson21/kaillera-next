@@ -2,6 +2,7 @@
 // reset input: the harness relinquishes its autopilot to production input.
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import { RESET_COMBO_MASK } from '../web/src/reset-combo.ts';
 
 export async function checkPausedReset(pages, out) {
   const host = pages[0];
@@ -56,8 +57,20 @@ export async function checkPausedReset(pages, out) {
   await fs.writeFile(`${out}/native-pause.json`, JSON.stringify(pauseEvidence, null, 2));
   const box = await button.boundingBox();
   assert.ok(box && box.width >= 44 && box.height >= 44, 'reset hold target is accessible');
+  await host.evaluate(() => {
+    // The emulator can reopen its passive toolbar over a paused match.
+    window.EJS_emulator.elements.menu.classList.remove('ejs_menu_bar_hidden');
+    document.querySelector('#contextual-reset button').addEventListener(
+      'pointerdown',
+      () => {
+        window.__knResetPressedAt = performance.now();
+      },
+      { once: true },
+    );
+  });
   await host.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await host.mouse.down();
+  await host.waitForTimeout(350);
   let approver = null;
   if (process.env.TWELVE_CB === '1') {
     await host.waitForTimeout(500);
@@ -125,6 +138,16 @@ export async function checkPausedReset(pages, out) {
     await approver.mouse.down();
   }
   try {
+    const firstChordMs = await host.evaluate((mask) => {
+      const sample = window.__knResetInputSamples.find(
+        (sample) => sample.held && (sample.buttons & mask) === mask && sample.at >= window.__knResetPressedAt,
+      );
+      return sample ? sample.at - window.__knResetPressedAt : null;
+    }, RESET_COMBO_MASK);
+    assert.ok(
+      firstChordMs !== null && firstChordMs < 300,
+      `reset chord must reach the next input samples, got ${firstChordMs}ms`,
+    );
     await Promise.all(
       pages.map((page) =>
         page.waitForFunction(() => ((window.NetplayRollback.readRdram32(0x800a4ad0) >>> 24) & 255) === 24, null, {

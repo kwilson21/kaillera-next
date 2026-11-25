@@ -176,6 +176,46 @@ def test_players_play_and_a_spectator_watches_then_all_return_to_the_lobby(brows
             page.close()
 
 
+def test_peer_warning_expires_recovers_and_clears_on_return_to_lobby(browser, server_url, room):
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        _start_room(host, guest)
+        match_id = guest.evaluate("KNState.matchId")
+        guest.clock.install()
+        emit = """([kind, matchId]) => window.dispatchEvent(
+            new CustomEvent(kind, { detail: { slot: 0, matchId } })
+        )"""
+        warning = guest.locator("#toast-container .toast", has_text="Waiting for Host")
+        guest.evaluate(emit, ["kn-peer-phantom", match_id])
+        expect(guest.locator("#floating-notices .toast", has_text="Waiting for Host")).to_be_visible()
+        guest.evaluate(emit, ["kn-peer-recovered", match_id])
+        expect(warning).to_have_count(0)
+
+        guest.evaluate(emit, ["kn-peer-phantom", match_id])
+        guest.clock.run_for(4000)
+        guest.evaluate(emit, ["kn-peer-phantom", match_id])
+        expect(warning).to_have_count(1)
+        guest.clock.run_for(2200)
+        expect(warning).to_have_count(0)
+
+        guest.evaluate(emit, ["kn-peer-phantom", match_id])
+        expect(warning).to_be_visible()
+        host.evaluate("window.__test_socket.emit('end-game', {})")
+        expect(guest.locator("#overlay")).to_be_visible()
+        expect(warning).to_have_count(0)
+        expect(guest.locator("#room-notices .toast", has_text=ENDED)).to_be_visible()
+        guest.evaluate(emit, ["kn-peer-phantom", match_id])
+        expect(warning).to_have_count(0)
+
+        host.click("#start-btn")
+        guest.wait_for_function("(previous) => KNState.matchId && KNState.matchId !== previous", arg=match_id)
+        guest.evaluate(emit, ["kn-peer-phantom", match_id])
+        expect(warning).to_have_count(0)
+    finally:
+        host.close()
+        guest.close()
+
+
 def _start_room(host, guest):
     for page in (host, guest):
         _load_rom(page)

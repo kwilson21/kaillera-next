@@ -964,6 +964,11 @@ $QUINT test specs/recovery_review.qnt --main=recovery_review_before --backend="$
 $QUINT test specs/recovery_review.qnt --main=recovery_review_fixed --backend="$BACKEND"
 $QUINT run specs/recovery_review.qnt --main=recovery_review_fixed --invariant=allHold --max-samples=10000 --max-steps=30 --backend="$BACKEND"
 
+# Match notices expire and never follow a player back to the room.
+$QUINT test specs/play_notices.qnt --main=play_notices_before --backend="$BACKEND"
+$QUINT test specs/play_notices.qnt --main=play_notices_fixed --backend="$BACKEND"
+$QUINT run specs/play_notices.qnt --main=play_notices_fixed --invariant=currentMatchOnly --max-samples=1000 --max-steps=20 --backend="$BACKEND"
+
 # Native paused-game helper: phase/owner changes always release and rearm.
 $QUINT test specs/contextual_reset.qnt --main=contextual_reset_before --backend="$BACKEND"
 $QUINT test specs/contextual_reset.qnt --main=contextual_reset_fixed --backend="$BACKEND"

@@ -9504,7 +9504,7 @@
     );
     _syncLog(`received late-join request from ${requesterSid}`);
     const name = _knownPlayers[requesterSid]?.playerName || 'A player';
-    _config?.onToast?.(`${name} is joining...`);
+    _config?.onToast?.(`${name} is joining…`, 'info', `late-join:${requesterSid}`);
     setStatus(`${name} is joining...`);
     _lateJoinReadyHandled.delete(requesterSid);
     _pendingLateJoinReadySids.delete(requesterSid);
@@ -9586,6 +9586,7 @@
     }
 
     const name = senderSid ? _knownPlayers[senderSid]?.playerName || 'Player' : 'Player';
+    const noticeKey = `late-join:${senderSid ?? ''}`;
     if (
       _runSubstate === RUN_LATE_JOIN_PAUSE &&
       _playerSlot === 0 &&
@@ -9604,17 +9605,17 @@
         } catch (_) {}
       }
       _syncLog(`late-join-ready (${source}) — ${_lateJoinServing.size} joiner(s) still loading, pause kept`);
-      if (newlyHandled) _config?.onToast?.(`${name} joined`);
+      if (newlyHandled) _config?.onToast?.(`${name} joined`, 'success', noticeKey);
     } else if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
       resumeLateJoinPause(`joiner ready (via ${source})`, true);
-      if (newlyHandled || senderSid) _config?.onToast?.(`${name} joined`);
+      if (newlyHandled || senderSid) _config?.onToast?.(`${name} joined`, 'success', noticeKey);
     } else {
       // The Socket.IO ready path may already have resumed the old players.
       // Now that the joiner's DC is open, activate the roster/input slot.
       _resetPacingAfterLateJoin();
       _broadcastRoster();
       _syncLog(`late-join-ready (${source}) — pacing reset + roster broadcast`);
-      if (newlyHandled) _config?.onToast?.(`${name} joined`);
+      if (newlyHandled) _config?.onToast?.(`${name} joined`, 'success', noticeKey);
     }
   };
 
@@ -11226,7 +11227,9 @@
         _syncLog(`PEER-RECOVERED slot=${peer.slot} f=${recvFrame} — resuming normal pacing`);
         _peerPhantom[peer.slot] = false;
         _forgetHolePushes(peer.slot);
-        window.dispatchEvent(new CustomEvent('kn-peer-recovered', { detail: { slot: peer.slot } }));
+        window.dispatchEvent(
+          new CustomEvent('kn-peer-recovered', { detail: { slot: peer.slot, matchId: _config?.matchId } }),
+        );
         // What this page does now is web/src/recovery-resync.ts (proved;
         // specs/recovery_bystander.qnt, recovery_bystander_fixed): the host
         // resyncs every guest; a guest asks the host for a resync.
@@ -11421,7 +11424,7 @@
         const rKnown = _knownPlayers[remoteSid];
         const rName = rKnown ? rKnown.playerName : `P${(peer.slot ?? 0) + 1}`;
         setStatus(`${rName} reconnected — resyncing...`);
-        _config?.onToast?.(`${rName} reconnected`);
+        _config?.onToast?.(`${rName} reconnected`, 'success', `peer:${peer.slot}`);
         _config?.onReconnecting?.(remoteSid, false);
         _config?.onPeerReconnected?.(remoteSid);
         // Force resync — after disconnect the guest was fabricating inputs,
@@ -11596,7 +11599,7 @@
           // it starts serving, so the deadline runs from the latest.
           _lateJoinGuestPausedAt = performance.now();
           setStatus('Player joining...');
-          _config?.onToast?.('Player joining...');
+          _config?.onToast?.('Player joining…', 'info', 'late-join');
           _syncLog(`paused by host for late-join sync at frame ${_frameNum}`);
         }
         if (e.data === 'join-the-start' && peer.slot === 0) handleJoinTheStart();
@@ -11608,7 +11611,7 @@
           _lateJoin = false;
           clearLateJoinReadyRetry();
           _resetPacingAfterLateJoin();
-          if (wasPausedForLateJoin) _config?.onToast?.('Player joined');
+          if (wasPausedForLateJoin) _config?.onToast?.('Player joined', 'success', 'late-join');
           _syncLog(`resumed by host after late-join sync at frame ${_frameNum}`);
         }
         if (e.data === 'late-join-ready' && peer.dc === ch) {
@@ -12649,7 +12652,7 @@
       const known = _knownPlayers[remoteSid];
       const name = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
       setStatus(`${name} disconnected — reconnecting & resyncing...`);
-      _config?.onToast?.(`${name} disconnected — reconnecting...`);
+      _config?.onToast?.(`${name} disconnected. Reconnecting…`, 'warn', `peer:${peer.slot}`);
       _config?.onReconnecting?.(remoteSid, true);
 
       if (_playerSlot < peer.slot && attemptReconnect(remoteSid)) return;
@@ -12730,7 +12733,7 @@
       const count = remaining.length + 1;
       setStatus(`${name} dropped -- ${count} player${count > 1 ? 's' : ''} remaining`);
     }
-    _config?.onToast?.(`${name} dropped`);
+    _config?.onToast?.(`${name} dropped`, 'warn', `peer:${peer.slot}`);
     _config?.onReconnecting?.(remoteSid, false);
     // A guest that gave up on its host (its 45 s, or its reconnect attempts
     // ran out) joins again late rather than playing on alone
@@ -12914,7 +12917,7 @@
     _setPacingPhantom(slot);
     const suffix = detail ? ` ${detail}` : '';
     _syncLog(`PEER-PHANTOM slot=${slot} reason=${reason}${suffix}`);
-    window.dispatchEvent(new CustomEvent('kn-peer-phantom', { detail: { slot } }));
+    window.dispatchEvent(new CustomEvent('kn-peer-phantom', { detail: { slot, matchId: _config?.matchId } }));
   };
 
   // Every AudioContext the core's OpenAL layer currently holds. Shared by
@@ -17059,6 +17062,7 @@
       log: _syncLog,
       getFrame: () => _frameNum,
       getSlot: () => _playerSlot,
+      isNativePaused: () => _readSceneCurr() === 22 && _readGameStatus() === 2,
       sendScreenshot: (data) => {
         if (!socket?.connected) return;
         socket.emit('game-screenshot', {
@@ -17343,15 +17347,19 @@
 
     _focusRestoreHandler = (event) => {
       if (_phase !== PHASE_RUNNING) return;
-      if (event?.target?.closest?.('#virtual-gamepad')) {
+      const target = event?.target;
+      if (target?.closest?.('#toast-container')) return;
+      const control = target?.closest?.('#virtual-gamepad, #contextual-reset button, #reset-combo-hold');
+      if (control) {
+        const reason = control.id === 'virtual-gamepad' ? 'virtual-gamepad' : 'reset-combo';
         const hadControlsFocusLost = _controlsFocusLost;
         if (hadControlsFocusLost) {
           _controlsFocusLost = false;
           setStatus('Connected -- game on!');
-          _syncLog(`TAB-FOCUS recovered via virtual-gamepad f=${_frameNum}`);
+          _syncLog(`TAB-FOCUS recovered via ${reason} f=${_frameNum}`);
         }
         if (hadControlsFocusLost || window.EJS_emulator?.paused) {
-          _clearEjsPauseFlagWithRetries(event?.type || 'virtual-gamepad', { guardInput: false });
+          _clearEjsPauseFlagWithRetries(event?.type || reason, { guardInput: false });
         }
         return;
       }
@@ -18503,7 +18511,9 @@
                 `PEER-PHANTOM slot=${p.slot} lastAdvance=${_peerLastAdvanceTime[p.slot].toFixed(0)} staleSec=${((nowPacing - _peerLastAdvanceTime[p.slot]) / 1000).toFixed(1)} — excluded from pacing`,
               );
               // Notify UI that a peer has been dropped
-              window.dispatchEvent(new CustomEvent('kn-peer-phantom', { detail: { slot: p.slot } }));
+              window.dispatchEvent(
+                new CustomEvent('kn-peer-phantom', { detail: { slot: p.slot, matchId: _config?.matchId } }),
+              );
             }
           }
         }
@@ -18596,7 +18606,9 @@
                 _syncLog(
                   `PEER-PHANTOM slot=${slowestSlot} reason=pacing-timeout stalledMs=${Math.round(_pacingStallMs)} — excluded from pacing`,
                 );
-                window.dispatchEvent(new CustomEvent('kn-peer-phantom', { detail: { slot: slowestSlot } }));
+                window.dispatchEvent(
+                  new CustomEvent('kn-peer-phantom', { detail: { slot: slowestSlot, matchId: _config?.matchId } }),
+                );
               }
               if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
               _pacingThrottleStartAt = 0;

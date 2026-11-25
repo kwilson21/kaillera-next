@@ -269,7 +269,7 @@
       _warnedRomHash = _romHash;
       // \u00a77.4 wrong/unsupported-ROM copy: amber, names what's supported.
       // Doesn't block Start (\u00a77.2 M3 #1) \u2014 see updateStartButton.
-      showToast(`Not a supported ROM. It may not work. Supported: ${_supportedRomNames()}`);
+      showToast(`Not a supported ROM. It may not work. Supported: ${_supportedRomNames()}`, 'warn');
     }
   };
 
@@ -477,7 +477,6 @@
   // Moved to TypeScript (web/src/play/): this page reads them from the core
   // bundle, which play.html loads just before this file.
   const {
-    escapeHtml,
     formatRomSize,
     hostRomFromData,
     hostRomIdentityKey,
@@ -680,7 +679,7 @@
   const getPlayerNameBySlot = (slot) => {
     if (!lastUsersData?.players) return null;
     for (const p of Object.values(lastUsersData.players)) {
-      if (p.slot === slot) return escapeHtml(p.playerName);
+      if (p.slot === slot) return p.playerName;
     }
     return null;
   };
@@ -821,22 +820,18 @@
     // rules are web/src/play/connection-notices.ts; these are the page effects.
     const _reconnectBanner = document.getElementById('reconnecting-banner');
     const _reconnectText = document.getElementById('reconnecting-text');
+    const showRoomConnection = (message) => {
+      if (_reconnectText) _reconnectText.textContent = message;
+      _reconnectBanner?.classList.remove('hidden');
+    };
     const _connectionNotices = window.KNCore.play.connectionNotices.startConnectionNotices({
-      showReconnecting: () => {
-        if (_reconnectBanner) _reconnectBanner.classList.remove('hidden');
-        if (_reconnectText) _reconnectText.textContent = 'Reconnecting to server\u2026';
-      },
-      showServerDown: () => {
-        if (_reconnectBanner) _reconnectBanner.classList.remove('hidden');
-        if (_reconnectText)
-          _reconnectText.textContent =
-            'Server is unreachable \u2014 your game is unaffected. New players cannot join until the server returns.';
-      },
+      showReconnecting: () => showRoomConnection('Reconnecting to the room server…'),
+      showServerDown: () => showRoomConnection('Room server unavailable. Retrying…'),
       hide: () => {
         if (_reconnectBanner) _reconnectBanner.classList.add('hidden');
       },
       giveUp: () => showError('Unable to reach server'),
-      slowFirstConnect: () => showToast('Unable to reach server \u2014 retrying\u2026', 'error'),
+      slowFirstConnect: () => showRoomConnection('Connecting to the room server…'),
     });
     const _connects = window.KNCore?.createConnectTracker() ?? null;
     socket.on('connect', () => {
@@ -907,70 +902,17 @@
     socket.on('rom-sharing-updated', _boundary.server('rom-sharing-updated', onRomSharingUpdated));
     socket.on('data-message', _boundary.relay('data-message', onDataMessage));
 
-    // Lockstep peer-phantom notifications — P1-6: replaced with a persistent
-    // corner status indicator instead of transient center-screen toasts.
-    // The indicator stays visible for as long as the peer is disconnected
-    // and clears when they reconnect, so it's much less distracting during
-    // gameplay than a flash-toast that disappears in 2.7s.
-    window.addEventListener('kn-peer-phantom', (e) => {
-      const slot = e.detail?.slot;
-      const name = getPlayerNameBySlot(slot) || '';
-      addPeerStatusEntry(slot, name, 'unresponsive');
+    window.addEventListener('kn-peer-phantom', ({ detail }) => {
+      const slot = detail?.slot;
+      if (!isGameRunning() || !KNState.matchId || detail?.matchId !== KNState.matchId) return;
+      if (!Number.isInteger(slot) || slot < 0 || slot > 3) return;
+      const name = getPlayerNameBySlot(slot) || `Player ${slot + 1}`;
+      showToast(`Waiting for ${name}’s connection`, 'warn', { key: `peer:${slot}`, matchId: detail.matchId });
     });
-    window.addEventListener('kn-peer-recovered', (e) => {
-      const slot = e.detail?.slot;
-      removePeerStatusEntry(slot);
+    window.addEventListener('kn-peer-recovered', ({ detail }) => {
+      if (!detail?.matchId) return;
+      dismissToast(`peer:${detail.slot}`, detail.matchId);
     });
-  };
-
-  // ── Peer status indicator (P1-6) ───────────────────────────────────────
-  // Persistent corner element listing disconnected peers. Replaces the
-  // transient phantom-peer toasts that were "more distracting than helpful
-  // to the gaming experience" per the launch readiness audit.
-  const _peerStatusEntries = new Map(); // slot -> { name, state }
-  const _ensurePeerStatusEl = () => {
-    let el = document.getElementById('kn-peer-status');
-    if (el) return el;
-    el = document.createElement('div');
-    el.id = 'kn-peer-status';
-    el.style.cssText =
-      'position:fixed; top:64px; right:12px; z-index:120; ' +
-      'display:flex; flex-direction:column; gap:4px; pointer-events:none;';
-    document.body.appendChild(el);
-    return el;
-  };
-  const _renderPeerStatus = () => {
-    const el = _ensurePeerStatusEl();
-    if (_peerStatusEntries.size === 0) {
-      el.innerHTML = '';
-      return;
-    }
-    el.innerHTML = [..._peerStatusEntries.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .map(([slot, info]) => {
-        const dotColor = info.state === 'unresponsive' ? '#e74c3c' : '#f5c542';
-        // Show "P2 jimmy unresponsive" if we have a name, "P2 unresponsive"
-        // if we don't (avoids the redundant "P2 P2" when no name is known).
-        const label = info.name ? `P${slot} ${escapeHtml(info.name)}` : `P${slot}`;
-        return (
-          '<div style="background:rgba(15,15,30,0.92); border:1px solid #2a2a40; ' +
-          'border-radius:6px; padding:4px 10px; font-size:12px; color:#eee; ' +
-          'display:flex; align-items:center; gap:6px; ' +
-          'box-shadow:0 2px 8px rgba(0,0,0,0.4)">' +
-          `<span style="width:8px; height:8px; border-radius:50%; background:${dotColor}"></span>` +
-          `<span>${label} ${escapeHtml(info.state)}</span>` +
-          '</div>'
-        );
-      })
-      .join('');
-  };
-  const addPeerStatusEntry = (slot, name, state) => {
-    _peerStatusEntries.set(slot, { name, state });
-    _renderPeerStatus();
-  };
-  const removePeerStatusEntry = (slot) => {
-    _peerStatusEntries.delete(slot);
-    _renderPeerStatus();
   };
 
   // The requests a page sends to open or join a room, and what the answers
@@ -1379,7 +1321,7 @@
                   if (joinData2) lastUsersData = joinData2;
                   sendDeviceType();
                   KNEvent('peer_joined', '', { slot: -1, is_spectator: true });
-                  showRoomFullBanner();
+                  showRoomFullNotice();
                   showOverlay();
                 });
                 return;
@@ -1418,7 +1360,7 @@
               }
             } else if (isSpectator) {
               mySlot = null;
-              if (_autoSpectated) showRoomFullBanner();
+              if (_autoSpectated) showRoomFullNotice();
             }
 
             sendDeviceType();
@@ -1489,6 +1431,7 @@
               if (joinedMatchId && joinedMatchId !== KNState.matchId) {
                 _clearMatchIntegrity();
                 KNState.matchId = joinedMatchId;
+                setNoticeMatch(joinedMatchId);
               }
               // The machine needs the mode, which is only known here.
               _session?.send({
@@ -1637,7 +1580,7 @@
       _maybeReportMatchIntegrity();
     }
     if (!wasHost && isHost) {
-      showToast('You are now the host');
+      showToast('You are now the host', 'success');
       renderRomLibrary();
       if (localRomLoaded()) notifyRomReady();
     }
@@ -1731,8 +1674,9 @@
       releaseUnsupportedPlayer(`The host switched to ${mode}, which this browser can't run — you're now watching.`);
     }
 
-    // Diff for toasts
-    diffForToasts(players, spectators);
+    if (!isGameRunning()) {
+      for (const toast of rosterToasts(previousPlayers, previousSpectators, players, spectators)) showToast(toast);
+    }
     previousPlayers = structuredClone(players);
     previousSpectators = structuredClone(spectators);
 
@@ -1777,10 +1721,6 @@
     ) {
       startGuestLateJoin({ type: 'hostAvailableForMatch', matchId: data.matchId });
     }
-  };
-
-  const diffForToasts = (players, spectators) => {
-    for (const toast of rosterToasts(previousPlayers, previousSpectators, players, spectators)) showToast(toast);
   };
 
   // ── Game Lifecycle ─────────────────────────────────────────────────────
@@ -1833,6 +1773,7 @@
     applyHostRomFromData(data);
     if (KNState.matchId !== (data.matchId || null)) _clearMatchIntegrity();
     KNState.matchId = data.matchId || null;
+    setNoticeMatch(KNState.matchId);
     _acceptRemoteIntegrity(lastUsersData);
     _gfxRecoveryAttempt = 0;
 
@@ -1979,6 +1920,7 @@
     );
     _sessionStopLateJoinPoll();
     _session?.send({ type: 'gameEnded' });
+    setNoticeMatch(null);
     guardHostNavigation(false);
     if (!returnReason && data.reason !== 'host-timeout' && data.reason !== 'host-rewind')
       showToast(_gameStart.gameEndedMessage(data?.reason));
@@ -2016,6 +1958,8 @@
 
   const onRoomClosed = (data) => {
     _leavingRoom = true;
+    setNoticeMatch(null);
+    clearNotices();
     _admission?.abort();
     if (_matchReturn) _matchReturn.finish(_matchReturn.matchId, false);
     if (isHost && KNState.matchId)
@@ -2146,7 +2090,7 @@
     const enabled = cb.checked;
     if (enabled && !_romBlob) {
       cb.checked = false;
-      showToast('Load a ROM file before sharing');
+      showToast('Load a ROM file before sharing', 'warn');
       return;
     }
     socket.emit('rom-sharing-toggle', { enabled });
@@ -3308,7 +3252,7 @@
     }
     if (!_romBlob && !_romBlobUrl) {
       console.log('[play] bootEmulator: no ROM loaded');
-      showToast('Please load a ROM file first');
+      showToast('Please load a ROM file first', 'warn');
       return;
     }
     // Create a fresh blob URL — the previous one may have been revoked by
@@ -4000,7 +3944,9 @@
       onPlayersChanged: () => {
         // Engine forwards users-updated — supplementary to our direct listener
       },
-      onToast: showToast,
+      onToast: (message, tone, key) => {
+        if (engineMatchId) showToast(message, tone, { key, matchId: engineMatchId });
+      },
       // `message`: why the match cannot start on this page; none for a crash.
       onFatal: (message) => {
         coreFatal = true;
@@ -4159,7 +4105,7 @@
 
   const startGame = () => {
     if (!_romBlob && !_romBlobUrl) {
-      showToast('Load a ROM file before starting');
+      showToast('Load a ROM file before starting', 'warn');
       return;
     }
     // The ROM just dropped is still being hashed: the start would carry the
@@ -4204,7 +4150,7 @@
   const endGame = () => {
     if (_endGameRequest) return;
     const endingMatchId = KNState.matchId || null;
-    showToast('Ending game for everyone...');
+    showToast('Ending game for everyone…', 'info', { key: 'end-request', matchId: KNState.matchId });
     // The shared Effect request runner has bounded retries and cancellation.
     // No host-only timeout: that used to leave everyone else in the match.
     const request = window.KNCore.startRejoin({
@@ -4239,6 +4185,8 @@
   const leaveGame = () => {
     if (_leavingRoom) return;
     _leavingRoom = true;
+    setNoticeMatch(null);
+    clearNotices();
     _admission?.abort();
     if (_matchReturn) _matchReturn.finish(_matchReturn.matchId, false);
     if (isHost && KNState.matchId)
@@ -4296,6 +4244,7 @@
     // Show the overlay with only the ROM drop zone visible
     const overlay = document.getElementById('overlay');
     if (overlay) overlay.classList.remove('hidden');
+    placeNotices(true);
 
     // Hide everything except the ROM section
     const sections = overlay.querySelectorAll(
@@ -4348,7 +4297,7 @@
     }
 
     _clearLateJoinRomPrompt();
-    document.getElementById('overlay')?.classList.add('hidden');
+    hideOverlay();
 
     // The next engine start is the late join: the machine is in
     // lateJoinStarting here (a connect-only start for ROM sharing does not
@@ -4364,6 +4313,7 @@
   const showOverlay = () => {
     const overlay = document.getElementById('overlay');
     if (overlay) overlay.classList.remove('hidden');
+    placeNotices(true);
 
     const roomDisplay = document.getElementById('room-display');
     if (roomDisplay) roomDisplay.textContent = roomCode;
@@ -4420,6 +4370,7 @@
   const hideOverlay = () => {
     const overlay = document.getElementById('overlay');
     if (overlay) overlay.classList.add('hidden');
+    placeNotices(false);
   };
 
   // What each slot, the spectator line and the info panel show is
@@ -4620,17 +4571,15 @@
     // shrinking #game and triggering EJS ResizeObserver (canvas clear).
   };
 
-  // Toasts, the error card and the room-full banner are web/src/play/notices.ts.
-  const { guardHostNavigation, showToast, showErrorCard, showRoomFullBanner } = window.KNCore.play.notices;
-
-  // Expose toast/error for cross-module UI surfacing (P1-3). Other modules
-  // (shared.js, netplay-rollback.js) can call these to show user-visible
-  // messages instead of failing silently.
-  window.knShowToast = showToast;
+  const { clearNotices, dismissToast, guardHostNavigation, placeNotices, setNoticeMatch, showToast, showErrorCard } =
+    window.KNCore.play.notices;
+  const showRoomFullNotice = () => showToast('Game is full. You’ve joined as a spectator.', 'warn');
+  window.knShowToast = (message, tone) => showToast(message, tone, { matchId: KNState.matchId });
 
   // ── UI: Error ──────────────────────────────────────────────────────────
 
   const showError = (msg, joinUrl = null) => {
+    clearNotices();
     crumb('error', msg);
     flushBreadcrumbs(msg);
     showErrorCard(msg, joinUrl);
@@ -5005,10 +4954,10 @@
         }
       }
       if (hasNow && !_wizardHadGamepad) {
-        showToast('Controller connected');
+        showToast('Controller connected', 'success');
         _wizardHadGamepad = true;
       } else if (!hasNow && _wizardHadGamepad) {
-        showToast('Controller disconnected');
+        showToast('Controller disconnected', 'warn');
         _wizardHadGamepad = false;
       }
     }
@@ -5827,11 +5776,6 @@
         if (nextIdx === currentIdx) nextIdx = detected[0].index;
         GamepadManager.reassignSlot(slot, nextIdx);
       });
-    }
-
-    // Mobile landscape prompt — game is unplayable in portrait on phones
-    if (_isMobile && window.innerHeight > window.innerWidth) {
-      showToast('Rotate to landscape for best experience');
     }
   });
 

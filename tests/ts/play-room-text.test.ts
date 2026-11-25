@@ -50,7 +50,7 @@ test('moving between playing and watching is not a join or a leave', () => {
   assert.deepEqual(rosterToasts(host, guest, { ...host, ...guest }, {}), []);
 });
 
-test('several changes in one update come out in a fixed order, names escaped', () => {
+test('several roster notices are returned in order as plain text', () => {
   const toasts = rosterToasts(named('Host', 'Old'), named('Gone'), named('Host', '<b>New</b>'), named('Eye'));
-  assert.deepEqual(toasts, ['&lt;b&gt;New&lt;/b&gt; joined', 'Old left', 'Eye is watching', 'Gone left']);
+  assert.deepEqual(toasts, ['<b>New</b> joined', 'Old left', 'Eye is watching', 'Gone left']);
 });

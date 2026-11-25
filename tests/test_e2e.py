@@ -1017,12 +1017,12 @@ def test_auto_spectate_when_room_full(browser, server_url):
 
         # 5th player joins via play link (no spectate param)
         joiner.goto(f"{server_url}/play.html?room=FULL01{_R}&name=Late")
-        # Should auto-spectate — overlay visible, banner appears
+        # Auto-spectating keeps the overlay visible and shows a notice.
         expect(joiner.locator("#overlay")).to_be_visible(timeout=10000)
-        expect(joiner.locator(".room-full-banner")).to_be_visible(timeout=5000)
+        expect(joiner.locator("#toast-container .toast", has_text="joined as a spectator")).to_be_visible(timeout=5000)
 
-        # Banner auto-dismisses
-        expect(joiner.locator(".room-full-banner")).to_be_hidden(timeout=7000)
+        # The notice expires.
+        expect(joiner.locator("#toast-container .toast", has_text="joined as a spectator")).to_be_hidden(timeout=7000)
     finally:
         host.close()
         p2.close()
