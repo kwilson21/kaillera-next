@@ -38,6 +38,8 @@ branches over every input.
 Run: pytest tests/test_game_start_e2e.py -v   (needs the server running)
 """
 
+import re
+
 import pytest
 from playwright.sync_api import expect
 
@@ -994,10 +996,66 @@ _RECORD_ENGINE_STARTS = """() => {
     const init = engine.init.bind(engine);
     engine.init = (config) => {
         window.__engineStarts.push(!!config.lateJoin);
+        window.__dualInputEnabled = config.dualInputEnabled;
         window.__lostHost = config.onLeftOutOfStart;
         return init(config);
     };
 }"""
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_dual_input_mode_is_a_host_choice_for_the_room(browser, server_url, room, enabled):
+    host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host")
+    guest = _open(browser, f"{server_url}/play.html?room={room}&name=Guest")
+    joiner = None
+    try:
+        for page in (host, guest):
+            page.evaluate(_RECORD_ENGINE_STARTS)
+            _load_rom(page)
+        summary = host.locator("#host-controls .advanced-options > summary")
+        summary.click()
+        option = host.get_by_role("checkbox", name="Dual input mode", exact=True)
+        expect(option).not_to_be_checked()
+        expect(guest.locator("#opt-dual-input")).to_be_hidden()
+        info = host.get_by_role("button", name="About dual input mode", exact=True)
+        help_text = host.locator("#dual-input-hint")
+        expect(option).to_have_attribute("aria-describedby", "dual-input-hint")
+        expect(help_text).to_be_hidden()
+        info.hover()
+        expect(help_text).to_be_visible()
+        expect(help_text).to_contain_text(re.compile("send input across two channels for optimal input latency", re.I))
+        summary.hover()
+        expect(help_text).to_be_hidden()
+        option.focus()
+        option.press("Tab")
+        expect(info).to_be_focused()
+        expect(help_text).to_be_visible()
+        info.press("Tab")
+        expect(help_text).to_be_hidden()
+        info.click()
+        expect(help_text).to_be_visible()
+        expect(option).not_to_be_checked()
+        host.select_option("#mode-select", "streaming")
+        expect(option).to_be_hidden()
+        host.select_option("#mode-select", "lockstep")
+        expect(option).to_be_visible()
+        host.select_option("#mode-select", "rollback")
+        if enabled:
+            option.check()
+        host.click("#start-btn")
+        for page in (host, guest):
+            page.wait_for_function("window.__engineStarts.length > 0", timeout=10000)
+            assert page.evaluate("window.__dualInputEnabled") is enabled
+        joiner = _open(browser, f"{server_url}/play.html?room={room}&name=Late")
+        joiner.evaluate(_RECORD_ENGINE_STARTS)
+        _load_rom(joiner)
+        joiner.wait_for_function("window.__engineStarts.includes(true)", timeout=10000)
+        assert joiner.evaluate("window.__dualInputEnabled") is enabled
+    finally:
+        if joiner:
+            joiner.close()
+        host.close()
+        guest.close()
 
 
 def test_a_guest_at_the_rom_prompt_does_not_hold_the_hosts_start(browser, server_url, room):

@@ -200,4 +200,8 @@ test('the words beside a negotiated delay', () => {
   assert.equal(effectiveDelayHint(2, 2), '(Excellent)');
   assert.equal(effectiveDelayHint(2, 5), '(room: 5 — Average)');
   assert.equal(hostOptionsSummary(true, false, 'Fixed 3'), 'Resync on · ROM sharing off · Fixed 3');
+  assert.equal(
+    hostOptionsSummary(true, false, 'Fixed 3', true),
+    'Resync on · Dual input on · ROM sharing off · Fixed 3',
+  );
 });

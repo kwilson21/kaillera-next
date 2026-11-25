@@ -10,11 +10,9 @@
 // `rb-transport:unreliable`) sends each input on `rollback-input`, an
 // unordered channel with maxRetransmits 0: a packet may be lost or arrive out
 // of order. Each packet carries the frame's input (the header) and, as
-// redundancy, every input the page holds in its history (_rbLocalHistory)
-// newer than the peer's last ack. The ack is the newest frame the peer has
-// received. A packet that carries frame k also carries every frame between
-// the ack the sender knew and k, so whatever the peer holds up to its newest
-// frame has no hole, and the history can drop what the peer has acked.
+// redundancy, a bounded tail from the page's retained inputs newer than
+// the peer's last ack. The ack is the newest frame the peer has received;
+// a hole older than the tail can remain below that ack.
 //
 // The page goes back to the reliable channel (`lockstep`, ordered, which
 // delivers everything in order) on two triggers:
@@ -74,14 +72,15 @@ module input_transport {
 
   // The page makes the inputs for frames 0 .. LAST_FRAME - 1.
   pure val LAST_FRAME = 4
-  // RB_REDUNDANCY_MAX (30 in the engine).
+  // This model keeps the header and one prior frame. A 256-byte wire packet
+  // can carry a 24-byte header and up to 14 prior 16-byte records.
   pure val HISTORY_CAP = 2
 
   // `frames`: the inputs it carries, the header among them.
   type Packet = { header: int, frames: Set[int] }
 
   var made: int              // inputs made: frames 0 .. made - 1
-  var history: Set[int]      // _rbLocalHistory
+  var history: Set[int]      // frames eligible for the next packet's redundancy
   var ack: int               // the peer's ack as the page knows it (lastAckFromPeer)
   var unreliable: bool       // _rbTransport === 'unreliable'
   var rbOpen: bool           // the unreliable channel is open
@@ -418,4 +417,52 @@ module input_transport_fixed {
   import input_transport(
     ASK_FOR_MISSING = true, RESEND_AT_SWITCH = true, REDUNDANCY_UNTIL_ACKED = false, RETRY_UNSENT = true
   ).*
+}
+
+// One connected peer in dual mode. A successful send queues the current
+// input on the reliable channel; its optional history is represented by
+// the previous frame. The bare copy can be skipped, lost, or arrive first.
+module input_transport_dual {
+  var made: int
+  var ordered: List[Set[int]]
+  var fast: Set[int]
+  var got: Set[int]
+  var feeds: int   // fresh inputs submitted to the game, including history
+
+  action init = all { made' = 0, ordered' = List(), fast' = Set(), got' = Set(), feeds' = 0 }
+  action send(copy: bool): bool = all {
+    made < 3, made' = made + 1,
+    ordered' = ordered.append(if (made == 0) Set(made) else Set(made - 1, made)),
+    fast' = if (copy) fast.union(Set(made)) else fast,
+    got' = got, feeds' = feeds,
+  }
+  action receive(frames: Set[int]): bool = all {
+    got' = got.union(frames), feeds' = feeds + frames.exclude(got).size(), made' = made,
+  }
+  action deliverOrdered = all {
+    ordered.length() > 0, receive(ordered.head()), ordered' = ordered.tail(), fast' = fast,
+  }
+  action deliverFast(frame: int): bool = all {
+    fast.contains(frame), receive(Set(frame)), fast' = fast.exclude(Set(frame)), ordered' = ordered,
+  }
+  // Losing an unordered copy, including the last one before the DC closes.
+  action loseFast(frame: int): bool = all {
+    fast.contains(frame), fast' = fast.exclude(Set(frame)),
+    ordered' = ordered, got' = got, feeds' = feeds, made' = made,
+  }
+  action step = any {
+    send(true), send(false), deliverOrdered,
+    nondet frame = oneOf(fast)
+    any { deliverFast(frame), loseFast(frame) },
+  }
+  val allHold = feeds == got.size() and 0.to(made - 1).forall(f =>
+    got.contains(f) or ordered.indices().exists(i => ordered[i].contains(f)))
+
+  run fastOvertakesReliableTest = init.then(send(false)).then(send(true)).then(deliverFast(1))
+    .expect(got == Set(1) and feeds == 1)
+    .then(deliverOrdered).then(deliverOrdered).expect(got == Set(0, 1) and feeds == 2)
+  run reliableArrivesFirstTest = init.then(send(true)).then(deliverOrdered).then(deliverFast(0))
+    .expect(got == Set(0) and feeds == 1)
+  run fastLostOrUnavailableTest = init.then(send(true)).then(loseFast(0)).then(send(false))
+    .then(deliverOrdered).then(deliverOrdered).expect(got == Set(0, 1) and feeds == 2)
 }

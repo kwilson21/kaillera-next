@@ -3,9 +3,8 @@
  * the unreliable input channel to the reliable one.
  *
  * On the unreliable channel (`rollback-input`: unordered, no retransmits)
- * every packet carries, besides its frame's input, every input the page
- * holds newer than the peer's ack, so a lost packet's inputs come with the
- * next one. The page switches to the reliable channel when its health
+ * packets carry the current input and a bounded tail of earlier inputs.
+ * The page switches to the reliable channel when its health
  * monitor sees the unreliable one stuck (DC-FALLBACK reason=buffer,
  * reason=ack-stale) or the channel closes (reason=rb-dc-close). From then on
  * packets carry their own frame's input alone, so an input lost just before
@@ -16,11 +15,9 @@
  * (input_transport_current) and holds when the page sends these again
  * (input_transport_fixed).
  *
- * The page sends them from the inputs it keeps, not from the redundancy
- * history: the history holds only the newest 30, and a stuck channel can
- * leave more than that unacked (stuckChannelBeyondTheCapTest). The ack is
- * the newest frame the peer has received; the packets that brought it
- * carried every frame before it, so nothing at or before it is missing.
+ * Both the per-packet tail and the larger resend at the switch select a
+ * range from the page's retained inputs. The ack is the newest frame the
+ * peer received. Older holes outside the packet tail can still need a resend.
  *
  * Verified with LemmaScript (Dafny backend); see LemmaScript-files.txt.
  */

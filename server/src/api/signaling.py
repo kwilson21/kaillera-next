@@ -341,6 +341,7 @@ class Room:
     # Seats that started this fight remain identifiable after a departure or slot reuse.
     match_participants: dict[int, str] = field(default_factory=dict)
     resync_enabled: bool = True
+    dual_input_enabled: bool = False
     resume_from_match_id: str | None = None
     resume_deadline: int | None = None
     resume_ready: set[str] = field(default_factory=set)
@@ -544,6 +545,7 @@ def _players_payload(room: Room) -> dict:
         "matchId": room.match_id,
         "listed": room.listed,
         "recoveryUnverifiedMatchId": room.recovery_unverified_match_id,
+        "dualInputEnabled": room.status == "playing" and room.dual_input_enabled,
         **host_return_status(room),
         **(
             {
@@ -1064,7 +1066,12 @@ async def _reconnect_member(
         )
         if can_rewind:
             started_at = room.started_at
-            start = StartGamePayload(mode=room.mode, romHash=room.rom_hash, resyncEnabled=room.resync_enabled)
+            start = StartGamePayload(
+                mode=room.mode,
+                romHash=room.rom_hash,
+                resyncEnabled=room.resync_enabled,
+                dualInputEnabled=room.dual_input_enabled,
+            )
             await _end_match(session_id, room, "host-rewind")
             error = await _start_game_locked(sid, start, resume_from=recover_match_id, started_at=started_at)
             if error:
@@ -1571,6 +1578,7 @@ async def _start_game_locked(
     room.recovery_unverified_match_id = None
     room.waiting_for_state = {pid for pid, info in room.players.items() if "returnDeadline" in info}
     room.resync_enabled = payload.resyncEnabled
+    room.dual_input_enabled = mode in ("rollback", "lockstep") and payload.dualInputEnabled
     room.resume_from_match_id = resume_from
     if resume_from:
         room.resume_deadline = _now_ms() + HOST_RETURN_GRACE_SECONDS * 1000
@@ -1596,6 +1604,7 @@ async def _start_game_locked(
         {
             "mode": room.mode,
             "resyncEnabled": payload.resyncEnabled,
+            "dualInputEnabled": room.dual_input_enabled,
             "romHash": room.rom_hash,
             "romName": room.rom_name,
             "rom_name": room.rom_name,

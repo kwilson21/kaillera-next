@@ -319,6 +319,7 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
     if (syncChunksLeft === 0 && heldSocketPackets.length) releaseHeldSocketAnswers();
   };
   const receiveGate = createDirectionalInputGate({
+    getCodec: () => window.KNShared,
     now: () => performance.now(),
     target: (ch, slot) =>
       Object.values(window.NetplayRollback?._getPeers?.() ?? {}).some(
@@ -441,11 +442,13 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
       data instanceof ArrayBuffer &&
       data.byteLength >= 4
     ) {
-      const frame = new Int32Array(data, 0, 1)[0];
-      if (frame >= window.__knDropInputFrom && frame < window.__knDropInputTo) {
-        window.__knInputsDroppedUntil++;
-        return;
-      }
+      const filtered = receiveGate.withoutFrames(
+        data,
+        (f) => f >= window.__knDropInputFrom && f < window.__knDropInputTo,
+      );
+      if (filtered !== data) window.__knInputsDroppedUntil++;
+      if (filtered === null) return;
+      data = filtered;
     }
     if (
       performance.now() < window.__knDropSettledUntil &&

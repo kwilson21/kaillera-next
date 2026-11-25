@@ -500,6 +500,38 @@ body {
   font-size: 12px;
 }
 
+#dual-input-option {
+  position: relative;
+  gap: 0;
+}
+
+#dual-input-info {
+  padding: 0;
+  width: 44px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+}
+
+#dual-input-info:is(:hover, :focus-visible) {
+  color: var(--accent);
+}
+
+#dual-input-hint {
+  position: absolute;
+  z-index: 1;
+  inset: 100% auto auto 0;
+  max-width: 100%;
+  width: max-content;
+  padding: 8px 12px;
+  background: var(--bg2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 #start-btn {
   width: 100%;
   font-size: 15px;

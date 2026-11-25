@@ -625,7 +625,8 @@ def test_recovered_fight_requires_every_original_socket_before_release(server, m
             member["supportsMatchReturn"] = True
         room.rom_ready = {room.owner, guest}
         room.rom_hash = "a" * 64
-        assert await signaling.start_game(room.owner, {"mode": "lockstep", "resyncEnabled": False}) is None
+        options = {"mode": "lockstep", "resyncEnabled": False, "dualInputEnabled": True}
+        assert await signaling.start_game(room.owner, options) is None
         source = room.match_id
         if outcome == "timer":
             monkeypatch.setattr(signaling, "HOST_RETURN_GRACE_SECONDS", 1)
@@ -666,6 +667,7 @@ def test_recovered_fight_requires_every_original_socket_before_release(server, m
             i for i, (evt, data) in enumerate(sent) if evt == "game-started" and data["resumeFromMatchId"] == source
         )
         assert ended < started and not any(evt == "match-return-go" for evt, _ in sent)
+        assert ack["dualInputEnabled"] is True and sent[started][1]["dualInputEnabled"] is True
         assert (await signaling.join_room(new_sid, request))[1]["matchId"] == epoch
         assert (await signaling.join_room("unrelated", {"extra": {"sessionid": "ROOM", "persistentId": "other"}}))[
             0

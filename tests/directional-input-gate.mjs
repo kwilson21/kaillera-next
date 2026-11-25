@@ -1,27 +1,23 @@
 // Test-only record loss. Preserve every non-held input value and acknowledgment.
-export function createDirectionalInputGate({ target, now }) {
+export function createDirectionalInputGate({ target, now, getCodec }) {
   let state = null;
   const decode = (data) => {
     if (!(data instanceof ArrayBuffer) || data.byteLength < 16 || data.byteLength % 4) return null;
-    const w = new Int32Array(data),
-      records = [Array.from(w.slice(0, 4))];
-    if (w.length >= 6)
-      for (let i = 0; i < Math.min(Math.max(0, w[5]), Math.floor((w.length - 6) / 4)); i++)
-        records.push(Array.from(w.slice(6 + 4 * i, 10 + 4 * i)));
-    return { data, records, ack: w.length >= 5 ? w[4] : -1 };
+    const header = getCodec().decodeInput(data);
+    return { data, records: [header, ...(header.redundant ?? [])], ack: header.ackFrame };
   };
   const encode = (records, ack) => {
-    // The newest remaining record is the primary so redundancy stays <= frame.
-    const sorted = records.toSorted((a, b) => b[0] - a[0]);
-    return new Int32Array([...sorted[0], ack, sorted.length - 1, ...sorted.slice(1).flat()]).buffer;
+    // Promote the newest remaining record when the original header was held.
+    const [header, ...history] = records.toSorted((a, b) => b.frame - a.frame);
+    return getCodec().encodeInput(header.frame, header, ack, history).buffer;
   };
-  const heldRecord = (r) => r[0] >= state.from && r[0] < state.to;
+  const heldRecord = (record) => record.frame >= state.from && record.frame < state.to;
   const split = (item) => {
     if (state.mode === 'burst') {
       if (item.records.some(heldRecord)) state.queue.push(item);
       else {
         state.passed += item.records.length;
-        state.laterInputs += item.records.filter((r) => r[0] >= state.to).length;
+        state.laterInputs += item.records.filter((r) => r.frame >= state.to).length;
         item.deliver(item.data);
       }
       return;
@@ -30,12 +26,19 @@ export function createDirectionalInputGate({ target, now }) {
       pass = item.records.filter((r) => !heldRecord(r));
     if (pass.length) {
       state.passed += pass.length;
-      state.laterInputs += pass.filter((r) => r[0] >= state.to).length;
+      state.laterInputs += pass.filter((r) => r.frame >= state.to).length;
       item.deliver(encode(pass, item.ack));
     }
     if (held.length) state.queue.push({ ...item, records: held });
   };
   return {
+    withoutFrames(data, dropFrame) {
+      const item = decode(data);
+      if (!item) return data;
+      const keep = item.records.filter((r) => !dropFrame(r.frame));
+      if (keep.length === item.records.length) return data;
+      return keep.length ? encode(keep, item.ack) : null;
+    },
     arm(slot, mode = 'isolated') {
       state = {
         slot,
@@ -56,7 +59,7 @@ export function createDirectionalInputGate({ target, now }) {
       if (!decoded) return deliver(data);
       if (!decoded.records.some(heldRecord)) {
         state.passed += decoded.records.length;
-        state.laterInputs += decoded.records.filter((r) => r[0] >= state.to).length;
+        state.laterInputs += decoded.records.filter((r) => r.frame >= state.to).length;
         return deliver(data);
       }
       split({ ...decoded, deliver });
@@ -73,7 +76,7 @@ export function createDirectionalInputGate({ target, now }) {
       if (!state || state.releasedAt !== null || !(waitInput >= state.from && waitInput < state.to))
         throw new Error('release requires the observed held catch-up input');
       state.held = state.queue.length;
-      state.frames = state.queue.flatMap((item) => item.records.map((r) => r[0]));
+      state.frames = state.queue.flatMap((item) => item.records.map((r) => r.frame));
       state.releasedAt = now();
       for (const item of state.queue.splice(0))
         item.deliver(state.mode === 'burst' ? item.data : encode(item.records, item.ack));
@@ -85,7 +88,7 @@ export function createDirectionalInputGate({ target, now }) {
         ...rest,
         queued: queue.length,
         capturedPackets: state.held + queue.length,
-        queuedFrames: queue.flatMap((item) => item.records.map((r) => r[0])),
+        queuedFrames: queue.flatMap((item) => item.records.map((r) => r.frame)),
       };
     },
   };

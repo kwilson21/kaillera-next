@@ -36,6 +36,7 @@ def test_serialize_roundtrip_basic():
     room.rom_size = 16 * 1024 * 1024
     room.rom_sharing = True
     room.rom_changing = True
+    room.dual_input_enabled = True
 
     serialized = _serialize_room(room)
     parsed = json.loads(serialized)
@@ -62,6 +63,7 @@ def test_serialize_roundtrip_basic():
     assert restored.rom_size == 16 * 1024 * 1024
     assert restored.rom_sharing is True
     assert restored.rom_changing is True
+    assert restored.dual_input_enabled is True
 
 
 def test_serialize_roundtrip_empty_room():
@@ -135,6 +137,7 @@ def test_a_lockstep_room_is_restored_as_lockstep():
     }
     restored = _deserialize_room(legacy_payload)
     assert restored.mode == "lockstep"
+    assert restored.dual_input_enabled is False
 
 
 def test_restore_retries_incomplete_scan_before_serving(monkeypatch):

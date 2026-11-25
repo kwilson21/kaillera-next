@@ -94,7 +94,8 @@ const TEXT_GRAMMAR = {
     // rb-subhash:<frame>:<region>:<hex>,<hex>,...
     'rb-subhash': `:${INT}:${INT}:(?:${HEX}+(?:,${HEX}+)*)?`,
     'rb-delay': `:${INT}`,
-    'rb-transport': ':(?:reliable|unreliable)',
+    // The host announces reliable before dual for pages that only recognize the two single-channel modes.
+    'rb-transport': ':(?:reliable|unreliable|dual)',
     'rb-init-frame': `:${INT}`,
     'reconnect-sync-request-v1': ':\\d+',
     'sync-request-full': '',

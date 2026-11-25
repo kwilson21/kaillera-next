@@ -184,6 +184,25 @@
                   ><input type="checkbox" id="opt-resync" checked /> Resync <span class="opt-hint">(auto)</span></label
                 >
               </div>
+              <div class="host-options-row" id="dual-input-option">
+                <label>
+                  <input type="checkbox" id="opt-dual-input" aria-describedby="dual-input-hint" />
+                  Dual input mode
+                </label>
+                <button
+                  type="button"
+                  id="dual-input-info"
+                  aria-label="About dual input mode"
+                  aria-describedby="dual-input-hint"
+                  aria-controls="dual-input-hint"
+                  aria-expanded="false"
+                >
+                  ⓘ
+                </button>
+                <p id="dual-input-hint" role="tooltip" hidden>
+                  Send input across two channels for optimal input latency.
+                </p>
+              </div>
             </div>
             <div id="rom-sharing-options" class="host-options-row">
               <label><input type="checkbox" id="opt-rom-sharing" disabled /> Share ROM with players</label>

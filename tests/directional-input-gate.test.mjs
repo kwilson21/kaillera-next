@@ -1,30 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDirectionalInputGate, catchUpHoleInput } from './directional-input-gate.mjs';
-const packet = (frame, red = []) =>
-  new Int32Array([
-    frame,
-    frame + 1,
-    frame + 2,
-    frame + 3,
+import * as codec from '../web/src/input-wire.ts';
+const getCodec = () => codec;
+const pads = (f) => ({ buttons: f + 1, lx: -f, ly: 2, cx: 13, cy: -7 });
+const packet = (f, red = []) =>
+  codec.encodeInput(
+    f,
+    pads(f),
     77,
-    red.length,
-    ...red.flatMap((f) => [f, f + 1, f + 2, f + 3]),
-  ]).buffer;
+    red.map((frame) => ({ frame, ...pads(frame) })),
+  ).buffer;
 const records = (data) => {
-  const w = Array.from(new Int32Array(data));
-  return [w.slice(0, 4), ...Array.from({ length: w[5] ?? 0 }, (_, i) => w.slice(6 + i * 4, 10 + i * 4))];
+  const header = codec.decodeInput(data);
+  assert.equal(header.ackFrame, 77);
+  return [header, ...(header.redundant ?? [])].map(({ frame, buttons, lx, ly, cx, cy }) => {
+    assert.deepEqual({ buttons, lx, ly, cx, cy }, pads(frame));
+    return frame;
+  });
 };
 test('only pinned records withheld, even when primary or redundant inside a later packet', () => {
   const got = [];
-  const gate = createDirectionalInputGate({ target: (c) => c === 'p2', now: () => 10 });
+  const gate = createDirectionalInputGate({ getCodec, target: (c) => c === 'p2', now: () => 10 });
   const send = (f, red = [], ch = 'p2') =>
     gate.receive(ch, packet(f, red), (data) => {
-      assert.equal(new Int32Array(data)[4], 77);
-      for (const r of records(data)) {
-        assert.deepEqual(r, [r[0], r[0] + 1, r[0] + 2, r[0] + 3]);
-        got.push(r[0]);
-      }
+      got.push(...records(data));
     });
   gate.arm(2);
   send(101, [100]);
@@ -42,7 +42,7 @@ test('only pinned records withheld, even when primary or redundant inside a late
   assert.equal(gate.stats().held, 4);
 });
 test('unselected peers, controls, malformed payloads and disarmed traffic pass unchanged', () => {
-  const gate = createDirectionalInputGate({ target: (c) => c === 'p2', now: () => 1 });
+  const gate = createDirectionalInputGate({ getCodec, target: (c) => c === 'p2', now: () => 1 });
   const data = packet(101);
   gate.receive('p2', data, (p) => assert.equal(p, data));
   gate.arm(2);
@@ -61,7 +61,7 @@ test('deep selection reflects actual Mac delay and near-window boundary', () => 
 });
 
 test('explicit burst mode retains whole original packets and is reported separately', () => {
-  const gate = createDirectionalInputGate({ target: () => true, now: () => 1 }),
+  const gate = createDirectionalInputGate({ getCodec, target: () => true, now: () => 1 }),
     got = [];
   gate.arm(2, 'burst');
   gate.pin(101, 102);
@@ -72,4 +72,15 @@ test('explicit burst mode retains whole original packets and is reported separat
   assert.deepEqual(gate.stats().queuedFrames, [104, 103, 102, 101]);
   gate.release(101);
   assert.equal(got[0], data);
+});
+
+test('permanent frame loss removes the same input from the header, all tails and bare duplicate', () => {
+  const gate = createDirectionalInputGate({ getCodec, target: () => true, now: () => 0 });
+  const lost = (f) => f === 101;
+  assert.equal(gate.withoutFrames(packet(101), lost), null);
+  assert.deepEqual(records(gate.withoutFrames(packet(101, [99]), lost)), [99]);
+  assert.deepEqual(records(gate.withoutFrames(packet(104, [103, 101, 99]), lost)), [104, 103, 99]);
+  const pass = packet(102, [100]);
+  assert.equal(gate.withoutFrames(pass, lost), pass);
+  assert.equal(gate.withoutFrames('input-ask:101', lost), 'input-ask:101');
 });

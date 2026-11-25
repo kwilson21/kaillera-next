@@ -583,7 +583,7 @@ $QUINT run "$BYSTANDER" --main=recovery_bystander_broadcast_lossless --invariant
 INPUTS=specs/input_transport.qnt
 $QUINT typecheck "$INPUTS"
 for variant in input_transport_before_ask input_transport_current input_transport_until_acked \
-  input_transport_resend_once input_transport_fixed; do
+  input_transport_resend_once input_transport_fixed input_transport_dual; do
   $QUINT test "$INPUTS" --main="$variant" --backend="$BACKEND"
 done
 # Today with the fix: every input the peer had not acked when the page

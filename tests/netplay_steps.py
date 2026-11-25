@@ -42,14 +42,10 @@ def wait_past_frame(page, past, timeout_s=60):
 def silence_inputs(page, ms, channels=("dc", "rbDc")):
     """For `ms` milliseconds, drop every input packet the page sends.
 
-    Inputs are binary messages on a peer's `dc` (the reliable channel, which
-    the host picks by default) or its `rbDc` (the unreliable one, picked with
-    knDiag.setTransport('unreliable')); everything else the page sends is a
-    string and still goes through. Both are silenced unless `channels` names
-    one: dropping packets on `dc` is a page gone quiet, since that channel
-    loses nothing on its own; on `rbDc` it is packet loss. Returns at once:
-    the silence ends by itself. `window._knTestDropped` counts the packets
-    dropped.
+    Inputs are binary messages on a peer's reliable `dc` and unordered
+    `rbDc`. Both are silenced unless `channels` names one, so dual transport
+    can be tested one copy at a time. Control strings still go through.
+    The silence ends by itself. `window._knTestDropped` counts lost packets.
     """
     page.evaluate(
         """([ms, channels]) => {

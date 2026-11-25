@@ -787,14 +787,9 @@ if (MISSING_RECIPIENT) {
     for (const dc of new Set([peer.dc, peer.rbDc].filter(Boolean))) {
       const send = dc.send;
       dc.send = function (data) {
-        if (data instanceof ArrayBuffer && data.byteLength >= 4) {
-          const f = new Int32Array(data, 0, 1)[0];
-          if (f >= from && f < to) {
-            window.__meshMissingInputs++;
-            return;
-          }
-        }
-        return send.call(this, data);
+        const filtered = window.__knDirectionalInputGate.withoutFrames(data, (f) => f >= from && f < to);
+        if (filtered !== data) window.__meshMissingInputs++;
+        if (filtered !== null) return send.call(this, filtered);
       };
     }
     return [from, to];
@@ -1275,14 +1270,11 @@ if (FOLLOW_UP_RECIPIENT) {
     for (const dc of new Set([peer.dc, peer.rbDc].filter(Boolean))) {
       const send = dc.send;
       dc.send = function (data) {
-        if (data instanceof ArrayBuffer && data.byteLength >= 4) {
-          const fr = new Int32Array(data, 0, 1)[0];
-          if (ranges.some(([a, b]) => fr >= a && fr < b)) {
-            window.__meshMissingInputs++;
-            return;
-          }
-        }
-        return send.call(this, data);
+        const filtered = window.__knDirectionalInputGate.withoutFrames(data, (f) =>
+          ranges.some(([a, b]) => f >= a && f < b),
+        );
+        if (filtered !== data) window.__meshMissingInputs++;
+        if (filtered !== null) return send.call(this, filtered);
       };
     }
     return ranges;
@@ -1437,11 +1429,9 @@ if (DROP_LINK) {
     for (const dc of new Set([entry?.dc, entry?.rbDc].filter(Boolean))) {
       const send = dc.send;
       dc.send = function (data) {
-        if (data instanceof ArrayBuffer && data.byteLength >= 4 && new Int32Array(data, 0, 1)[0] >= from) {
-          window.__meshWalkDropped++;
-          return;
-        }
-        return send.call(this, data);
+        const filtered = window.__knDirectionalInputGate.withoutFrames(data, (f) => f >= from);
+        if (filtered !== data) window.__meshWalkDropped++;
+        if (filtered !== null) return send.call(this, filtered);
       };
     }
     return from;

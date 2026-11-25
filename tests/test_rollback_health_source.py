@@ -431,7 +431,6 @@ def test_pending_rollback_init_keeps_reliable_input_stream_alive():
         "const hadLocalInputForFrame = Object.prototype.hasOwnProperty.call(_localInputs, _frameNum);",
         "_localInputs[_frameNum] = localInput;",
         "_auditRecordLocal(_frameNum, localInput);",
-        "_rbLocalHistory.push({",
         "const ackFrame = peer.lastFrameFromPeer ?? -1;",
         "peer.dc.send(KNShared.encodeInput(_frameNum, localInput, ackFrame, null).buffer);",
         "RB-PENDING-INIT input f=${_frameNum}",
@@ -790,8 +789,8 @@ def test_a_guest_taken_back_reuses_the_inputs_it_already_sent():
     # It is sent on every tick of the frame, cached or new, so a host that
     # dropped the first copy as out of range gets it again.
     send = src[idx : src.index("DC health monitor", idx)]
-    assert "const peerBuf = KNShared.encodeInput(\n          _frameNum,\n          localInput," in send
-    assert send.index("if (!hadLocalInputForFrame) {") < send.index("const peerBuf = KNShared.encodeInput(")
+    assert "const sentPrimary = _sendFrameInput(\n        peer,\n        inputDc,\n        localInput," in send
+    assert send.index("if (!hadLocalInputForFrame) {") < send.index("const sentPrimary = _sendFrameInput(")
     # No resync path drops the cached inputs: only a new match and a stop do
     # (and the declaration).
     assert src.count("_localInputs = {};") == 3

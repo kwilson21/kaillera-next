@@ -6,10 +6,9 @@ more it went on with a zero input for the missing player (`INPUT-STALL
 resend-request` and `INPUT-STALL hard-timeout`). That path is gone: every
 frame runs on the C rollback engine, which does neither:
 
-- inputs go over the reliable channel by default, which loses nothing. With
-  the unreliable one (knDiag.setTransport('unreliable') on the host), every
-  input packet carries all the inputs the peer has not acknowledged, up to
-  RB_REDUNDANCY_MAX (30) frames, so a short gap is filled by the next packet
+- the host can race a reliable input with an unordered copy. With the
+  unreliable-only override (knDiag.setTransport('unreliable') on the host),
+  packets can repeat recent unacknowledged inputs, so a short gap is filled by the next packet
   that gets through, with no request;
 - a peer whose inputs stay away is dropped as a phantom after 5 s
   (`PEER-PHANTOM`, from RB-INPUT-STALL-TIMEOUT or PEER_DEAD_MS), and the
@@ -100,14 +99,14 @@ def test_short_input_gap_is_filled_without_dropping_the_guest(browser, server_ur
 
 
 def test_slow_reliable_channel_does_not_drop_the_guest(browser, server_url, rom_path, start_game, room):
-    """On the reliable channel, the default, inputs that arrive late but in
+    """With the reliable-only override, inputs that arrive late but in
     order hold the host back for a moment: no phantom.
 
     That channel loses nothing, so the engine sends no redundant inputs on it;
     what it can do is deliver late. The guest's messages are held for 300 ms
     and then sent in order, as a slow reliable channel would.
     """
-    host, guest = _start(browser, server_url, rom_path, start_game, room)
+    host, guest = _start(browser, server_url, rom_path, start_game, room, transport="reliable")
     try:
         assert sync_log_lines(host, "rb-transport: host broadcast=reliable"), "host did not pick reliable"
         phantoms_before = len(_phantoms(host, 1))
