@@ -13,6 +13,7 @@ import socketio
 import uvicorn
 from db_test_support import run_async
 from src.api import signaling
+from src.dbbackend import BackendError
 
 
 @pytest.fixture
@@ -403,6 +404,75 @@ def test_host_rejoins_just_before_deadline_and_cancels_closure(server, monkeypat
         now += 1
         await signaling._expire_rooms({})
         assert signaling.rooms["ROOM"] is room
+
+    run_async(scenario())
+
+
+@pytest.mark.parametrize("occupied_p1", [False, True])
+def test_promoted_owner_starts_the_rematch_in_p1(server, monkeypatch, occupied_p1):
+    async def scenario():
+        room, guest = await lobby(server)
+        monkeypatch.setattr(signaling.db, "set_session_ended", AsyncMock())
+        monkeypatch.setattr(signaling.db, "register_match", AsyncMock())
+        monkeypatch.setattr(signaling.stats, "record_match", AsyncMock())
+        monkeypatch.setattr(signaling.desync_vision, "run_postmortem", AsyncMock())
+        room.rom_ready.update((room.owner, guest))
+        assert await signaling.start_game(room.owner, {"mode": "rollback"}) is None
+        first_match = room.match_id
+        await signaling.leave_room(room.owner)
+        assert room.owner == guest and room.slots == {1: "guest"} and room.status == "playing"
+        if occupied_p1:
+            sid = await server.manager.connect("new-transport", "/")
+            signaling._sid_host[sid] = "localhost"
+            err, roster = await signaling.join_room(sid, {"extra": {"sessionid": "ROOM", "persistentId": "new"}})
+            assert err is None and roster["players"]["new"]["slot"] == 0
+            room.rom_ready.add(sid)
+        events = AsyncMock(wraps=server.emit)
+        monkeypatch.setattr(server, "emit", events)
+        assert await signaling.end_game(guest, {"matchId": first_match}) is None
+        _, roster = events.await_args.args
+        seats = {0: "guest", 1: "new"} if occupied_p1 else {0: "guest"}
+        assert room.slots == seats
+        assert {p["slot"]: pid for pid, p in roster["players"].items()} == seats
+        assert await signaling.start_game(guest, {"mode": "rollback"}) is None
+        assert room.match_id != first_match and room.match_participants == seats
+
+    run_async(scenario())
+
+
+def test_restored_lobby_reseats_players_displaced_by_an_earlier_handoff(server):
+    async def scenario():
+        room, guest = await lobby(server)
+        room.owner = guest
+        room.players["displaced"] = {"socketId": "old-third"}
+        room.slots = {0: "host", 1: "departed", 2: "guest"}
+        await signaling.restore_member_reservations()
+        assert room.slots == {0: "guest", 1: "displaced", 2: "host"}
+        await signaling.finish_room_shutdown()
+
+    run_async(scenario())
+
+
+@pytest.mark.parametrize("restoring", [False, True])
+@pytest.mark.parametrize("failed_write", ["set_session_ended", "insert_client_event"])
+def test_a_departure_log_failure_cannot_strand_the_remaining_owner(server, monkeypatch, failed_write, restoring):
+    async def scenario():
+        room, guest = await lobby(server)
+        original = room.owner
+        room.status, room.match_id = "playing", "live-match"
+        if restoring:
+            room.match_participants = room.slots.copy()
+            room.resume_deadline = signaling._now_ms() + 120_000
+        monkeypatch.setattr(signaling.desync_vision, "run_postmortem", AsyncMock())
+        monkeypatch.setattr(signaling.db, "set_session_ended", AsyncMock())
+        monkeypatch.setattr(signaling.db, failed_write, AsyncMock(side_effect=BackendError("database unavailable")))
+        assert await signaling.leave_room(original) is None
+        assert original not in signaling._sid_to_room
+        assert room.owner == guest
+        assert room.slots == ({0: "guest"} if restoring else {1: "guest"})
+        assert room.match_id == (None if restoring else "live-match")
+        assert list(server.manager.get_participants("/", "ROOM")) == [(guest, "guest-transport")]
+        signaling.state.save_room.assert_awaited_with("ROOM", room)
 
     run_async(scenario())
 

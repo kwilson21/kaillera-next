@@ -45,7 +45,7 @@ async def init() -> None:
         log.info("Save state cache: connected to Redis")
     except Exception:
         log.exception("Save state cache: Redis connection failed — using in-memory")
-        _redis = None
+        await close()
 
 
 async def close() -> None:

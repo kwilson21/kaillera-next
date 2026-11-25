@@ -16,7 +16,7 @@ import logging
 import os
 import signal
 import sys
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from types import FrameType
 
 import socketio
@@ -51,32 +51,30 @@ class _RoomServer(uvicorn.Server):
 
 @asynccontextmanager
 async def lifespan(_app):
-    await state.init()
-    await state_cache.init()
-    await db.init_db()
-    restored = await state.load_all_rooms()
-    if restored:
-        rooms.update(restored)
-        await restore_member_reservations()
-        log.info("Restored %d room(s) from Redis", len(restored))
-    task = asyncio.create_task(_cleanup_empty_rooms())
-    token_task = asyncio.create_task(renew_member_tokens())
-    log_task = asyncio.create_task(cleanup_old_data())
-    rotation_task = match_rotation.start_sweeper()
-    yield
-    await finish_room_shutdown()
-    task.cancel()
-    token_task.cancel()
-    log_task.cancel()
-    rotation_task.cancel()
-    if rooms:
-        if state.enabled():
-            log.info("Shutting down gracefully, %d room(s) preserved in Redis", len(rooms))
-        else:
-            log.info("Shutting down gracefully, %d room(s) lost (REDIS_URL not configured)", len(rooms))
-    await db.close_db()
-    await state_cache.close()
-    await state.close()
+    async with AsyncExitStack() as resources:
+        resources.push_async_callback(state_cache.close)
+        await state_cache.init()
+        await db.init_db()
+        resources.push_async_callback(db.close_db)
+        # The serving process can still save a room while database migrations run.
+        restored = await state.init()
+        resources.push_async_callback(state.close)
+        if restored:
+            rooms.update(restored)
+            await restore_member_reservations()
+        resources.callback(asyncio.create_task(_cleanup_empty_rooms()).cancel)
+        resources.callback(asyncio.create_task(renew_member_tokens()).cancel)
+        resources.callback(asyncio.create_task(cleanup_old_data()).cancel)
+        resources.callback(match_rotation.start_sweeper().cancel)
+        try:
+            yield
+        finally:
+            await finish_room_shutdown()
+            if rooms:
+                if state.enabled():
+                    log.info("Shutting down gracefully, %d room(s) preserved in Redis", len(rooms))
+                else:
+                    log.info("Shutting down gracefully, %d room(s) lost (REDIS_URL not configured)", len(rooms))
 
 
 def _configure_logging() -> None:

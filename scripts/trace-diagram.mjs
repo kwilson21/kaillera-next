@@ -59,6 +59,13 @@ const SPECS = [
   },
   {
     file: 'specs/room_member_return.qnt',
+    main: 'room_saved_delay_fixed',
+    hub: 'Host',
+    runs: ['changedReturnDelayTest'],
+    about: 'A resumed fight keeps its saved input delay when the new connection measures a different RTT.',
+  },
+  {
+    file: 'specs/room_member_return.qnt',
     main: 'room_host_traffic_fixed',
     hub: 'Guest',
     runs: ['silentOpenTransportTest'],

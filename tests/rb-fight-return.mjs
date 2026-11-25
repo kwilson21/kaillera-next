@@ -43,6 +43,7 @@ async function savedMatch(room) {
     return (
       record && {
         frame: record.frame,
+        delay: record.delay,
         source: record.scope.matchId,
         roster: record.scope.roster,
         mode: record.scope.mode,
@@ -71,7 +72,13 @@ function observeRestore() {
     if (!socket) return false;
     const capture = (event, data) => {
       if (!['match-return-ready', 'match-return-go', 'game-ended'].includes(event)) return;
-      rows.push({ event, data, sync: window.NetplayRollback?.exportSyncLog?.()?.split('\n').slice(-20) });
+      const sync = window.NetplayRollback?.exportSyncLog?.()?.split('\n') ?? [];
+      rows.push({
+        event,
+        data,
+        delay: sync.findLast((line) => line.includes('delay negotiated:')),
+        sync: sync.slice(-20),
+      });
     };
     socket.onAnyOutgoing(capture);
     socket.prependAny(capture);
@@ -113,6 +120,8 @@ export async function checkFightReturn({ host, guest, baseUrl, room, out, mode, 
   try {
     assert.ok(['rollback', 'lockstep'].includes(mode), 'fight return expects rollback or lockstep');
     assert.equal(jitter, 20, 'the fight return acceptance scenario requires JITTER=20');
+    const pingDelay = Number(process.env.FIGHT_RETURN_PING_DELAY_MS ?? 0);
+    assert.ok(Number.isFinite(pingDelay) && pingDelay >= 0, 'FIGHT_RETURN_PING_DELAY_MS must be nonnegative');
     const original = await Promise.all([host, guest].map((page) => page.evaluate(identity)));
     report.original = original;
     const source = original[0].matchId;
@@ -210,6 +219,11 @@ export async function checkFightReturn({ host, guest, baseUrl, room, out, mode, 
     assert.equal(await guest.locator('#toolbar-status').isVisible(), false);
     await guest.screenshot({ path: out + '/fight-return-countdown.png' });
     returned = await ctx.newPage();
+    // A new transport measures a different RTT from the connection that wrote the save.
+    if (pingDelay)
+      await returned.addInitScript((ms) => {
+        window.__knReturnPingDelay = ms;
+      }, pingDelay);
     await returned.goto(baseUrl + '/');
     const saved = await returned.evaluate(savedMatch, room);
     assert.equal(saved?.source, source, 'the fresh tab must find the original match in IndexedDB');
@@ -260,6 +274,16 @@ export async function checkFightReturn({ host, guest, baseUrl, room, out, mode, 
       'the original roster did not release the restored fight',
     );
     await banner.waitFor({ state: 'hidden', timeout: 10000 });
+    if (pingDelay) {
+      const delay = await returned.evaluate(
+        () => window.__knRestoreLog.find((row) => row.event === 'match-return-ready')?.delay,
+      );
+      const measured = /own=(\d+) effective=(\d+)/.exec(delay ?? '');
+      assert.ok(measured, 'the returning host did not report its startup delay');
+      report.delay = { saved: saved.delay, measured: Number(measured[1]), effective: Number(measured[2]) };
+      assert.notEqual(report.delay.measured, saved.delay, 'the return must exercise a changed RTT delay');
+      assert.equal(report.delay.effective, saved.delay, 'the returned host must keep its saved input window');
+    }
     report.restored = await Promise.all(
       pages.map(async (page, slot) => {
         await until(
@@ -267,6 +291,7 @@ export async function checkFightReturn({ host, guest, baseUrl, room, out, mode, 
           (id) => window.KNState?.matchId === id && window.EJS_emulator?.gameManager?.Module?._kn_post_tick,
           resumed.matchId,
         );
+        assert.equal(await page.evaluate(() => window.NetplayRollback.getInfo().frameDelay), saved.delay);
         const player = await page.evaluate(identity);
         assert.deepEqual(player, { ...original[slot], matchId: resumed.matchId });
         const applied = await page.evaluate(

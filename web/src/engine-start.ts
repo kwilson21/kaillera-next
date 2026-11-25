@@ -87,3 +87,11 @@ export function delayAtJoin(hostDelay: number, own: number, offered: number, fal
   }
   return fallback;
 }
+
+/** A restored input ring uses its saved delay. A fresh match uses the new connection's measurement. */
+//@ requires saved >= -1 && negotiated >= 0
+//@ ensures saved >= 0 ==> \result === saved
+//@ ensures saved < 0 ==> \result === negotiated
+export function delayAtStart(saved: number, negotiated: number): number {
+  return saved >= 0 ? saved : negotiated;
+}

@@ -18,7 +18,7 @@ import * as ejs from './page/ejs-globals.ts';
 import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
 import { lockstepStep } from './lockstep-wait.ts';
-import { delayAtJoin, guestStartStep } from './engine-start.ts';
+import { delayAtJoin, delayAtStart, guestStartStep } from './engine-start.ts';
 import { cLogDrain, cLogDroppedSince, cLogTail } from './c-log-tail.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
 import { installDiagnostics } from './page/diagnostics.ts';
@@ -424,6 +424,7 @@ export const KNCore = {
   guestStartStep,
   /** The delay a match runs at once a player joins it: its first player moves a match at 0 to a match delay (web/src/engine-start.ts). */
   delayAtJoin,
+  delayAtStart,
   /** The part of the C engine's debug log not yet drained; a buffer shorter than what was drained is a new one (web/src/c-log-tail.ts). */
   cLogTail,
   /** What one drain of the C log sends, and whether it empties the buffer (web/src/c-log-tail.ts). */

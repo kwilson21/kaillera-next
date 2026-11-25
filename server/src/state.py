@@ -9,11 +9,17 @@ Keys: kn:room:{sessionId} — JSON-serialized Room dataclass
 TTL: 12 hours (refreshed on each write)
 """
 
+import asyncio
 import json
 import logging
 import os
 from dataclasses import asdict
 from urllib.parse import quote
+
+import redis.asyncio as aioredis
+from redis.exceptions import AuthenticationError
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 log = logging.getLogger(__name__)
 
@@ -97,22 +103,34 @@ def _deserialize_room(d: dict):
     )
 
 
-async def init() -> None:
-    """Connect to Redis if REDIS_URL is configured."""
+async def init() -> dict:
+    """Restore configured room storage before accepting joins or writes."""
     global _redis
     url = get_redis_url()
     if not url:
         log.warning("REDIS_URL not configured — rooms will not survive restarts")
-        return
-    try:
-        import redis.asyncio as aioredis
+        return {}
 
-        _redis = aioredis.from_url(url, decode_responses=True)
-        await _redis.ping()
-        log.info("Connected to Redis at %s", url.split("@")[-1])  # hide credentials
-    except Exception:
-        log.exception("Failed to connect to Redis — falling back to in-memory only")
-        _redis = None
+    client = aioredis.from_url(url, decode_responses=True)
+    try:
+        for attempt in range(3):
+            try:
+                restored = await _load_rooms(client)
+                break
+            except AuthenticationError:
+                raise
+            except (RedisConnectionError, RedisTimeoutError):
+                if attempt == 2:
+                    raise
+                log.warning("Room storage unavailable during startup, retrying restore")
+                await asyncio.sleep(2**attempt)
+    except BaseException:
+        await client.aclose()
+        raise
+
+    _redis = client
+    log.info("Restored %d room(s) from Redis", len(restored))
+    return restored
 
 
 def enabled() -> bool:
@@ -122,8 +140,8 @@ def enabled() -> bool:
 
 async def ping() -> bool:
     """Check if Redis is reachable. Returns True if no Redis configured (ephemeral mode)."""
-    if not _redis:
-        return True
+    if _redis is None:
+        return not get_redis_url()
     try:
         await _redis.ping()
         return True
@@ -160,19 +178,15 @@ async def delete_room(session_id: str) -> None:
         log.exception("Failed to delete room %s from Redis", session_id)
 
 
-async def load_all_rooms() -> dict:
-    """Load all rooms from Redis. Returns empty dict if Redis is unavailable."""
-    if not _redis:
-        return {}
-    try:
-        result = {}
-        async for key in _redis.scan_iter(f"{_KEY_PREFIX}*"):
-            session_id = key[len(_KEY_PREFIX) :]
-            raw = await _redis.get(key)
-            if raw:
-                result[session_id] = _deserialize_room(json.loads(raw))
-        log.info("Hydrated %d room(s) from Redis", len(result))
-        return result
-    except Exception:
-        log.exception("Failed to load rooms from Redis")
-        return {}
+async def _load_rooms(client) -> dict:
+    result = {}
+    async for key in client.scan_iter(f"{_KEY_PREFIX}*"):
+        session_id = key[len(_KEY_PREFIX) :]
+        try:
+            raw = await client.get(key)
+            if raw is None:
+                continue  # The key expired between SCAN and GET.
+            result[session_id] = _deserialize_room(json.loads(raw))
+        except (KeyError, ValueError, TypeError, AttributeError):
+            log.exception("Skipping unreadable stored room %s", session_id)
+    return result

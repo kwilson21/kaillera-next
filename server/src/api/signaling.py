@@ -102,6 +102,7 @@ from src.api.payloads import (
     checked,
     validated,
 )
+from src.dbbackend import BackendError
 from src.ratelimit import (
     check,
     check_ip,
@@ -358,6 +359,24 @@ class Room:
             if i not in self.slots:
                 return i
         return None
+
+    def arrange_lobby_seats(self) -> None:
+        if self.status != "lobby":
+            return
+        # An older saved lobby can still name a departed player or omit a displaced one.
+        self.slots = {slot: pid for slot, pid in self.slots.items() if pid in self.players}
+        for player_id in self.players:
+            if player_id not in self.slots.values() and (free := self.next_slot()) is not None:
+                self.slots[free] = player_id
+        owner_slot = next(
+            (slot for slot, pid in self.slots.items() if self.players[pid]["socketId"] == self.owner), None
+        )
+        if owner_slot is None or owner_slot == 0:
+            return
+        owner_id = self.slots.pop(owner_slot)
+        if 0 in self.slots:
+            self.slots[owner_slot] = self.slots[0]
+        self.slots[0] = owner_id
 
 
 # sessionId -> Room
@@ -776,6 +795,7 @@ async def restore_member_reservations() -> None:
             if host_return_expired(room):
                 await _close_host_timeout(code, room)
                 continue
+            room.arrange_lobby_seats()
             if room.resume_deadline is not None:
                 await _end_match(code, room, "recovery-failed")
             for player_id in list(room.players):
@@ -792,6 +812,13 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
     entry = _sid_to_room.get(sid)
     if entry is not None:
         await _remove_member(sid, entry, reason)
+
+
+async def _record_room_history(session_id: str, action: str, write: Awaitable[object]) -> None:
+    try:
+        await write
+    except BackendError:
+        log.exception("Could not record %s for room %s", action, session_id)
 
 
 async def _remove_member(sid: str, entry: tuple[str, str, bool], reason: str) -> None:
@@ -818,7 +845,9 @@ async def _remove_member(sid: str, entry: tuple[str, str, bool], reason: str) ->
                 rm_slot = s
                 break
         if room.match_id and rm_slot is not None:
-            await db.set_session_ended(room.match_id, rm_slot, reason)
+            await _record_room_history(
+                session_id, "departing player session", db.set_session_ended(room.match_id, rm_slot, reason)
+            )
 
         room.players.pop(player_id, None)
         room.waiting_for_state.discard(player_id)
@@ -835,24 +864,28 @@ async def _remove_member(sid: str, entry: tuple[str, str, bool], reason: str) ->
 
     # Log server-side disconnect to client_events so the session log
     # shows the full picture (previously only went to stdout).
-    await db.insert_client_event(
-        {
-            "type": "server_disconnect",
-            "message": reason,
-            "meta": json.dumps(
-                {
-                    "playerId": player_id,
-                    "sid": sid,
-                    "spectator": is_spectator,
-                    "match_id": room.match_id,
-                    "slot": rm_slot,
-                }
-            ),
-            "room": session_id,
-            "slot": rm_slot if rm_slot is not None else -1,
-            "ip_hash": "",
-            "user_agent": "server",
-        }
+    await _record_room_history(
+        session_id,
+        "player departure",
+        db.insert_client_event(
+            {
+                "type": "server_disconnect",
+                "message": reason,
+                "meta": json.dumps(
+                    {
+                        "playerId": player_id,
+                        "sid": sid,
+                        "spectator": is_spectator,
+                        "match_id": room.match_id,
+                        "slot": rm_slot,
+                    }
+                ),
+                "room": session_id,
+                "slot": rm_slot if rm_slot is not None else -1,
+                "ip_hash": "",
+                "user_agent": "server",
+            }
+        ),
     )
 
     if not room.players and not room.spectators:
@@ -883,19 +916,8 @@ async def _remove_member(sid: str, entry: tuple[str, str, bool], reason: str) ->
         room.rom_sharing = False
         if room.status != "playing":
             _clear_host_rom(room)
-        # Move new owner to slot 0 (P1) only in lobby — never reshuffle slots mid-game
-        # (would break input routing for the in-progress match).
-        if room.status != "playing" and new_owner_pid and room.slots.get(0) != new_owner_pid:
-            # Remove their old slot
-            old_slot = None
-            for s, pid in room.slots.items():
-                if pid == new_owner_pid:
-                    old_slot = s
-                    break
-            if old_slot is not None:
-                del room.slots[old_slot]
-            room.slots[0] = new_owner_pid
-        log.info("Room %s ownership transferred to %s (slot 0)", session_id, new_owner_sid)
+        room.arrange_lobby_seats()
+        log.info("Room %s ownership transferred to %s", session_id, new_owner_sid)
         await _emit("webrtc-signal", {"requestRenegotiate": True}, to=new_owner_sid)
 
     await state.save_room(session_id, room)
@@ -1770,6 +1792,7 @@ async def _end_match(session_id: str, room: Room, reason: str) -> None:
     room.recovery_unverified_match_id = None
     room.waiting_for_state.clear()
     room.status = "lobby"
+    room.arrange_lobby_seats()
     room.started_at = None
     _drop_room_frame(session_id)
 
@@ -1796,18 +1819,22 @@ async def _end_match(session_id: str, room: Room, reason: str) -> None:
 
 async def _record_match_end(session_id: str, ended_match_id: str | None, reason: str) -> None:
     if ended_match_id:
-        await db.set_session_ended(ended_match_id, None, reason)
+        await _record_room_history(session_id, "match end", db.set_session_ended(ended_match_id, None, reason))
     log.info("Game ended in room %s (%s)", session_id, reason)
-    await db.insert_client_event(
-        {
-            "type": "server_game_ended",
-            "message": reason,
-            "meta": json.dumps({"match_id": ended_match_id}),
-            "room": session_id,
-            "slot": -1,
-            "ip_hash": "",
-            "user_agent": "server",
-        }
+    await _record_room_history(
+        session_id,
+        "game-ended event",
+        db.insert_client_event(
+            {
+                "type": "server_game_ended",
+                "message": reason,
+                "meta": json.dumps({"match_id": ended_match_id}),
+                "room": session_id,
+                "slot": -1,
+                "ip_hash": "",
+                "user_agent": "server",
+            }
+        ),
     )
     # Kick off vision post-mortem for unverified desync_events. Async —
     # does not block the client end-game return.

@@ -129,7 +129,8 @@ done
 $QUINT run "$DISCONNECT" --main=room_disconnect_cleanup_fixed --invariant=allHold \
   --max-samples=1000 --max-steps=10 --backend="$BACKEND"
 
-for model in room_expiry room_member_return reconnect_attempt spectator_publication; do
+$QUINT test specs/room_hydration.qnt --main=room_hydration_before_order_fix --backend="$BACKEND"
+for model in room_hydration room_expiry room_owner_seat room_departure_log room_member_return reconnect_attempt spectator_publication; do
   file="specs/${model}.qnt"
   $QUINT typecheck "$file"
   for variant in before fixed; do
@@ -153,6 +154,12 @@ $QUINT run specs/room_member_return.qnt --main=room_host_traffic_fixed --invaria
 $QUINT test specs/room_member_return.qnt --main=room_saved_fight --backend="$BACKEND"
 $QUINT run specs/room_member_return.qnt --main=room_saved_fight --invariant=everyoneInstalled \
   --max-steps=12 --max-samples=5000 --backend="$BACKEND"
+
+for variant in room_saved_delay_before room_saved_delay_fixed; do
+  $QUINT test specs/room_member_return.qnt --main="$variant" --backend="$BACKEND"
+done
+$QUINT run specs/room_member_return.qnt --main=room_saved_delay_fixed --invariant=startMatchesInputHistory \
+  --max-steps=6 --max-samples=1000 --backend="$BACKEND"
 
 for variant in room_saved_seat_before room_saved_seat_fixed; do
   $QUINT test specs/room_member_return.qnt --main="$variant" --backend="$BACKEND"
@@ -839,6 +846,14 @@ $QUINT run "$SOLO" --main=solo_save_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
 # ── How a page's C engine starts ───────────────────────────────────────────
+ARCHIVE=specs/core_archive.qnt
+$QUINT typecheck "$ARCHIVE"
+for variant in core_archive_before core_archive_fixed; do
+  $QUINT test "$ARCHIVE" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$ARCHIVE" --main=core_archive_fixed --invariant=allHold \
+  --max-samples=10000 --max-steps=20 --backend="$BACKEND"
+
 START=specs/engine_start.qnt
 $QUINT typecheck "$START"
 for variant in engine_start_before engine_start_stop_only engine_start_jump_on_return engine_start_no_zero_bridge engine_start_no_rearm engine_start_current; do

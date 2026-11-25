@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { delayAtJoin, guestStartStep, type StartStep } from '../../web/src/engine-start.ts';
+import { delayAtJoin, delayAtStart, guestStartStep, type StartStep } from '../../web/src/engine-start.ts';
+
+test('only a restored input window overrides the negotiated startup delay', () => {
+  for (const saved of [-1, 0, 1, 4, 12]) {
+    for (const negotiated of [0, 1, 4, 12]) {
+      const start = delayAtStart(saved, negotiated);
+      assert.equal(start, saved < 0 ? negotiated : saved);
+      assert.equal(start !== negotiated, saved >= 0 && saved !== negotiated);
+    }
+  }
+});
 
 const DEADLINE = 10_000;
 const OWN_DELAY = 3; // what the guest worked out for itself

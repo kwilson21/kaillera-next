@@ -3277,8 +3277,7 @@
     window.KNEmulatorResumeContext = null;
     KNShared.resetBootState?.();
 
-    // Wait for IDB cache clear (core-redirector) before loading EJS.
-    // If the clear hasn't finished, EJS might use stale cached core data.
+    // Resolve the archive identity before EJS selects its core.
     const injectLoader = () => {
       _emulatorBootInFlight = true;
       let bootDoneTimer = null;
@@ -3314,7 +3313,7 @@
         setTimeout(() => reject(new Error('Core load timeout (15s)')), 15000),
       );
       Promise.race([coreReady, coreTimeout]).then(injectLoader, (err) => {
-        console.warn(`[play] core-ready: ${err.message} — proceeding without cache clear`);
+        console.warn(`[play] core-ready: ${err.message} — proceeding with revalidated local bytes`);
         injectLoader();
       });
     } else {

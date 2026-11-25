@@ -100,12 +100,23 @@ room_lifecycle_start() {
 }
 
 room_disconnect_cleanup() {
+  verify specs/room_hydration.qnt room_hydration_fixed allHold init 3
+  expect_violation specs/room_hydration.qnt room_hydration_before readyIncludesSavedRooms 3
+  expect_violation specs/room_hydration.qnt room_hydration_before_order_fix readyIncludesRoomSavedDuringStartup 3
+  verify specs/room_departure_log.qnt room_departure_log_fixed allHold init 1
+  expect_violation specs/room_departure_log.qnt room_departure_log_before remainingPlayerOwnsRoom 1
+  local seats=specs/room_owner_seat.qnt
+  verify "$seats" room_owner_seat_fixed allHold init 5
+  expect_violation "$seats" room_owner_seat_before lobbyOwnerIsP1 2
+  expect_violation "$seats" room_owner_seat_before everyPlayerHasASeat 4
   local expiry=specs/room_expiry.qnt
   verify "$expiry" room_expiry_fixed allHold init 4
   expect_violation "$expiry" room_expiry_before liveRoomSurvives 3
   expect_violation "$expiry" room_expiry_before freshRoomHasGrace 3
   verify specs/room_member_return.qnt room_member_return_fixed allHold init 5
   verify specs/room_member_return.qnt room_saved_fight everyoneInstalled init 5
+  verify specs/room_member_return.qnt room_saved_delay_fixed startMatchesInputHistory init 3
+  expect_violation specs/room_member_return.qnt room_saved_delay_before startMatchesInputHistory 1
   verify specs/room_member_return.qnt room_saved_seat_fixed releaseNeedsBoth init 3
   expect_violation specs/room_member_return.qnt room_saved_seat_before releaseNeedsBoth 2
   verify specs/room_member_return.qnt room_return_identity_fixed visibleSeatHasItsIdentity init 3
@@ -651,6 +662,11 @@ solo_save() {
 }
 
 engine_start() {
+  local archive=specs/core_archive.qnt
+  verify "$archive" core_archive_fixed allHold init 6
+  expect_violation "$archive" core_archive_before startedArchiveMatches 3
+  expect_violation "$archive" core_archive_before unknownSkipsCache 2
+  expect_violation "$archive" core_archive_before workerHasKnownIdentity 4
   local START=specs/engine_start.qnt
   verify "$START" engine_start_current allHold
   # A tab that comes back while its page waits moves the page's frame:
