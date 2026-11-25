@@ -66,6 +66,7 @@ import time
 import unicodedata
 import uuid
 from collections.abc import Awaitable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from itertools import chain
 
@@ -289,6 +290,8 @@ async def finish_room_shutdown() -> None:
             task.cancel()
         _disconnect_grace_tasks.clear()
         _match_return_tasks.clear()
+    if _history_tail:
+        await asyncio.gather(*_history_tail.values(), return_exceptions=True)
 
 
 # ── Socket.IO server instance ─────────────────────────────────────────────────
@@ -391,6 +394,65 @@ _sid_to_room: dict[str, tuple[str, str, bool]] = {}
 # handlers can read stale room state and then both write, corrupting it.
 # Every handler that reads then mutates rooms/_sid_to_room must hold this.
 _room_lock = asyncio.Lock()
+
+# The final history task for each room. Later lifecycle writes must follow an
+# earlier departure even when its session log is still busy.
+_history_tail: dict[str, asyncio.Task] = {}
+_transition_history: dict[asyncio.Task, list[tuple[str, Awaitable[object]]]] = {}
+
+
+def _queue_history(code: str, write: Awaitable[object]) -> asyncio.Task:
+    previous = _history_tail.get(code)
+
+    async def ordered():
+        try:
+            if previous is not None:
+                await asyncio.wait((previous,))  # a failed write does not discard its successor
+            await write
+        finally:
+            if _history_tail.get(code) is asyncio.current_task():
+                _history_tail.pop(code)
+
+    task = asyncio.create_task(ordered())
+    _history_tail[code] = task
+    return task
+
+
+def _report_history_failure(task: asyncio.Task) -> None:
+    if not task.cancelled() and (error := task.exception()) is not None:
+        log.error("Room history write failed", exc_info=error)
+
+
+@asynccontextmanager
+async def _room_transition(*, wait_for_history: bool = True):
+    """Commit the room change under the lock and write its history in room order."""
+    history = []
+    try:
+        async with _room_lock:
+            owner = asyncio.current_task()
+            _transition_history[owner] = history
+            try:
+                yield
+            finally:
+                del _transition_history[owner]
+    finally:
+        # Enqueue before yielding to the next lock holder. A returning browser
+        # needs its acknowledgement while its reservation is still valid.
+        if history:
+            tasks = [_queue_history(code, write) for code, write in history]
+            if wait_for_history:
+                await asyncio.shield(asyncio.gather(*tasks))
+            else:
+                for task in tasks:
+                    task.add_done_callback(_report_history_failure)
+
+
+async def _after_room_change(code: str, write: Awaitable[object]) -> None:
+    if (history := _transition_history.get(asyncio.current_task())) is None:
+        await write
+    else:
+        history.append((code, write))
+
 
 _shutting_down = False
 _waiting_disconnects: set[asyncio.Task] = set()
@@ -745,7 +807,9 @@ async def _close_host_timeout(session_id: str, room: Room) -> None:
             await attempt("remove socket from room", sio.leave_room(sid, session_id))
     await attempt("delete saved room", state.delete_room(session_id))
     if room.status == "playing":
-        await attempt("record match end", _record_match_end(session_id, room.match_id, "host-timeout"))
+        await _after_room_change(
+            session_id, attempt("record match end", _record_match_end(session_id, room.match_id, "host-timeout"))
+        )
 
 
 async def _wait_for_member_return(session_id: str, room: Room, player_id: str, sid: str) -> None:
@@ -754,7 +818,7 @@ async def _wait_for_member_return(session_id: str, room: Room, player_id: str, s
         deadline := _return_deadline(room, member)
     ) is not None:
         await asyncio.sleep(max(0, deadline - _now_ms()) / 1000)
-        async with _room_lock:
+        async with _room_transition():
             if (
                 _shutting_down
                 or rooms.get(session_id) is not room
@@ -792,7 +856,7 @@ def _schedule_return(session_id: str, room: Room, player_id: str) -> None:
 
 async def restore_member_reservations() -> None:
     """The room survived a restart; the previous server's sockets did not."""
-    async with _room_lock:
+    async with _room_transition():
         for code, room in list(rooms.items()):
             if host_return_expired(room):
                 await _close_host_timeout(code, room)
@@ -847,8 +911,11 @@ async def _remove_member(sid: str, entry: tuple[str, str, bool], reason: str) ->
                 rm_slot = s
                 break
         if room.match_id and rm_slot is not None:
-            await _record_room_history(
-                session_id, "departing player session", db.set_session_ended(room.match_id, rm_slot, reason)
+            await _after_room_change(
+                session_id,
+                _record_room_history(
+                    session_id, "departing player session", db.set_session_ended(room.match_id, rm_slot, reason)
+                ),
             )
 
         room.players.pop(player_id, None)
@@ -866,28 +933,25 @@ async def _remove_member(sid: str, entry: tuple[str, str, bool], reason: str) ->
 
     # Log server-side disconnect to client_events so the session log
     # shows the full picture (previously only went to stdout).
-    await _record_room_history(
-        session_id,
-        "player departure",
-        db.insert_client_event(
+    event = {
+        "type": "server_disconnect",
+        "message": reason,
+        "meta": json.dumps(
             {
-                "type": "server_disconnect",
-                "message": reason,
-                "meta": json.dumps(
-                    {
-                        "playerId": player_id,
-                        "sid": sid,
-                        "spectator": is_spectator,
-                        "match_id": room.match_id,
-                        "slot": rm_slot,
-                    }
-                ),
-                "room": session_id,
-                "slot": rm_slot if rm_slot is not None else -1,
-                "ip_hash": "",
-                "user_agent": "server",
+                "playerId": player_id,
+                "sid": sid,
+                "spectator": is_spectator,
+                "match_id": room.match_id,
+                "slot": rm_slot,
             }
         ),
+        "room": session_id,
+        "slot": rm_slot if rm_slot is not None else -1,
+        "ip_hash": "",
+        "user_agent": "server",
+    }
+    await _after_room_change(
+        session_id, _record_room_history(session_id, "player departure", db.insert_client_event(event))
     )
 
     if not room.players and not room.spectators:
@@ -897,16 +961,15 @@ async def _remove_member(sid: str, entry: tuple[str, str, bool], reason: str) ->
         log.info("Room %s deleted (empty)", session_id)
         return
 
-    # Transfer ownership if the owner left.
-    # Mid-game: keep the room alive so the host can reconnect (persistentId path)
-    # AND so remaining peers continue play under a new owner. The previous behavior
-    # of force-closing the room on any host disconnect punished tab backgrounding,
-    # WiFi roams, and Playwright multi-tab orchestration.
-    if room.owner == sid:
-        # Listing was this host's consent; nobody who stays has given it.
+    # The emulator in native slot zero serves every rollback/lockstep join.
+    ends_native_match = (
+        reason == "leave" and rm_slot == 0 and room.status == "playing" and room.mode in ("rollback", "lockstep")
+    )
+    owner_left = room.owner == sid
+    if owner_left:
         room.listed = False
         _drop_room_frame(session_id)
-    if room.owner == sid and room.players:
+    if owner_left and room.players:
         # Prefer a connected player; an offline successor keeps their original deadline.
         new_owner_pid = next(
             (pid for pid, member in room.players.items() if member["socketId"] in _sid_host), next(iter(room.players))
@@ -916,11 +979,16 @@ async def _remove_member(sid: str, entry: tuple[str, str, bool], reason: str) ->
         new_owner_sid = new_owner_info["socketId"]
         room.owner = new_owner_sid
         room.rom_sharing = False
-        if room.status != "playing":
+        if room.status != "playing" or ends_native_match:
             _clear_host_rom(room)
         room.arrange_lobby_seats()
         log.info("Room %s ownership transferred to %s", session_id, new_owner_sid)
-        await _emit("webrtc-signal", {"requestRenegotiate": True}, to=new_owner_sid)
+    if ends_native_match:
+        await _end_match(session_id, room, "host-left")
+    if owner_left and room.players:
+        await _emit("webrtc-signal", {"requestRenegotiate": True}, to=room.owner)
+    if ends_native_match:
+        return
 
     await state.save_room(session_id, room)
     await _emit("users-updated", _players_payload(room), room=session_id)
@@ -949,7 +1017,7 @@ async def connect(sid: str, environ: dict) -> None:
 
 async def _expire_rooms(previous: dict[str, tuple[Room, int]]) -> dict[str, tuple[Room, int]]:
     offline = {}
-    async with _room_lock:
+    async with _room_transition():
         for code, room in list(rooms.items()):
             if room.host_return_deadline is not None:
                 if host_return_expired(room):
@@ -993,7 +1061,7 @@ async def _cleanup_empty_rooms() -> None:
 async def open_room(sid: str, payload: OpenRoomPayload) -> str | None:
     if not check(sid, "open-room"):
         return "Rate limited"
-    async with _room_lock:
+    async with _room_transition(wait_for_history=False):
         return await _open_room_locked(sid, payload)
 
 
@@ -1223,7 +1291,7 @@ async def _readmit_dropped_player(
     await state.save_room(session_id, room)
     # Its session was marked ended when the room dropped it.
     if room.match_id:
-        await db.reopen_session(room.match_id, slot)
+        await _after_room_change(session_id, db.reopen_session(room.match_id, slot))
     log.info(
         "SIO %s taken back into room %s after its grace ran out (slot %d, persistentId=%s)",
         sid,
@@ -1239,7 +1307,7 @@ async def _readmit_dropped_player(
 async def join_room(sid: str, payload: JoinRoomPayload) -> tuple[str | None, dict | None]:
     if not check(sid, "join-room"):
         return ("Rate limited", None)
-    async with _room_lock:
+    async with _room_transition(wait_for_history=False):
         return await _join_room_locked(sid, payload)
 
 
@@ -1378,7 +1446,7 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
 async def leave_room(sid: str, data: dict | None = None) -> None:
     if not check(sid, "leave-room"):
         return
-    async with _room_lock:
+    async with _room_transition():
         await _leave(sid, reason="leave")
 
 
@@ -1518,7 +1586,7 @@ async def set_name(sid: str, payload: SetNamePayload) -> str | None:
 @sio.on("start-game")
 @validated(StartGamePayload)
 async def start_game(sid: str, payload: StartGamePayload) -> str | None:
-    async with _room_lock:
+    async with _room_transition():
         return await _start_game_locked(sid, payload)
 
 
@@ -1626,17 +1694,16 @@ async def _start_game_locked(
     )
     await state.save_room(session_id, room)
     log.info("Game started in room %s (mode=%s)", session_id, room.mode)
-    await db.insert_client_event(
-        {
-            "type": "server_game_started",
-            "message": room.mode,
-            "meta": json.dumps({"match_id": room.match_id, "mode": room.mode}),
-            "room": session_id,
-            "slot": -1,
-            "ip_hash": "",
-            "user_agent": "server",
-        }
-    )
+    event = {
+        "type": "server_game_started",
+        "message": room.mode,
+        "meta": json.dumps({"match_id": room.match_id, "mode": room.mode}),
+        "room": session_id,
+        "slot": -1,
+        "ip_hash": "",
+        "user_agent": "server",
+    }
+    await _after_room_change(session_id, _record_room_history(session_id, "match start", db.insert_client_event(event)))
     return None
 
 
@@ -1652,7 +1719,7 @@ def _cancel_match_return(session_id: str) -> None:
 async def _wait_for_match_ready(session_id: str, room: Room, match_id: str) -> None:
     while room.resume_deadline is not None:
         await asyncio.sleep(max(0, room.resume_deadline - _now_ms()) / 1000)
-        async with _room_lock:
+        async with _room_transition():
             if _shutting_down or rooms.get(session_id) is not room or room.match_id != match_id:
                 return
             if room.resume_deadline is not None and room.resume_deadline <= _now_ms():
@@ -1665,7 +1732,7 @@ async def _wait_for_match_ready(session_id: str, room: Room, match_id: str) -> N
 async def match_return_ready(sid: str, payload: MatchReturnReadyPayload) -> str | None:
     if not check(sid, "match-return-ready"):
         return "Rate limited"
-    async with _room_lock:
+    async with _room_transition():
         entry = _sid_to_room.get(sid)
         if entry is None:
             return NOT_IN_ROOM
@@ -1719,7 +1786,7 @@ async def match_recovery_unverified(sid: str, payload: MatchRecoveryUnverifiedPa
     """Record unverified recovery from the room owner or its native slot-zero authority."""
     if not check(sid, "match-recovery-unverified"):
         return "Rate limited"
-    async with _room_lock:
+    async with _room_transition():
         entry = _sid_to_room.get(sid)
         if entry is None:
             return "Not in a room"
@@ -1751,7 +1818,7 @@ async def match_recovery_unverified(sid: str, payload: MatchRecoveryUnverifiedPa
 @sio.on("end-game")
 @validated(EndGamePayload)
 async def end_game(sid: str, payload: EndGamePayload) -> str | None:
-    async with _room_lock:
+    async with _room_transition():
         return await _end_game_locked(sid, payload)
 
 
@@ -1823,7 +1890,7 @@ async def _end_match(session_id: str, room: Room, reason: str) -> None:
     # failover would restore this room still claiming to be mid-match even
     # though every client was already told the game ended above.
     await state.save_room(session_id, room)
-    await _record_match_end(session_id, ended_match_id, reason)
+    await _after_room_change(session_id, _record_match_end(session_id, ended_match_id, reason))
 
 
 async def _record_match_end(session_id: str, ended_match_id: str | None, reason: str) -> None:
@@ -2604,7 +2671,7 @@ async def disconnect(sid: str, reason: str | None = None) -> None:
 
 
 async def _disconnect_from_room(sid: str) -> None:
-    async with _room_lock:
+    async with _room_transition():
         _waiting_disconnects.discard(asyncio.current_task())
         if _shutting_down:
             return

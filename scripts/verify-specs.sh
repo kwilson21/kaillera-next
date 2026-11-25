@@ -103,10 +103,12 @@ room_disconnect_cleanup() {
   verify specs/room_hydration.qnt room_hydration_fixed allHold init 3
   expect_violation specs/room_hydration.qnt room_hydration_before readyIncludesSavedRooms 3
   expect_violation specs/room_hydration.qnt room_hydration_before_order_fix readyIncludesRoomSavedDuringStartup 3
-  verify specs/room_departure_log.qnt room_departure_log_fixed allHold init 1
+  verify specs/room_departure_log.qnt room_departure_log_fixed allHold init 2
   expect_violation specs/room_departure_log.qnt room_departure_log_before remainingPlayerOwnsRoom 1
+  expect_violation specs/room_departure_log.qnt room_departure_log_before timelyReturnSurvives 2
   local seats=specs/room_owner_seat.qnt
   verify "$seats" room_owner_seat_fixed allHold init 5
+  expect_violation "$seats" room_owner_seat_before authorityLeaveEndsMatch 1
   expect_violation "$seats" room_owner_seat_before lobbyOwnerIsP1 2
   expect_violation "$seats" room_owner_seat_before everyPlayerHasASeat 4
   local expiry=specs/room_expiry.qnt

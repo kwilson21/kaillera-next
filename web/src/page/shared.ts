@@ -199,6 +199,7 @@ export const createShared = () => {
   }
 
   let _listenersAdded = false;
+  let _activeKeyMap: KeyMap | null = null;
   let _activeHeldKeys: Set<number> | null = null;
   let _keydownHandler: ((e: KeyboardEvent) => void) | null = null;
   let _keyupHandler: ((e: KeyboardEvent) => void) | null = null;
@@ -225,6 +226,7 @@ export const createShared = () => {
   function ensureKeyTrackingListeners(): void {
     if (!_listenersAdded) {
       _keydownHandler = (e) => {
+        if (pageState().remapActive) return;
         // Modal/menu input stays in the UI. After closing, focus returns to
         // More: consume its activation keys, but let gameplay keys resume.
         const target = e.target;
@@ -258,13 +260,7 @@ export const createShared = () => {
     }
   }
 
-  function setupKeyTracking(keymap: KeyMap | null | undefined, heldKeys: Set<number>): KeyMap {
-    _activeHeldKeys = heldKeys;
-    if (keymap) {
-      ensureKeyTrackingListeners();
-      return keymap;
-    }
-
+  function readKeyMap(): KeyMap {
     let resolved: KeyMap | null = null;
 
     // Check localStorage for custom keyboard mapping first
@@ -299,12 +295,29 @@ export const createShared = () => {
       resolved = Object.assign({}, DEFAULT_N64_KEYMAP);
     }
 
-    ensureKeyTrackingListeners();
-
     return resolved;
   }
 
+  function setupKeyTracking(keymap: KeyMap | null | undefined, heldKeys: Set<number>): KeyMap {
+    _activeHeldKeys = heldKeys;
+    _activeKeyMap = keymap ?? readKeyMap();
+    ensureKeyTrackingListeners();
+    return _activeKeyMap;
+  }
+
+  // Engines keep the returned map for frame reads. Rebinding changes that map in
+  // place so the same engine keeps receiving keydown and keyup for held controls.
+  function refreshKeyMap(): boolean {
+    if (!_activeKeyMap) return false;
+    const bindings = readKeyMap();
+    for (const key of Object.keys(_activeKeyMap)) delete _activeKeyMap[key];
+    Object.assign(_activeKeyMap, bindings);
+    return true;
+  }
+
   function teardownKeyTracking(): void {
+    _activeKeyMap = null;
+    _recentlyPressedKeys.clear();
     if (_listenersAdded) {
       if (_keydownHandler) {
         window.removeEventListener('keydown', _keydownHandler, true);
@@ -786,6 +799,7 @@ export const createShared = () => {
     createAndSendAnswer: createAndSendAnswer,
     resetPeerConnection: resetPeerConnection,
     setupKeyTracking: setupKeyTracking,
+    refreshKeyMap,
     teardownKeyTracking: teardownKeyTracking,
     waitForEmulator: waitForEmulator,
     resetBootState: resetBootState,

@@ -411,6 +411,17 @@ stream() { # module invariant init
 stream streaming_connection_current allHold init
 stream streaming_connection_current allHold initLate
 
+for variant in streaming_media_before streaming_media_fixed; do
+  $QUINT test "$STREAM" --main="$variant" --backend="$BACKEND"
+done
+stream streaming_media_fixed recoveryPending init
+$QUINT typecheck specs/emulator_boot.qnt
+for variant in emulator_boot_before emulator_boot_fixed; do
+  $QUINT test specs/emulator_boot.qnt --main="$variant" --backend="$BACKEND"
+done
+$QUINT run specs/emulator_boot.qnt --main=emulator_boot_fixed --invariant=oneCurrentEmulator \
+  --max-samples=10000 --max-steps=25 --backend="$BACKEND"
+
 # ── The pause around a late join ────────────────────────────────────────────
 PAUSE=specs/late_join_pause.qnt
 $QUINT typecheck "$PAUSE"
@@ -578,6 +589,15 @@ $QUINT run "$BYSTANDER" --main=recovery_bystander_fixed --invariant=allHold \
   --max-samples=3000 --max-steps=150 --backend="$BACKEND"
 $QUINT run "$BYSTANDER" --main=recovery_bystander_broadcast_lossless --invariant=allHold \
   --max-samples=2000 --max-steps=150 --backend="$BACKEND"
+
+# Local controller discovery, seat changes and key remaps across engine lifetimes.
+LOCAL_INPUT=specs/local_input.qnt
+$QUINT typecheck "$LOCAL_INPUT"
+for variant in local_input_current local_input_previous; do
+  $QUINT test "$LOCAL_INPUT" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$LOCAL_INPUT" --main=local_input_current --invariant=allHold \
+  --max-samples=2000 --max-steps=30 --backend="$BACKEND"
 
 # ── Inputs on the unreliable channel, and the switch to the reliable one ────
 INPUTS=specs/input_transport.qnt

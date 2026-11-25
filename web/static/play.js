@@ -198,7 +198,7 @@
   let _pendingRomAutoloadTimer = null;
   let _hibernated = false; // true when emulator is hibernated between games
   let _hibernatedRomHash = null; // ROM hash at time of hibernate (detect ROM changes)
-  let _emulatorBootInFlight = false; // true while ejs-loader is creating a fresh instance
+  const _emulatorBoot = window.KNCore.play.startEmulatorBoot();
   // The late-join questions are the machine's to answer (web/src/session.ts):
   // it is told of every change and the page keeps no flags of its own.
   // "Waiting for a ROM before the late join can start":
@@ -1632,6 +1632,7 @@
     }
     mySlot = myPlayerEntry ? myPlayerEntry.slot : null;
     KNState.slot = mySlot;
+    if (mySlot !== null) window.GamepadManager?.setPlayerSlot(mySlot);
 
     // Detect spectator → player transition (via claim-slot)
     const nowPlayer = mySlot !== null && mySlot !== undefined;
@@ -1691,7 +1692,6 @@
     // Update overlay UI if in pre-game
     if (!isGameRunning()) {
       updateStartButton(players);
-      updateGamepadSlot();
       // Show/hide host controls after ownership transfer
       const hostControls = document.getElementById('host-controls');
       const guestStatus = document.getElementById('guest-status');
@@ -1962,6 +1962,7 @@
 
   const onRoomClosed = (data) => {
     _leavingRoom = true;
+    _emulatorBoot.cancel();
     setNoticeMatch(null);
     clearNotices();
     _admission?.abort();
@@ -2870,6 +2871,7 @@
     const displayName = _romReceiver.header?.name ?? 'rom.z64';
     const expectedHash = _romReceiver.header?.hash ?? null;
 
+    _emulatorBoot.cancel();
     const load = ++_romLoad;
     _romBlob = blob;
     _romName = displayName;
@@ -2995,7 +2997,7 @@
 
   const destroyEmulator = () => {
     console.log('[play] destroyEmulator:', `EJS=${!!window.EJS_emulator}`);
-    _emulatorBootInFlight = false;
+    _emulatorBoot.cancel();
     window.KNEmulatorResumeContext = null;
     const emu = window.EJS_emulator;
     if (emu) {
@@ -3094,6 +3096,7 @@
   };
 
   const hibernateEmulator = () => {
+    _emulatorBoot.cancel();
     const emu = window.EJS_emulator;
     if (!emu) return;
     console.log('[play] hibernateEmulator: pausing + hiding');
@@ -3250,79 +3253,54 @@
       console.log('[play] bootEmulator: EJS already exists, skipping');
       return;
     }
-    if (_emulatorBootInFlight) {
-      console.log('[play] bootEmulator: boot already in flight');
-      return;
-    }
     if (!_romBlob && !_romBlobUrl) {
       console.log('[play] bootEmulator: no ROM loaded');
       showToast('Please load a ROM file first', 'warn');
       return;
     }
-    // Create a fresh blob URL — the previous one may have been revoked by
-    // EmulatorJS internally or by destroyEmulator() cleanup
-    if (_romBlob) {
-      if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
-      _romBlobUrl = URL.createObjectURL(_romBlob);
-    }
-    // Guests normally wait for the lockstep gesture prompt. When boot is
-    // launched from that prompt, force EJS auto-start so the first EJS start
-    // path is the same on initial boot and after a ROM swap.
-    window.EJS_startOnLoaded = !!(isHost || forceStartOnLoad);
-    if (!isHost && !forceStartOnLoad) {
-      console.log('[play] bootEmulator: guest — waiting for gesture-gated start');
-    } else if (!isHost) {
-      console.log('[play] bootEmulator: guest — starting from gesture');
-    }
+    const prepare = async () => {
+      // Create a fresh blob URL — the previous one may have been revoked by
+      // EmulatorJS internally or by destroyEmulator() cleanup
+      if (_romBlob) {
+        if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
+        _romBlobUrl = URL.createObjectURL(_romBlob);
+      }
+      // Guests normally wait for the lockstep gesture prompt. When boot is
+      // launched from that prompt, force EJS auto-start so the first EJS start
+      // path is the same on initial boot and after a ROM swap.
+      window.EJS_startOnLoaded = !!(isHost || forceStartOnLoad);
+      if (!isHost && !forceStartOnLoad) {
+        console.log('[play] bootEmulator: guest — waiting for gesture-gated start');
+      } else if (!isHost) {
+        console.log('[play] bootEmulator: guest — starting from gesture');
+      }
 
-    console.log('[play] bootEmulator: gameUrl:', _romBlobUrl.substring(0, 50));
-    window.EJS_gameUrl = _romBlobUrl;
-    window.EJS_gameID = _romHash || window.KNState?.romHash || 'kaillera-next';
-    window.KNEmulatorResumeContext = null;
-    KNShared.resetBootState?.();
+      console.log('[play] bootEmulator: gameUrl:', _romBlobUrl.substring(0, 50));
+      window.EJS_gameUrl = _romBlobUrl;
+      window.EJS_gameID = _romHash || window.KNState?.romHash || 'kaillera-next';
+      window.KNEmulatorResumeContext = null;
+      KNShared.resetBootState?.();
 
-    // Resolve the archive identity before EJS selects its core.
-    const injectLoader = () => {
-      _emulatorBootInFlight = true;
-      let bootDoneTimer = null;
-      const markBootDone = () => {
-        _emulatorBootInFlight = false;
-        if (bootDoneTimer) {
-          clearTimeout(bootDoneTimer);
-          bootDoneTimer = null;
-        }
-        window.removeEventListener('kn-ejs-loader-complete', markBootDone);
-      };
-      window.addEventListener('kn-ejs-loader-complete', markBootDone);
-      bootDoneTimer = setTimeout(markBootDone, 30000);
-      const script = document.createElement('script');
-      script.src = '/static/ejs-loader.js';
-      script.onload = () => {
-        console.log('[play] loader.js loaded');
-      };
-      script.onerror = () => {
-        console.log('[play] loader.js FAILED to load');
-        markBootDone();
-        // BF5: surface EJS loader failure to the user
-        window.knShowError?.('Failed to load emulator \u2014 please refresh the page.');
-        KNEvent?.('wasm-fail', 'ejs-loader script error');
-      };
-      document.body.appendChild(script);
+      await (window._knPrepareN64Core?.(mode) ?? window._knCoreReady);
     };
-    const coreReady = window._knPrepareN64Core?.(mode) ?? window._knCoreReady;
-    if (coreReady) {
-      // BF5: race core readiness against a 15s timeout so boot doesn't hang
-      // forever if /api/core-info fetch never resolves.
-      const coreTimeout = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Core load timeout (15s)')), 15000),
-      );
-      Promise.race([coreReady, coreTimeout]).then(injectLoader, (err) => {
-        console.warn(`[play] core-ready: ${err.message} — proceeding with revalidated local bytes`);
-        injectLoader();
-      });
-    } else {
-      injectLoader();
-    }
+    _emulatorBoot.start(
+      prepare,
+      (signal) =>
+        new Promise((resolve, reject) => {
+          const script = document.createElement('script');
+          script.knBootSignal = signal;
+          script.addEventListener('kn-ejs-loader-complete', resolve, { once: true, signal });
+          script.addEventListener('error', () => reject(new Error('ejs-loader script error')), { once: true, signal });
+          script.src = '/static/ejs-loader.js';
+          document.body.appendChild(script);
+        }),
+      (err) => console.warn(`[play] core-ready: ${err} — proceeding with revalidated local bytes`),
+      (err) => {
+        console.error('[play] emulator load failed:', err);
+        window.knShowError?.('Failed to load emulator — please refresh the page.');
+        KNEvent?.('wasm-fail', 'ejs-loader failed');
+      },
+    );
   };
 
   const ensureEmulatorBooted = ({ forceStartOnLoad = false } = {}) => {
@@ -3507,6 +3485,7 @@
 
   const loadRomData = (file, displayName) => {
     hideRomMismatch();
+    _emulatorBoot.cancel();
     const load = ++_romLoad;
     // Until this file is hashed the server still holds the previous ROM's
     // word: a start in that moment would count a guest ready with that ROM,
@@ -3629,6 +3608,7 @@
     _romBlob = null;
     _romBlobUrl = null;
     _romHash = null;
+    _emulatorBoot.cancel();
     _romHashLoad = ++_romLoad;
     _romName = null;
     _romDroppedName = null;
@@ -3688,6 +3668,7 @@
           return;
         }
         const blob = new Blob([val.blob]);
+        _emulatorBoot.cancel();
         const load = ++_romLoad;
         _romBlob = blob;
         _romName = val.name;
@@ -3858,8 +3839,7 @@
       // layout shrinks #game, triggering a canvas resize mid-session.
       if ('ontouchstart' in window && !isSpectator && window.VirtualGamepad) {
         VirtualGamepad.init();
-        const _detected = window.GamepadManager ? GamepadManager.getDetected() : [];
-        if (_detected.length > 0) VirtualGamepad.setVisible(false);
+        if (window.GamepadManager?.hasGamepad(mySlot)) VirtualGamepad.setVisible(false);
       }
       if (!isHost && everyoneRunsTheGame(mode)) {
         console.log('[play] initEngine: guest rollback boot deferred until gesture');
@@ -4190,6 +4170,7 @@
   const leaveGame = () => {
     if (_leavingRoom) return;
     _leavingRoom = true;
+    _emulatorBoot.cancel();
     setNoticeMatch(null);
     clearNotices();
     _admission?.abort();
@@ -4643,19 +4624,10 @@
     });
   };
 
-  const updateGamepadSlot = () => {
-    // Re-start with correct slot when mySlot changes (after join/connect)
-    if (window.GamepadManager && mySlot !== null) {
-      GamepadManager.start({
-        playerSlot: mySlot,
-        onUpdate: updateGamepadUI,
-      });
-    }
-  };
-
   const updateGamepadUI = () => {
     const detected = window.GamepadManager ? GamepadManager.getDetected() : [];
     const assignments = window.GamepadManager ? GamepadManager.getAssignments() : {};
+    const localPad = mySlot !== null && !!assignments[mySlot];
     const statusEl = document.getElementById('gamepad-status');
 
     // Update input type based on gamepad detection
@@ -4677,7 +4649,7 @@
     // Hide EJS virtual gamepad when a real gamepad is connected (and vice versa)
     const ejs = window.EJS_emulator;
     if (ejs?.virtualGamepad) {
-      if (detected.length > 0) {
+      if (localPad) {
         ejs.virtualGamepad.style.display = 'none';
       } else if (ejs.touch) {
         ejs.virtualGamepad.style.display = '';
@@ -4686,7 +4658,7 @@
 
     // Toggle standalone virtual gamepad (streaming mode guests)
     if (window.VirtualGamepad) {
-      if (detected.length > 0) {
+      if (localPad) {
         VirtualGamepad.setVisible(false);
       } else if ('ontouchstart' in window) {
         VirtualGamepad.setVisible(true);
@@ -4696,13 +4668,13 @@
     // Mobile: constrain game to 4:3 for vertical centering when gamepad hides virtual controls
     const gameEl = document.getElementById('game');
     if (gameEl && 'ontouchstart' in window) {
-      gameEl.classList.toggle('gamepad-connected', detected.length > 0);
+      gameEl.classList.toggle('gamepad-connected', localPad);
     }
 
     // Mobile: show/hide gamepad indicator during gameplay
     const gamepadIndicator = document.getElementById('gamepad-indicator');
     if (gamepadIndicator && 'ontouchstart' in window) {
-      gamepadIndicator.classList.toggle('hidden', detected.length === 0);
+      gamepadIndicator.classList.toggle('hidden', !localPad);
     }
 
     // Update .gamepad spans in player slots
@@ -4866,7 +4838,7 @@
     } catch (_) {}
     // Tell the netplay engine to re-read its cached keymap so the
     // wizard's binding changes actually reach readLocalInput.
-    window.NetplayRollback?.refreshKeyMap?.();
+    KNShared.refreshKeyMap();
 
     cancelWizard();
 
@@ -4882,7 +4854,7 @@
     try {
       _safeRemove('localStorage', 'keyboard-mapping');
     } catch (_) {}
-    window.NetplayRollback?.refreshKeyMap?.();
+    KNShared.refreshKeyMap();
     updateGamepadUI();
   };
 
@@ -5556,13 +5528,15 @@
     }
 
     const dumpLogsBtn = document.getElementById('dump-logs-btn');
-    if (dumpLogsBtn)
+    if (dumpLogsBtn && window.KNDiag.options.local) {
+      dumpLogsBtn.hidden = false;
       dumpLogsBtn.addEventListener('click', () => {
         if (engine?.dumpLogs) {
           engine.dumpLogs();
           showToast('Debug logs sent to server');
         }
       });
+    }
 
     const sharePlay = document.getElementById('share-play');
     if (sharePlay) {

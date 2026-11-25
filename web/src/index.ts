@@ -82,6 +82,7 @@ import * as connectionNotices from './play/connection-notices.ts';
 import { installShared } from './page/shared.ts';
 import * as delay from './play/delay.ts';
 import * as gameStart from './play/game-start.ts';
+import { startEmulatorBoot } from './play/emulator-boot.ts';
 import * as joinPlan from './play/join-plan.ts';
 import { canRetryRoomIce, createRoomIceCache } from './play/room-ice.ts';
 import * as mode from './play/mode.ts';
@@ -555,6 +556,7 @@ export const KNCore = {
     createRoomIceCache,
     mode,
     gameStart,
+    startEmulatorBoot,
     observe,
     remapWizard,
     romTransfer,

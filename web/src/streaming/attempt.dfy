@@ -67,3 +67,22 @@ lemma reofferDue_ensures(host: bool, listed: bool, channelOpen: bool)
   ensures (reofferDue(host, listed, channelOpen) == ((host && listed) && !(channelOpen)))
 {
 }
+
+function retryOffer(host: bool, listed: bool, channelOpen: bool, mediaPending: bool): string
+{
+  if reofferDue(host, listed, channelOpen) then
+    "replace"
+  else
+    if ((host && listed) && mediaPending) then
+      "media"
+    else
+      "none"
+}
+
+lemma retryOffer_ensures(host: bool, listed: bool, channelOpen: bool, mediaPending: bool)
+  ensures ((!(host) || !(listed)) ==> (retryOffer(host, listed, channelOpen, mediaPending) == "none"))
+  ensures (host ==> listed ==> !(channelOpen) ==> (retryOffer(host, listed, channelOpen, mediaPending) == "replace"))
+  ensures (host ==> listed ==> channelOpen ==> mediaPending ==> (retryOffer(host, listed, channelOpen, mediaPending) == "media"))
+  ensures (host ==> listed ==> channelOpen ==> !(mediaPending) ==> (retryOffer(host, listed, channelOpen, mediaPending) == "none"))
+{
+}

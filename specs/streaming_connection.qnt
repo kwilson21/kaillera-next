@@ -945,3 +945,33 @@ module streaming_connection_current {
   import streaming_connection(HOST_REOFFERS = true, SIGNALS_NAME_CONNECTION = true,
          CHECKS_SENDER = true).*
 }
+
+// Media is added to the same connection after its input channel opens. An
+// outstanding media offer must keep its deadline through loss of either signal.
+module streaming_media {
+  const RETRY_MEDIA: bool
+  var media: { listed: bool, connected: bool, pending: bool, wire: str, attempt: int }
+
+  action init = media' = { listed: true, connected: true, pending: false, wire: "none", attempt: 1 }
+  action offer = all { media.listed, media.connected, not(media.pending),
+    media' = media.with("pending", true).with("wire", "offer") }
+  action lose = all { media.wire != "none", media' = media.with("wire", "none") }
+  action answer = all { media.wire == "offer", media' = media.with("wire", "answer") }
+  action accept = all { media.wire == "answer", media' = media.with("wire", "none").with("pending", false) }
+  val armed = media.listed and media.connected and media.pending and RETRY_MEDIA
+  action deadline = all { armed, media' = media.with("wire", "offer") }
+  action leave = media' = media.with("listed", false).with("pending", false).with("wire", "none")
+  action replace = media' = media.with("attempt", media.attempt + 1).with("pending", false).with("wire", "none")
+  action step = any { offer, lose, answer, accept, deadline, leave, replace }
+  val recoveryPending = not(media.listed and media.connected and media.pending) or media.wire != "none" or armed
+  run lostOfferTest = init.then(offer).then(lose).expect(recoveryPending == RETRY_MEDIA)
+  run lostAnswerTest = init.then(offer).then(answer).then(lose).expect(recoveryPending == RETRY_MEDIA)
+  run retrySameConnectionTest = if (RETRY_MEDIA)
+    init.then(offer).then(lose).then(deadline).then(answer).then(accept).expect(media.attempt == 1 and not(armed))
+    else init.then(offer).then(lose).expect(not(armed))
+  run stopRetryTest = init.then(offer).then(lose).then(leave).expect(not(armed))
+  run replacedRetryTest = init.then(offer).then(lose).then(replace).expect(not(armed))
+}
+
+module streaming_media_before { import streaming_media(RETRY_MEDIA = false).* }
+module streaming_media_fixed { import streaming_media(RETRY_MEDIA = true).* }

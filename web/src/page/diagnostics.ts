@@ -25,6 +25,7 @@
  * Every canvas read that leaves the page as an image, or that costs a GPU
  * sync, asks `window.KNCapture.allowed()` first (web/static/kn-capture.js).
  */
+import { diagnosticOptions } from './diagnostic-options.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop, type CanvasHealth } from '../diagnostics.ts';
 
 /** The part of the Emscripten module the diagnostics read and wrap. */
@@ -575,6 +576,7 @@ export const createDiagnostics = () => {
   };
 
   return {
+    options: diagnosticOptions(window.location, (key) => window.KNStorage?.get('localStorage', key) ?? null),
     init,
     installHooks,
     cleanup,

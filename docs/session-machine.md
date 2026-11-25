@@ -79,3 +79,17 @@ flowchart LR
   grantedBeforeInstall -->|"install"| playing
   grantedBeforeInstall -->|"cancel"| cancelled
 ```
+
+# Emulator boot
+
+One request owns core preparation and loader construction until completion, timeout or teardown.
+Generated from `web/src/play/emulator-boot.ts`. The Quint model is `emulator_boot_fixed` in `specs/emulator_boot.qnt`.
+
+```mermaid
+flowchart LR
+  bootStart(( )) --> idle
+  idle -->|"request"| preparing
+  preparing -->|"prepared"| loading
+  preparing -->|"complete or cancel"| idle
+  loading -->|"complete or cancel"| idle
+```

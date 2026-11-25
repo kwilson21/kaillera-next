@@ -116,6 +116,8 @@ interface FakePeer {
   attempt?: Attempt | null;
   pendingCandidates: RTCIceCandidateInit[];
   remoteDescSet: boolean;
+  mediaPending?: boolean;
+  mediaOffer?: RTCSessionDescriptionInit;
   /** The connection gathers a candidate: it goes out through the socket the peer was made with. */
   gather: () => void;
 }
@@ -406,6 +408,33 @@ test('a connection that drops is offered again, and nothing is once the roster s
   await wait(DEADLINE_MS * 3);
   assert.equal(offersTo(host.sent, 'p2').length, count);
   host.engine.stop();
+});
+
+test('a pending media offer expires on the current live attempt, and leaving or stopping cancels it', async () => {
+  for (const ending of ['leave', 'stop']) {
+    const host = page('host');
+    host.start(0, ROOM);
+    await settle();
+    const peer = host.peers()['p2'];
+    assert.ok(peer?.attempt);
+    host.signal({ sender: 'p2', answer: { type: 'answer' }, attemptId: peer.attempt });
+    await settle();
+    peer.dc?.open();
+    peer.mediaOffer = { type: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n' };
+    peer.mediaPending = true;
+    await peer.pc.setLocalDescription(peer.mediaOffer);
+    host.roster(ROOM);
+    await wait(DEADLINE_MS * 1.5);
+    const retry = offersTo(host.sent, 'p2').at(-1);
+    assert.equal(host.peers()['p2'], peer);
+    assert.equal(retry?.offer, peer.mediaOffer);
+    assert.equal(retry?.attemptId, peer.attempt);
+    if (ending === 'leave') host.roster(ALONE);
+    else host.engine.stop();
+    const count = offersTo(host.sent, 'p2').length;
+    await wait(DEADLINE_MS * 2);
+    assert.equal(offersTo(host.sent, 'p2').length, count);
+  }
 });
 
 test('stop() ends the deadlines: nothing is offered after the match', async () => {

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -391,3 +392,60 @@ def test_connected_peers_timeout_is_reported_as_boot_failure_not_webrtc():
     assert "reason = 'Game boot timed out'" in timeout_window
     assert "eventType = 'wasm-fail'" in timeout_window
     assert "KNEvent(eventType" in timeout_window
+
+
+@pytest.mark.parametrize("stage", ["metadata", "stylesheet"])
+def test_end_during_boot_then_rematch_starts_one_emulator(browser, server_url, room, rom_path, stage):
+    host = browser.new_page()
+    guest = browser.new_page()
+    try:
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=streaming")
+        host.locator("#rom-drop input[type=file]").set_input_files(rom_path)
+        guest.goto(f"{server_url}/play.html?room={room}&name=P2")
+        held_styles = []
+        if stage == "stylesheet":
+            def hold_first_style(route):
+                if held_styles:
+                    route.continue_()
+                else:
+                    held_styles.append(route)
+            host.route("**/emulator.min.css", hold_first_style)
+        host.evaluate("""stage => {
+            const prepare = window._knPrepareN64Core;
+            window.bootGates = [];
+            window.bootedCores = [];
+            window._knPrepareN64Core = mode => Promise.all([
+                prepare(mode), new Promise(resolve => {
+                    bootGates.push(resolve);
+                    if (stage === 'stylesheet') resolve();
+                }),
+            ]);
+            window.addEventListener('kn-ejs-loader-complete', () => bootedCores.push(window.EJS_emulator));
+        }""", stage)
+        start = host.locator("#start-btn:not([disabled])")
+        start.click()
+        host.wait_for_function("Object.values(KNState.peers).some(p => p.dc?.readyState === 'open')")
+        assert host.evaluate("bootGates.length") == 1
+        if stage == "stylesheet":
+            host.locator("link[href$='emulator.min.css']").wait_for(state="attached")
+        host.locator("#toolbar-more").click()
+        host.locator("#toolbar-end").click()
+        host.wait_for_function("!KNState.gameOn()")
+        start.click()
+        host.wait_for_function("bootGates.length >= 2")
+        host.evaluate("bootGates[0]()")
+        host.wait_for_function("Object.values(KNState.peers).some(p => p.dc?.readyState === 'open')")
+        if stage == "metadata":
+            assert host.locator("script[src$='/ejs-loader.js']").count() == 0
+            host.evaluate("bootGates[1]()")
+        else:
+            assert len(held_styles) == 1
+            held_styles[0].continue_()
+        guest.wait_for_function("document.querySelector('#guest-video')?.currentTime > 0", timeout=60000)
+        assert host.evaluate("bootGates.length") == 2
+        assert host.evaluate("new Set(bootedCores).size") == 1
+        assert host.locator("#game canvas").count() == 1
+        assert host.locator("link[href$='emulator.min.css']").count() == 1
+    finally:
+        host.close()
+        guest.close()
