@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.73.1",
+    "date": "2026-11-25",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "show dual input help on checkbox hover (#343)"
+      }
+    ]
+  },
+  {
     "version": "0.73.0",
     "date": "2026-11-25",
     "changes": [
