@@ -51,14 +51,12 @@ class _RoomServer(uvicorn.Server):
 
 @asynccontextmanager
 async def lifespan(_app):
-    await state.init()
+    restored = await state.init()
     await state_cache.init()
     await db.init_db()
-    restored = await state.load_all_rooms()
     if restored:
         rooms.update(restored)
         await restore_member_reservations()
-        log.info("Restored %d room(s) from Redis", len(restored))
     task = asyncio.create_task(_cleanup_empty_rooms())
     token_task = asyncio.create_task(renew_member_tokens())
     log_task = asyncio.create_task(cleanup_old_data())

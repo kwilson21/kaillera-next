@@ -88,7 +88,8 @@ For hosting, use the [VPS setup](deploy/vps/README.md), [Render setup](deploy/re
 [Docker Swarm stack](docker-compose.prod.yml).
 
 The server entry point defines `PORT`, TLS, and `ALLOWED_ORIGIN`.
-Room persistence reads `REDIS_URL` or the `REDIS_*` settings.
+Room persistence reads `REDIS_URL` or the `REDIS_*` settings. With Redis configured,
+startup retries transient connection failures and serves rooms after restoration succeeds.
 The database defaults to SQLite and can use Cloudflare D1.
 [Server entry point](server/src/main.py) · [Room persistence](server/src/state.py) ·
 [Database backend](server/src/dbbackend/__init__.py)

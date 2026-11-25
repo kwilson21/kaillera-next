@@ -3,8 +3,14 @@
 Run: pytest tests/test_state.py -v
 """
 
+import asyncio
 import json
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+import redis.asyncio as aioredis
+from redis.exceptions import AuthenticationError, ConnectionError
+from src import state
 from src.api.signaling import Room
 from src.state import _deserialize_room, _serialize_room
 
@@ -129,3 +135,53 @@ def test_a_lockstep_room_is_restored_as_lockstep():
     }
     restored = _deserialize_room(legacy_payload)
     assert restored.mode == "lockstep"
+
+
+def test_restore_retries_incomplete_scan_before_serving(monkeypatch):
+    room = Room(owner="host", room_name="Survivor", game_id="ssb64", password=None, max_players=4)
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=[_serialize_room(room), "{}", _serialize_room(room)])
+    client.aclose = AsyncMock()
+    attempts = 0
+
+    async def scan(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            yield "kn:room:stale"
+            raise ConnectionError("connection lost during scan")
+        yield "kn:room:incomplete"
+        yield "kn:room:healthy"
+
+    client.scan_iter = scan
+    monkeypatch.setenv("REDIS_URL", "redis://localhost")
+    monkeypatch.setattr(aioredis, "from_url", lambda *a, **kw: client)
+    monkeypatch.setattr(state, "_redis", None)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    restored = asyncio.run(state.init())
+    assert list(restored) == ["healthy"]
+    assert restored["healthy"] == room
+    assert state.enabled() and attempts == 2
+    asyncio.run(state.close())
+    client.aclose.assert_awaited_once()
+
+
+@pytest.mark.parametrize(("error", "expected_attempts"), [(AuthenticationError, 1), (ConnectionError, 3)])
+def test_failed_configured_restore_cannot_become_ephemeral(monkeypatch, error, expected_attempts):
+    client = MagicMock()
+    client.scan_iter.side_effect = error("storage unavailable")
+    client.aclose = AsyncMock()
+    monkeypatch.setenv("REDIS_URL", "redis://localhost")
+    monkeypatch.setattr(aioredis, "from_url", lambda *a, **kw: client)
+    monkeypatch.setattr(state, "_redis", None)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    with pytest.raises(error):
+        asyncio.run(state.init())
+    assert client.scan_iter.call_count == expected_attempts
+    assert not state.enabled()
+    assert not asyncio.run(state.ping())
+    client.aclose.assert_awaited_once()
+    monkeypatch.delenv("REDIS_URL")
+    monkeypatch.delenv("REDIS_PASSWORD", raising=False)
+    assert asyncio.run(state.init()) == {}
+    assert asyncio.run(state.ping())

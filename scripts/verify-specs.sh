@@ -100,6 +100,8 @@ room_lifecycle_start() {
 }
 
 room_disconnect_cleanup() {
+  verify specs/room_hydration.qnt room_hydration_fixed allHold init 3
+  expect_violation specs/room_hydration.qnt room_hydration_before readyIncludesSavedRooms 2
   local expiry=specs/room_expiry.qnt
   verify "$expiry" room_expiry_fixed allHold init 4
   expect_violation "$expiry" room_expiry_before liveRoomSurvives 3
