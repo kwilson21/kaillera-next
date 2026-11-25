@@ -148,6 +148,7 @@ def test_authoritative_old_end_cannot_end_the_selected_current_match():
     const isGameRunning=()=>true, _isLateJoin=()=>false, _isPendingLateJoin=()=>false;
     const console={log:()=>{}}, _romBlob=null, _romBlobUrl=null, window={};
     const _sessionStopLateJoinPoll=()=>{}, _session={send:({type})=>events.push(type)};
+    const setNoticeMatch=matchId=>events.push(['notice-match', matchId]);
     const guardHostNavigation=active=>events.push(active);
     const showToast=()=>{}, hibernateEmulator=()=>{}, document={getElementById:()=>null};
     const dismissGameLoading=()=>{}, hideToolbar=()=>{}, _clearLateJoinRomPrompt=()=>{}, showOverlay=()=>{};
@@ -167,7 +168,7 @@ def test_authoritative_old_end_cannot_end_the_selected_current_match():
     actual = _run(f"{mocks}\n{on_end}\n{actions}")
     assert actual == {
         "afterStale": {"matchId": "match-b", "warning": "match-b", "events": []},
-        "matchId": None, "warning": None, "events": ["gameEnded", False, "stop"],
+        "matchId": None, "warning": None, "events": ["gameEnded", ["notice-match", None], False, "stop"],
     }
 
 
