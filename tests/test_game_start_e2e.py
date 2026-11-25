@@ -1004,7 +1004,7 @@ _RECORD_ENGINE_STARTS = """() => {
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_backup_copies_are_a_host_choice_for_the_room(browser, server_url, room, enabled):
+def test_dual_input_mode_is_a_host_choice_for_the_room(browser, server_url, room, enabled):
     host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host")
     guest = _open(browser, f"{server_url}/play.html?room={room}&name=Guest")
     joiner = None
@@ -1012,17 +1012,29 @@ def test_backup_copies_are_a_host_choice_for_the_room(browser, server_url, room,
         for page in (host, guest):
             page.evaluate(_RECORD_ENGINE_STARTS)
             _load_rom(page)
-        host.locator("#host-controls .advanced-options > summary").click()
-        option = host.get_by_role("checkbox", name=re.compile("backup copy", re.IGNORECASE))
+        summary = host.locator("#host-controls .advanced-options > summary")
+        summary.click()
+        option = host.get_by_role("checkbox", name="Dual input mode", exact=True)
         expect(option).not_to_be_checked()
         expect(guest.locator("#opt-dual-input")).to_be_hidden()
-        help_id = option.get_attribute("aria-describedby")
-        assert help_id
-        help_text = host.locator(f'[id="{help_id}"]')
+        info = host.get_by_role("button", name="About dual input mode", exact=True)
+        help_text = host.locator("#dual-input-hint")
+        expect(option).to_have_attribute("aria-describedby", "dual-input-hint")
+        expect(help_text).to_be_hidden()
+        info.hover()
         expect(help_text).to_be_visible()
-        expect(help_text).to_contain_text(re.compile(r"sooner|faster", re.IGNORECASE))
-        expect(help_text).to_contain_text(re.compile(r"spotty|unstable|unreliable", re.IGNORECASE))
-        expect(help_text).to_contain_text(re.compile(r"(double|twice).*controls", re.IGNORECASE))
+        expect(help_text).to_contain_text(re.compile("send input across two channels for optimal input latency", re.I))
+        summary.hover()
+        expect(help_text).to_be_hidden()
+        option.focus()
+        option.press("Tab")
+        expect(info).to_be_focused()
+        expect(help_text).to_be_visible()
+        info.press("Tab")
+        expect(help_text).to_be_hidden()
+        info.click()
+        expect(help_text).to_be_visible()
+        expect(option).not_to_be_checked()
         host.select_option("#mode-select", "streaming")
         expect(option).to_be_hidden()
         host.select_option("#mode-select", "lockstep")

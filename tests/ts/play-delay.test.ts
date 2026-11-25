@@ -202,6 +202,6 @@ test('the words beside a negotiated delay', () => {
   assert.equal(hostOptionsSummary(true, false, 'Fixed 3'), 'Resync on · ROM sharing off · Fixed 3');
   assert.equal(
     hostOptionsSummary(true, false, 'Fixed 3', true),
-    'Resync on · Backup copies on · ROM sharing off · Fixed 3',
+    'Resync on · Dual input on · ROM sharing off · Fixed 3',
   );
 });

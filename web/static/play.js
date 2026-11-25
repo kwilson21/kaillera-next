@@ -5211,6 +5211,35 @@
     }
   };
 
+  const wireDualInputHelp = () => {
+    const dualRow = document.getElementById('dual-input-option');
+    const dualInfo = document.getElementById('dual-input-info');
+    const dualHint = document.getElementById('dual-input-hint');
+    if (!dualRow || !dualInfo || !dualHint) return;
+    const showDualHint = (open) => {
+      dualHint.hidden = !open;
+      dualInfo.setAttribute('aria-expanded', String(open));
+    };
+    dualRow.addEventListener('pointerenter', (e) => {
+      if (e.pointerType === 'mouse') showDualHint(true);
+    });
+    dualRow.addEventListener('pointerleave', (e) => {
+      if (e.pointerType === 'mouse' && !dualInfo.matches(':focus-visible')) showDualHint(false);
+    });
+    dualInfo.addEventListener('focus', () => {
+      if (dualInfo.matches(':focus-visible')) showDualHint(true);
+    });
+    dualInfo.addEventListener('blur', () => showDualHint(false));
+    dualInfo.addEventListener('click', (e) => showDualHint(e.pointerType !== 'touch' || dualHint.hidden));
+
+    document.addEventListener('click', (e) => {
+      if (!dualHint.hidden && !dualRow.contains(e.target)) showDualHint(false);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !dualHint.hidden) showDualHint(false);
+    });
+  };
+
   const wireAdvancedSummaryStatus = () => {
     const optResync = document.getElementById('opt-resync');
     if (optResync) optResync.addEventListener('change', updateAdvancedSummaryStatuses);
@@ -5674,6 +5703,7 @@
       });
     }
     wireAdvancedSummaryStatus();
+    wireDualInputHelp();
 
     // The server supplies the clock and authenticates recovery; a phone's clock can be ahead.
     const savedHost = _identity.savedHost(0);

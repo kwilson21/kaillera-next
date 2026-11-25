@@ -184,17 +184,23 @@
                   ><input type="checkbox" id="opt-resync" checked /> Resync <span class="opt-hint">(auto)</span></label
                 >
               </div>
-              <div class="host-options-row">
+              <div class="host-options-row" id="dual-input-option">
                 <label>
                   <input type="checkbox" id="opt-dual-input" aria-describedby="dual-input-hint" />
-                  Send a backup copy of each move
+                  Dual input mode
                 </label>
-              </div>
-              <div id="dual-input-hint" class="opt-hint">
-                <p>On a spotty connection, other players may see your moves sooner. Each move still happens once.</p>
-                <p>
-                  In our tests with 3 or 4 players, backups roughly doubled the data each player sent for controls. That
-                  was about 1–2 extra MB per minute.
+                <button
+                  type="button"
+                  id="dual-input-info"
+                  aria-label="About dual input mode"
+                  aria-describedby="dual-input-hint"
+                  aria-controls="dual-input-hint"
+                  aria-expanded="false"
+                >
+                  ⓘ
+                </button>
+                <p id="dual-input-hint" role="tooltip" hidden>
+                  Send input across two channels for optimal input latency.
                 </p>
               </div>
             </div>

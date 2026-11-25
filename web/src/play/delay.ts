@@ -124,7 +124,7 @@ export const hostOptionsSummary = (
   delayText: string,
   dualInputOn = false,
 ): string =>
-  `Resync ${resyncOn ? 'on' : 'off'} · ${dualInputOn ? 'Backup copies on · ' : ''}ROM sharing ${romSharingOn ? 'on' : 'off'} · ${delayText}`;
+  `Resync ${resyncOn ? 'on' : 'off'} · ${dualInputOn ? 'Dual input on · ' : ''}ROM sharing ${romSharingOn ? 'on' : 'off'} · ${delayText}`;
 
 /**
  * The hint once a match has negotiated its delay: the room's delay when it is
