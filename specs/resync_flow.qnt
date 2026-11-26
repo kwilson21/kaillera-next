@@ -870,3 +870,54 @@ module resync_flow_current {
     CATCH_UP = true,
   ).*
 }
+
+// A buffered snapshot cannot replace replay until its install boundary is
+// open. Waiting for a future frame does not spend the replay deadline.
+module resync_replay_boundary {
+  const START_BEFORE_TARGET: bool
+  pure val LIMIT = 2
+  var ready: bool
+  var waited: int
+  var replaying: bool
+  var applied: bool
+
+  action init = all {
+    ready' = false, waited' = 0, replaying' = true, applied' = false,
+  }
+  action reachBoundary = all {
+    ready' = true, waited' = waited, replaying' = replaying, applied' = applied,
+  }
+  action completeReplay = all {
+    ready' = ready, waited' = waited, replaying' = false, applied' = applied,
+  }
+  action tick = {
+    val service = ready or START_BEFORE_TARGET
+    val expired = replaying and service and waited == LIMIT
+    all {
+      ready' = ready,
+      waited' = if (replaying and service and waited < LIMIT) waited + 1 else waited,
+      replaying' = (replaying and not(expired)),
+      applied' = (applied or (ready and (not(replaying) or expired))),
+    }
+  }
+  action step = any { reachBoundary, completeReplay, tick }
+
+  val futureStateHasNoReplayDeadline = ready or waited == 0
+
+  run futureStateKeepsReplayTest =
+    init.then(tick).then(tick).then(tick)
+      .expect(replaying == not(START_BEFORE_TARGET) and not(applied))
+      .then(reachBoundary)
+      .then(tick)
+      .expect(applied == START_BEFORE_TARGET)
+      .then(tick).then(tick)
+      .expect(applied and not(replaying))
+}
+
+module resync_replay_boundary_before {
+  import resync_replay_boundary(START_BEFORE_TARGET = true).*
+}
+
+module resync_replay_boundary_fixed {
+  import resync_replay_boundary(START_BEFORE_TARGET = false).*
+}

@@ -456,9 +456,12 @@ $QUINT run "$PAUSE" --main=late_join_pause_before_resync --invariant=holdBeforeT
 FLOW=specs/resync_flow.qnt
 $QUINT typecheck "$FLOW"
 for variant in resync_flow_before resync_flow_any_answer resync_flow_frame_named resync_flow_drop_older \
-  resync_flow_asked_from resync_flow_unnumbered resync_flow_rewinds resync_flow_current; do
+  resync_flow_asked_from resync_flow_unnumbered resync_flow_rewinds resync_flow_current \
+  resync_replay_boundary_before resync_replay_boundary_fixed; do
   $QUINT test "$FLOW" --main="$variant" --backend="$BACKEND"
 done
+$QUINT run "$FLOW" --main=resync_replay_boundary_fixed --invariant=futureStateHasNoReplayDeadline \
+  --max-samples=2000 --max-steps=10 --backend="$BACKEND"
 # A guest stopped at its target has a deadline, a state no newer than the
 # last one applied is never applied, and a request that is out can always
 # end. The last was violated before the request had a deadline of its own

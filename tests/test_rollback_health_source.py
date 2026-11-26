@@ -856,7 +856,7 @@ def test_a_state_behind_the_guest_is_caught_up_from_not_rewound_to():
     # The decision is the proved one, in both places it is taken.
     assert src.count("window.KNCore.catchUp.catchUpStep(") == 2
     tick_refuse = src[src.index("SYNC-LATE-ANSWER-DROPPED f=${_frameNum}") :]
-    tick_refuse = tick_refuse[: tick_refuse.index("const syncApplyBlocked = ")]
+    tick_refuse = tick_refuse[: tick_refuse.index("const atSyncBoundary =")]
     assert (
         "window.KNCore.catchUp.catchUpStep(_pendingResyncState.frame, _frameNum, MAX_CATCH_UP_FRAMES) === 'refuse'"
         in tick_refuse
@@ -1166,9 +1166,9 @@ def test_a_late_answer_that_would_take_the_guest_back_is_dropped():
     # After the target's deadline gives the target up, before either branch
     # holds or applies anything.
     assert tick.index("COORD-SYNC-TIMEOUT target=") < drop_at
-    assert drop_at < tick.index("const syncApplyBlocked = _pendingResyncState ? _replayBlocksSyncApply() : false;")
-    assert drop_at < tick.index("if (_frameNum >= _syncTargetFrame) {")
-    assert drop_at < tick.index("} else if (_pendingResyncState && !syncApplyBlocked) {")
+    hold_at = tick.index("if (pending && atSyncBoundary) {")
+    replay_at = tick.index("else if (!_replayBlocksSyncApply()) {")
+    assert drop_at < hold_at < replay_at
     # The stale-state check stays.
     assert "explicit sync discarded: stale frame=${frame} <= lastApplied=${_lastAppliedSyncHostFrame}" in src
 

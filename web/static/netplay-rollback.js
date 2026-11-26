@@ -18345,71 +18345,25 @@
       if (then === 'askAgain') _askAgainForOwedResync();
       else if (then === 'stopAsking') _stopAskingForOwedResync('its answers came too late to catch up from');
     }
-    const syncApplyBlocked = _pendingResyncState ? _replayBlocksSyncApply() : false;
-    if (_syncTargetFrame > 0) {
-      if (_frameNum >= _syncTargetFrame) {
-        if (_pendingResyncState && syncApplyBlocked) {
-          // Replay in flight: apply on a later tick (bounded, see above).
-        } else if (
-          _pendingResyncState &&
-          _pendingResyncState.frame > _frameNum &&
-          _pendingResyncState.frame - _frameNum <= SYNC_HOLD_MAX_FRAMES
-        ) {
-          // The state is from a later frame than the target (a newer push
-          // replaced a held one, or the capture ran late): move the target to
-          // it, as the non-coordinated branch below does. Same deadline.
-          _pendingResyncState.held = true;
-          _syncTargetFrame = _pendingResyncState.frame;
-          if (!_syncTargetDeadlineAt) _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
-          if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-          _syncLog(`sync held: state frame ${_syncTargetFrame} is past target, f=${_frameNum}`);
-        } else if (_pendingResyncState) {
-          // State arrived on time — apply at the agreed frame
-          const pending = _pendingResyncState;
-          _pendingResyncState = null;
-          if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-          _syncTargetFrame = -1;
-          _syncTargetDeadlineAt = 0;
-          applySyncState(
-            pending.bytes,
-            pending.frame,
-            pending.fromProactive,
-            pending.recoveryId,
-            pending.extras,
-            pending.answerFor,
-            pending.answerScope,
-            pending.proofFor,
-          );
-        } else if (_runSubstate !== RUN_AWAITING_RESYNC) {
-          // Reached target frame but state not here yet — stall until it arrives
-          _runSubstate = RUN_AWAITING_RESYNC;
-          _awaitingResyncAt = performance.now();
-          _syncLog(`coord stall at frame ${_frameNum} (target=${_syncTargetFrame}) — waiting for state`);
-        }
-        // _awaitingResync already true: stall check below keeps loop paused;
-        // next tick that has _pendingResyncState will apply it above and resume.
-      }
-      // _frameNum < _syncTargetFrame: keep running, hold buffered state until target
-    } else if (_pendingResyncState && !syncApplyBlocked) {
-      // Non-coordinated (proactive push, reconnect, visibility/network-change).
-      // A state from a frame this peer hasn't reached yet is held until it
-      // gets there, as a coordinated sync would be. Applied early, the loaded
-      // state was a frame ahead of the counter, which the counter never caught
-      // up with: `sync #N applied (frame X+1 -> X)` started a permanent desync
-      // in the two-player run on PR #37. Jumping the counter forward instead
-      // would skip this peer's input for the frames in between, which the
-      // other peers have predicted. The deadline is the coordinated one
-      // (COORD-SYNC-TIMEOUT above), after which the state applies here.
-      const pending = _pendingResyncState;
+    const pending = _pendingResyncState;
+    const atSyncBoundary = _syncTargetFrame <= 0 || _frameNum >= _syncTargetFrame;
+    if (pending && atSyncBoundary) {
       const ahead = pending.frame != null ? pending.frame - _frameNum : 0;
-      if (!pending.held && ahead > 0 && ahead <= SYNC_HOLD_MAX_FRAMES) {
+      if (ahead > 0 && ahead <= SYNC_HOLD_MAX_FRAMES && (_syncTargetFrame > 0 || !pending.held)) {
+        // Wait for the snapshot's frame to avoid skipping local inputs. A
+        // replacement ahead of a coordinated target keeps the original deadline.
         pending.held = true;
         _syncTargetFrame = pending.frame;
-        _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
+        if (!_syncTargetDeadlineAt) _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
+        if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
+        _syncApplyDeferredAt = 0;
         _syncLog(`sync held: state frame ${pending.frame} is ${ahead} ahead of f=${_frameNum}, applying there`);
-      } else {
+      } else if (!_replayBlocksSyncApply()) {
+        // Only an install at this boundary can supersede pending replay.
         _pendingResyncState = null;
         if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
+        _syncTargetFrame = -1;
+        _syncTargetDeadlineAt = 0;
         applySyncState(
           pending.bytes,
           pending.frame,
@@ -18420,6 +18374,13 @@
           pending.answerScope,
           pending.proofFor,
         );
+      }
+    } else {
+      _syncApplyDeferredAt = 0;
+      if (_syncTargetFrame > 0 && atSyncBoundary && _runSubstate !== RUN_AWAITING_RESYNC) {
+        _runSubstate = RUN_AWAITING_RESYNC;
+        _awaitingResyncAt = performance.now();
+        _syncLog(`coord stall at frame ${_frameNum} (target=${_syncTargetFrame}) — waiting for state`);
       }
     }
 
