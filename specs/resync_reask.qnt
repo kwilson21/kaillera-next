@@ -377,3 +377,41 @@ module resync_reask_fixed {
     ASK_AGAIN = true, HOLD_WHILE_DECODING = true, GUARD_LETS_GO = false, COORDINATED_OWES = true
   ).*
 }
+
+// The request deadline keeps running when the simulation scheduler has
+// no tick to offer. Snapshot settlement still needs a frame boundary.
+module resync_retry_clock {
+  const TIED_TO_FRAME: bool
+  pure val LIMIT = 2
+  pure val MAX_RETRIES = 2
+  var elapsed: int
+  var age: int
+  var asks: int
+
+  action init = all { elapsed' = 0, age' = 0, asks' = 0 }
+
+  action clockPulse(frameTick: bool): bool = {
+    val service = (frameTick or not(TIED_TO_FRAME)) and asks <= MAX_RETRIES
+    val expired = service and age + 1 >= LIMIT
+    all {
+      elapsed' = elapsed + 1,
+      age' = if (expired) 0 else if (service) age + 1 else age,
+      asks' = if (expired) asks + 1 else asks,
+    }
+  }
+  action step = any { clockPulse(true), clockPulse(false) }
+
+  val retriesFollowRecoveryClock = asks == (if (elapsed / LIMIT > MAX_RETRIES) MAX_RETRIES + 1 else elapsed / LIMIT)
+
+  run aStoppedFrameLoopStillGivesUpTest =
+    init.then(6.reps(_ => clockPulse(false)))
+      .expect(asks == if (TIED_TO_FRAME) 0 else MAX_RETRIES + 1)
+}
+
+module resync_retry_clock_before {
+  import resync_retry_clock(TIED_TO_FRAME = true).*
+}
+
+module resync_retry_clock_fixed {
+  import resync_retry_clock(TIED_TO_FRAME = false).*
+}

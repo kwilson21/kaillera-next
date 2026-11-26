@@ -854,12 +854,11 @@ def test_a_resync_request_that_is_out_has_a_deadline():
     assert "const _SYNC_REQUEST_COOLDOWN_MS = 5000;" in src
     assert "const SYNC_COORD_TIMEOUT_MS = 3000;" in src
     tick_idx = src.index("const tick = () => {")
-    assert "_checkResyncRequestDeadline();" in src[tick_idx : tick_idx + 1200]
-    # The page's own freeze does not count against a request that is out.
-    credit = src[src.index("const _creditLocalFreeze = () => {") :]
-    credit = credit[: credit.index("\n  };\n")]
-    assert "if (_resyncRequestInFlight) _resyncRequestSentAt = Math.min(now, _resyncRequestSentAt + gap);" in credit
-    assert src.index("_creditLocalFreeze();", tick_idx) < src.index("_checkResyncRequestDeadline();", tick_idx)
+    assert "_checkResyncRequestDeadline();" not in src[tick_idx : tick_idx + 1200]
+    timer = src[src.index("const _scheduleResyncDeadline = (requestId) => {") : tick_idx]
+    assert timer.index("_resyncRequestSentAt + lateBy") < timer.index("_checkResyncRequestDeadline();")
+    assert "_scheduleResyncDeadline(_resyncRequestId);" in begin
+    assert "_cancelResyncDeadline();" in src[src.index("const stopSync = () => {") :]
 
 
 def test_a_state_behind_the_guest_is_caught_up_from_not_rewound_to():

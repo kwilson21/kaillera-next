@@ -120,10 +120,9 @@ def test_the_skip_is_the_proved_rule_and_the_watch_starts_as_the_state_is_taken(
     # The watch is set before the state is read, not after it is sent.
     # Starts changed when a correction is owed at the take (OWED_AT_TAKE),
     # judged by the proved rule, never for a sealed capture.
-    assert (
-        "_followUpWatches.set(sid, { frame, delay, changed: owed, delivered: false });"
-        in push
-    )
+    assert "const watch = { frame, delay, changed: owed, delivered: false };" in push
+    assert "_followUpWatches.set(sid, watch);" in push
+    assert "captureWatches.set(sid, watch);" in push
     assert "window.KNCore.syncFollowUp.correctionOwed(" in push
     assert "!capturedPublication &&" in push
     # With the delay that state ran under, the proved rule's.
@@ -536,20 +535,20 @@ def test_the_newest_answer_token_is_per_peer_state():
     assert "_directAnswerNewest.clear();" in src
 
 
-def test_a_socket_follow_up_that_did_not_go_out_is_retried_within_the_bound():
-    # The socket stays reachable, so put back unchanged it would be taken
-    # again every tick: each retry counts against SYNC_FOLLOW_UP_MAX (I1).
+def test_unsent_follow_ups_count_against_the_bound_on_reachable_routes():
+    # A rejected capture on a reachable route could be taken again every tick.
+    # A closed route instead waits for reachability before trying again.
     src = LOCKSTEP_JS.read_text()
     dispatch = src[src.index("const _dispatchScheduledSyncs = (isConfirmed) => {") :]
     dispatch = dispatch[: dispatch.index("\n  };\n")]
-    socket = dispatch.index(
-        "if (r.transport === 'socket' && (skipped == null || skipped.includes(r.targetSid))) {"
+    reachable = dispatch.index(
+        "if ((skipped == null || skipped.includes(r.targetSid)) && reachable(r)) {"
     )
-    channel = dispatch.index(
+    closed = dispatch.index(
         "} else if (skipped === null || skipped?.includes(r.targetSid)) {"
     )
-    assert socket < channel
-    branch = dispatch[socket:channel]
+    assert reachable < closed
+    branch = dispatch[reachable:closed]
     assert "const n = (r.followUp || 0) + 1;" in branch
     assert "if (n <= SYNC_FOLLOW_UP_MAX) {" in branch
     assert "requeue(r, n, null);" in branch
@@ -571,6 +570,6 @@ def test_an_in_flight_follow_up_yields_to_a_pending_direct_answer():
     )
     pending = after.index("if (_directAnswerNewest.has(r.targetSid)) {")
     assert replaced < pending
-    assert pending < after.index("if (r.transport === 'socket' && (skipped == null")
+    assert pending < after.index("if ((skipped == null || skipped.includes(r.targetSid)) && reachable(r))")
     assert pending < after.index("requeue(r, r.followUp || 0, null);")
     assert pending < after.index("requeue(r, n, _followUpWatches.get(r.targetSid))")

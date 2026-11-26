@@ -555,3 +555,128 @@ module sync_follow_up_owed_unflagged {
 module sync_follow_up_fixed {
   import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = true, DELAY_AWARE = true, OWED_AT_TAKE = true).*
 }
+
+// Selecting a send and reading native state are separated by transfer admission.
+// Replay can start between them, including while another transfer drains.
+module sync_capture_boundary {
+  const FENCE: bool
+  var replaying: bool
+  var admitted: bool
+  var captured: bool
+  var capturedDuringReplay: bool
+
+  action init = all {
+    replaying' = false,
+    admitted' = false,
+    captured' = false,
+    capturedDuringReplay' = false,
+  }
+
+  action replay(active: bool): bool = all {
+    replaying' = active,
+    admitted' = admitted,
+    captured' = captured,
+    capturedDuringReplay' = capturedDuringReplay,
+  }
+
+  action admit = all {
+    not(admitted),
+    admitted' = true,
+    replaying' = replaying,
+    captured' = captured,
+    capturedDuringReplay' = capturedDuringReplay,
+  }
+
+  action attemptCapture = all {
+    admitted,
+    admitted' = false,
+    replaying' = replaying,
+    captured' = not(FENCE and replaying),
+    capturedDuringReplay' = (capturedDuringReplay or (replaying and not(FENCE))),
+  }
+
+  action step = any { replay(true), replay(false), admit, attemptCapture }
+
+  val onlyStableSnapshots = not(capturedDuringReplay)
+
+  run queuedAnswerDuringReplayTest =
+    init.then(admit).then(replay(true)).then(attemptCapture)
+      .expect(captured == not(FENCE) and onlyStableSnapshots == FENCE)
+      .then(replay(false)).then(admit).then(attemptCapture)
+      .expect(captured)
+}
+
+module sync_capture_boundary_before {
+  import sync_capture_boundary(FENCE = false).*
+}
+
+module sync_capture_boundary_fixed {
+  import sync_capture_boundary(FENCE = true).*
+}
+
+// Compression and per-recipient queueing happen before the first wire byte.
+// An invalidated payload is refused at handoff. An already-started channel
+// transfer finishes its framing and can still be corrected by a follow-up.
+module sync_publication_boundary {
+  const FENCE: bool
+  var phase: str
+  var invalidated: bool
+  var publishedInvalid: bool
+
+  action init = all {
+    phase' = "captured",
+    invalidated' = false,
+    publishedInvalid' = false,
+  }
+
+  action invalidate = all {
+    phase != "done",
+    phase' = phase,
+    invalidated' = true,
+    publishedInvalid' = publishedInvalid,
+  }
+
+  action move(from: str, nextPhase: str): bool = all {
+    phase == from,
+    phase' = nextPhase,
+    invalidated' = invalidated,
+    publishedInvalid' = publishedInvalid,
+  }
+
+  action start = all {
+    phase == "queued",
+    phase' = if (FENCE and invalidated) "done" else "sending",
+    invalidated' = invalidated,
+    publishedInvalid' = (invalidated and not(FENCE)),
+  }
+
+  action step = any {
+    invalidate,
+    move("captured", "queued"),
+    start,
+    move("sending", "done"),
+    move("done", "done"),
+  }
+
+  val onlyCurrentSnapshotsStart = not(publishedInvalid)
+
+  run invalidationBeforeHandoffTest =
+    init.then(invalidate).then(move("captured", "queued")).then(start)
+      .expect(onlyCurrentSnapshotsStart == FENCE)
+
+  run invalidationOnChainTest =
+    init.then(move("captured", "queued")).then(invalidate).then(start)
+      .expect(onlyCurrentSnapshotsStart == FENCE)
+
+  run startedTransferDrainsTest =
+    init.then(move("captured", "queued")).then(start).then(invalidate)
+      .then(move("sending", "done")).expect(onlyCurrentSnapshotsStart and phase == "done")
+}
+
+module sync_publication_boundary_before {
+  import sync_publication_boundary(FENCE = false).*
+}
+
+module sync_publication_boundary_fixed {
+  import sync_publication_boundary(FENCE = true).*
+}

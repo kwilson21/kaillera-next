@@ -336,6 +336,8 @@ input_transport() {
 
 resync_reask() {
   local REASK=specs/resync_reask.qnt
+  verify "$REASK" resync_retry_clock_fixed retriesFollowRecoveryClock init 8
+  expect_violation "$REASK" resync_retry_clock_before retriesFollowRecoveryClock 3
   # A lost request asked again at its deadline twice and then given up: 10 steps.
   verify "$REASK" resync_reask_fixed allHold init 10
   verify "$REASK" resync_reask_unguarded anOwedResyncIsNotForgotten
@@ -374,6 +376,10 @@ sync_follow_up() {
   # correction ran: 6 steps. Today's rule as well as the delay rule alone.
   expect_violation "$FOLLOW" sync_follow_up_owed_unflagged theGuestEndsOnTheHostsState 6
   expect_violation "$FOLLOW" sync_follow_up_delay_unaware theGuestEndsOnTheHostsState 6
+  verify "$FOLLOW" sync_capture_boundary_fixed onlyStableSnapshots init 8
+  expect_violation "$FOLLOW" sync_capture_boundary_before onlyStableSnapshots 4
+  verify "$FOLLOW" sync_publication_boundary_fixed onlyCurrentSnapshotsStart init 8
+  expect_violation "$FOLLOW" sync_publication_boundary_before onlyCurrentSnapshotsStart 4
 }
 
 rom_at_start() {

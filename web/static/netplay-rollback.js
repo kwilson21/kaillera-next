@@ -7568,6 +7568,39 @@
     else if (step === 'askAgain') _askAgainForOwedResync();
     else if (step === 'stopAsking') _stopAskingForOwedResync('its asks again went unanswered');
   };
+  const RESYNC_DEADLINE_POLL_MS = 250;
+  let _resyncDeadlineTimer = null;
+  const _cancelResyncDeadline = () => {
+    if (_resyncDeadlineTimer !== null) clearTimeout(_resyncDeadlineTimer);
+    _resyncDeadlineTimer = null;
+  };
+
+  const _scheduleResyncDeadline = (requestId) => {
+    _cancelResyncDeadline();
+    const dueAt = performance.now() + RESYNC_DEADLINE_POLL_MS;
+    _resyncDeadlineTimer = setTimeout(() => {
+      if (_resyncRequestId !== requestId) return;
+      _resyncDeadlineTimer = null;
+      if (!_resyncRequestInFlight) return;
+      // Credit a stalled browser, measured against this timer's own wakeup.
+      // Hidden pages can process messages despite intentionally slower timers.
+      const now = performance.now();
+      const lateBy = now - dueAt;
+      if (lateBy >= LOCAL_FREEZE_CREDIT_MS && !(typeof document !== 'undefined' && document.hidden)) {
+        _resyncRequestSentAt = Math.min(now, _resyncRequestSentAt + lateBy);
+      }
+      if (
+        _phase === PHASE_RUNNING &&
+        !_checkpoint?.busy &&
+        !(_config?.matchReturn && !_config.matchReturn.playing) &&
+        !(_playerSlot > 0 && !_isSpectator && _lastUsersUpdated?.hostReturnDeadline && !hostGameConnected())
+      ) {
+        _checkResyncRequestDeadline();
+      }
+      if (_resyncRequestInFlight && _resyncRequestId === requestId) _scheduleResyncDeadline(requestId);
+    }, RESYNC_DEADLINE_POLL_MS);
+  };
+
   const _stopAskingForOwedResync = (why) => {
     const asks = _owedResyncAsksAgain;
     _owedResync = false;
@@ -8607,6 +8640,7 @@
     _resyncRequestSentAt = performance.now();
     _resyncRequestId++;
     _resyncRequestAt = at;
+    _scheduleResyncDeadline(_resyncRequestId);
     if (!again) {
       _owedResync = true;
       _owedResyncAsksAgain = 0;
@@ -17521,6 +17555,7 @@
 
   const stopSync = () => {
     _phase = PHASE_STOPPED;
+    _cancelResyncDeadline();
     _endCatchUp(window.EJS_emulator?.gameManager?.Module ?? {}, 'the match stopped');
     // Every connection is about to close; each machine is told, and its per-match state goes.
     _peerDriver()?.sessionEnded();
@@ -17989,16 +18024,15 @@
           _syncLog(`coord sync to ${r.targetSid}: superseded by a newer direct answer, not re-queued`);
           return;
         }
-        if (r.transport === 'socket' && (skipped == null || skipped.includes(r.targetSid))) {
-          // Not sent over the socket (a state too large for it falls back to
-          // a channel that is down). The socket stays reachable, so put back
-          // unchanged it would be taken again every tick: count it against
-          // SYNC_FOLLOW_UP_MAX instead (I1; from #307).
+        // An unsent capture on a reachable route could be taken again every
+        // tick. Count it against the follow-up limit; a closed route waits
+        // for reachability instead.
+        if ((skipped == null || skipped.includes(r.targetSid)) && reachable(r)) {
           const n = (r.followUp || 0) + 1;
           if (n <= SYNC_FOLLOW_UP_MAX) {
-            _syncLog(`coord sync over the socket to ${r.targetSid} did not go out; re-queued (${n})`);
+            _syncLog(`coord sync to ${r.targetSid} did not go out; re-queued (${n})`);
             requeue(r, n, null);
-          } else _syncLog(`coord sync over the socket to ${r.targetSid} did not go out; follow-ups exhausted`);
+          } else _syncLog(`coord sync to ${r.targetSid} did not go out; follow-ups exhausted`);
         } else if (skipped === null || skipped?.includes(r.targetSid)) {
           // A channel can close while the state is being compressed; the
           // send then skips that target. Put its request back unchanged so
@@ -18184,10 +18218,6 @@
     // tick before the throttle can end (specs/tick_deadlines.qnt): a page
     // that froze while held back would drop a peer that never stopped sending.
     if (_pacingThrottleStartAt > 0) _pacingThrottleStartAt = Math.min(now, _pacingThrottleStartAt + gap);
-    // A request for a resync that went out before the freeze: the answer
-    // could not have been handled while this page stood still, so the
-    // freeze does not count against it.
-    if (_resyncRequestInFlight) _resyncRequestSentAt = Math.min(now, _resyncRequestSentAt + gap);
     // The escalation push's clocks: the guest's answer could not be handled
     // while this page stood still (specs/escalation_push.qnt, CREDIT_FREEZE).
     _recovery.freeze(gap, now);
@@ -18222,7 +18252,6 @@
     _creditLocalFreeze();
     if (!_checkpoint?.busy) _checkReconnectAnswerDebt();
     _serviceReconnectHostAnswers();
-    _checkResyncRequestDeadline();
     _checkOverduePushes();
     _flushResendLogs();
     // Deadline-only pass: a tick that stalls returns before the per-frame
@@ -21432,6 +21461,13 @@
           return null;
         }
         try {
+          // Transfer admission can resume between replay slices, when the
+          // live core still contains intermediate replay state.
+          if (!capturedPublication && gm.Module?._kn_get_replay_depth?.() > 0) {
+            _syncLog(`sync capture skipped: native replay active at frame ${_frameNum}`);
+            notSent('native replay is active', attempts);
+            return null;
+          }
           if (!_admitReconnectNativeCapture(options, gm.Module)) {
             notSent('protected reconnect input is not yet confirmed', attempts);
             return null;
@@ -21470,9 +21506,9 @@
           const delay = watchFor.length
             ? window.KNCore.syncFollowUp.delayOfStateAt(frame, DELAY_FRAMES, _ranBeforeDelayChange)
             : DELAY_FRAMES;
-          // Taken while a correction is still owed, the state is already not
-          // this page's, and the input behind it was fed before this watch:
-          // the watch starts changed (specs/sync_follow_up.qnt, OWED_AT_TAKE).
+          // A pending correction can still change a state taken between replays,
+          // and the input behind it was fed before this watch. The watch starts
+          // changed (specs/sync_follow_up.qnt, OWED_AT_TAKE).
           // A captured publication was sealed with none owed (capture-incident.ts).
           const owedMod = gm.Module;
           const owed =
@@ -21483,8 +21519,11 @@
               owedMod?._kn_peek_pending_rollback?.() ?? -1,
               !!_workerCoprocPending?.deferred,
             );
+          const captureWatches = new Map();
           for (const sid of watchFor) {
-            _followUpWatches.set(sid, { frame, delay, changed: owed, delivered: false });
+            const watch = { frame, delay, changed: owed, delivered: false };
+            _followUpWatches.set(sid, watch);
+            captureWatches.set(sid, watch);
             _syncLog(
               `SYNC-FOLLOW-UP-WATCH target=${sid} frame=${frame} delay=${delay} owed=${owed ? 1 : 0}: sent unconfirmed`,
             );
@@ -21496,6 +21535,14 @@
           const socketTarget = targetSid
             ? { sid: targetSid, peer: _peers[targetSid], epoch: _syncQueueEpoch, gen: _syncQueueGen[targetSid] || 0 }
             : null;
+          const mayPublish = (target) => {
+            if (!mayDeliver(target)) return false;
+            // Older cores without rollback observability conservatively start
+            // watches as changed. They retain their existing follow-up path.
+            if (!owedMod?._kn_get_replay_depth || !captureWatches.get(target.sid)?.changed) return true;
+            _syncLog(`SYNC-CAPTURE-INVALIDATED target=${target.sid} frame=${frame} before handoff`);
+            return false;
+          };
 
           if (capturedPublication) {
             const target = targets[0];
@@ -21606,6 +21653,7 @@
             const b64KB = Math.round(encoded.data.length / 1024);
             const wireKB = Math.round(encoded.compressedSize / 1024);
             if (encoded.data.length <= SOCKET_SYNC_B64_SOFT_LIMIT) {
+              if (!mayPublish(socketTarget)) return [targetSid];
               _signalSocket.emit('data-message', {
                 type: 'sync-state-socket',
                 targetSid,
@@ -21644,7 +21692,7 @@
                 isProactive,
                 requestIds,
                 attempts,
-                mayDeliver,
+                mayPublish,
                 extras,
                 !!options.reconnectDebt,
                 reconnectFenceCurrent,
@@ -21662,7 +21710,7 @@
               isProactive,
               requestIds,
               attempts,
-              mayDeliver,
+              mayPublish,
               extras,
               !!options.reconnectDebt,
               reconnectFenceCurrent,

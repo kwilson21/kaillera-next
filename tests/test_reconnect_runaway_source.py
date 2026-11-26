@@ -92,7 +92,7 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     assert "pushDeadlineStep(" in machine
     assert "_recovery.event(attempt," in pushes
     assert "_inputSettledBefore[slot]" not in pushes
-    assert "_checkResyncRequestDeadline();\n    _checkOverduePushes();" in src
+    assert "_serviceReconnectHostAnswers();\n    _checkOverduePushes();" in src
     assert "hardDisconnectPeer(sid, { tell: 'desync' });" in src
     assert "could not be brought back in sync and was dropped" in src
     # Every ask that goes out is counted.
@@ -339,7 +339,8 @@ def test_an_escalation_push_is_a_full_state_and_the_counter_is_per_match():
     ]
     # The host sends no deltas (sync_base): every state is full and no base
     # is kept for it.
-    assert "const toCompress = currentState;" in push[:12000]
+    push = push[: push.index("\n  };\n")]
+    assert "const toCompress = currentState;" in push
     assert "`sync-start:${frame}:${numChunks}:1:${isProactive ? '1' : '0'}${proofSuffix}`" in src
     assert "_setLastSyncState(currentState.slice(), 'pushSync')" not in src
     assert "toCompress[i] = currentState[i] ^ _lastSyncState[i];" not in src

@@ -644,9 +644,11 @@ $QUINT run "$INPUTS" --main=input_transport_current --invariant=noInputIsLostFor
 REASK=specs/resync_reask.qnt
 $QUINT typecheck "$REASK"
 for variant in resync_reask_current resync_reask_unguarded resync_reask_guard_lets_go resync_reask_coordinated_let_go \
-  resync_reask_fixed; do
+  resync_reask_fixed resync_retry_clock_before resync_retry_clock_fixed; do
   $QUINT test "$REASK" --main="$variant" --backend="$BACKEND"
 done
+$QUINT run "$REASK" --main=resync_retry_clock_fixed --invariant=retriesFollowRecoveryClock \
+  --max-samples=2000 --max-steps=12 --backend="$BACKEND"
 # With the fix: an owed resync is asked for again or given up visibly, the
 # deadline does not cut an answer being decoded, and the asks again are
 # bounded. Today the deadline let the request go and asked nothing
@@ -688,6 +690,19 @@ done
 # today's sync_follow_up_delay_unaware; owedAtTakeTest).
 $QUINT run "$FOLLOW" --main=sync_follow_up_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
+# Async transfer admission can reach the native capture during a replay.
+for variant in sync_capture_boundary_before sync_capture_boundary_fixed; do
+  $QUINT test "$FOLLOW" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$FOLLOW" --main=sync_capture_boundary_fixed --invariant=onlyStableSnapshots \
+  --max-samples=10000 --max-steps=20 --backend="$BACKEND"
+
+for variant in sync_publication_boundary_before sync_publication_boundary_fixed; do
+  $QUINT test "$FOLLOW" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$FOLLOW" --main=sync_publication_boundary_fixed --invariant=onlyCurrentSnapshotsStart \
+  --max-samples=10000 --max-steps=15 --backend="$BACKEND"
 
 # ── A catch-up waiting on a hole after a reconnect ────────────────────────
 WAIT=specs/catch_up_wait.qnt
