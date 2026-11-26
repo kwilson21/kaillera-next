@@ -536,10 +536,19 @@
         "specs/sync_follow_up.qnt"
       ]
     },
+    "escalation-clock": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _armEscalationClock =",
+      "line": 5609,
+      "coverage": [
+        "tests/ts/recovery-delivery.test.ts",
+        "specs/escalation_push.qnt"
+      ]
+    },
     "guest-coordinated-hold-clock": {
       "path": "web/static/netplay-rollback.js",
       "anchor": "const _armSyncTarget =",
-      "line": 9127,
+      "line": 9165,
       "coverage": [
         "tests/ts/resync-replay-boundary.test.ts",
         "specs/resync_flow.qnt"
@@ -1147,12 +1156,12 @@
         "fr": "FR-recovery",
         "dp": "DP-pacing",
         "kind": "necessary",
-        "mechanism": "Frame ticks still service protected reconnect and verified-checkpoint recovery. A pacing timeout can mark a peer phantom and end its recovery attempt. Coordinated installation observes frame progression. Host escalation still uses tick freeze credit. Guest hold expiry runs on a recovery-owned timer.",
+        "mechanism": "Frame ticks still service protected reconnect and verified-checkpoint recovery. A pacing timeout can mark a peer phantom and end its recovery attempt. Coordinated installation observes frame progression. Host escalation delivery deadlines and guest hold expiry run on recovery-owned timers.",
         "evidence": [
           "tick",
-          "freeze-credit",
-          "recovery-request",
+          "recovery-apply",
           "coordinated-capture-clock",
+          "escalation-clock",
           "guest-coordinated-hold-clock"
         ]
       }

@@ -756,6 +756,9 @@ done
 
 # ── The escalation push as a transfer that takes time ────────────────────
 ESCP=specs/escalation_push.qnt
+for variant in escalation_clock_before escalation_clock_fixed; do
+  $QUINT test "$ESCP" --main="$variant" --backend="$BACKEND"
+done
 $QUINT typecheck "$ESCP"
 # Before #286's second round, its second and third rounds, and the fix with
 # each part left out alone (queuedBehindTest, progressingTest, twoAheadTest,
