@@ -175,6 +175,12 @@
  *   then closes the old selected channel and observes ordinary reconnection.
  *   It must see a genuine outage-induced split and convergence of both guests.
  *
+ * LATE_JOIN=1: start with two or three fighters, then admit the final
+ * controller slot during the battle. Require per-guest finalized hashes,
+ * applied inputs, and the complete roster around the admission. With
+ * LATE_JOIN_DROP_STATE=1, close the joiner's signaling at the first state
+ * delivery and require the joiner to reconnect and complete admission.
+ *
  * SCREEN_SIZE: the core's render size (default 320x240, the core's own
  *   default is 640x480). Four emulators on software GL are what stops pages
  *   for seconds in a cloud container; a quarter of the pixels is a quarter
@@ -208,19 +214,24 @@
  */
 import { chromium, webkit } from 'playwright';
 import fs from 'fs';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { requireCurrentBundle } from './bundle-check.mjs';
 import { addNetworkInitScript } from './rb-page-network.mjs';
 import { catchUpHoleInput } from './directional-input-gate.mjs';
 import { observeCheckpoint } from './checkpoint-observer.mjs';
 import { installNativeInputObserver } from './native-input-observer.mjs';
-import { appliedForTag, joinInputAgreement, joinStateFrame } from './join-input-check.mjs';
+import { appliedForTag, joinHashAgreement, joinInputAgreement, joinStateFrame } from './join-input-check.mjs';
 import { trackHashLag, unrecordedIn } from './hash-lag.mjs';
 import { heldPredictionAfterReset } from './drop-link-check.mjs';
 
 const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
 const PLAYERS = Number(process.env.PLAYERS || 4);
+const LATE_JOIN = process.env.LATE_JOIN === '1';
+const LATE_JOIN_DROP_STATE = process.env.LATE_JOIN_DROP_STATE === '1';
+const STARTERS = LATE_JOIN ? PLAYERS - 1 : PLAYERS;
+const JOIN_WINDOW = 150;
 const LAT = Number(process.env.LAT || 50);
 const JITTER = Number(process.env.JITTER || 0);
 const LINK_KBPS = Number(process.env.LINK_KBPS || 0);
@@ -287,6 +298,9 @@ if (
   fail(`ROSTER_HOLD_SLOT=${process.env.ROSTER_HOLD_SLOT} invalid: a guest's slot other than the removed one`);
 if (!ROM || !fs.existsSync(ROM)) fail('KN_ROM must name the ROM file');
 if (![3, 4].includes(PLAYERS)) fail(`PLAYERS=${process.env.PLAYERS} invalid: 3 or 4`);
+if (LATE_JOIN_DROP_STATE && !LATE_JOIN) fail('LATE_JOIN_DROP_STATE requires LATE_JOIN=1');
+if (LATE_JOIN && (MISSING_RECIPIENT || FOLLOW_UP_RECIPIENT || CATCH_UP_MS || RECOVERY_BYSTANDER || DROP_LINK))
+  fail('LATE_JOIN is a run of its own');
 if (CANVAS_CADENCE_SLOT !== undefined) {
   if (!/^\d$/.test(CANVAS_CADENCE_SLOT) || Number(CANVAS_CADENCE_SLOT) >= PLAYERS)
     fail(`CANVAS_CADENCE_SLOT must be a player slot from 0 to ${PLAYERS - 1}`);
@@ -442,13 +456,17 @@ const mkPage = async (name, browser) => {
   return page;
 };
 
-// One page per player, joined in turn so each takes the next slot.
 const pages = [];
-for (let i = 0; i < PLAYERS; i++) {
+const openPlayer = async (i, beforeNavigate) => {
   const page = await mkPage(`P${i + 1}`, browsers.get(BROWSERS[i]));
   const host = i === 0 ? '&host=1&mode=rollback' : '';
   const cadence = String(i) === CANVAS_CADENCE_SLOT ? '&canvasCadence=1' : '';
+  await beforeNavigate?.(page);
   await page.goto(`${URL}/play.html?room=${room}${host}&name=P${i + 1}${cadence}${QUERY}`);
+  return page;
+};
+for (let i = 0; i < STARTERS; i++) {
+  const page = await openPlayer(i);
   await page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
   pages.push(page);
 }
@@ -462,7 +480,7 @@ const SSB64_US_HASH = 'S15592e79d3c5295cef4371d4992f0bd25bec2102fc29644c93e682f7
 const anyFighter = process.env.MENU_AUTOPILOT
   ? process.env.MENU_AUTOPILOT === 'any-fighter'
   : !!romHash && romHash !== SSB64_US_HASH;
-console.log(`room ${room}: ${PLAYERS} players ROM-ready; starting (anyFighter=${anyFighter})`);
+console.log(`room ${room}: ${STARTERS} players ROM-ready; starting (anyFighter=${anyFighter})`);
 await host.click('#start-btn');
 
 // Dismiss the tap-to-start prompt wherever it shows, until every emulator runs.
@@ -489,7 +507,7 @@ for (;;) {
 }
 const slots = await Promise.all(pages.map((p) => p.evaluate(() => window.KNState?.slot)));
 console.log('slots', JSON.stringify(slots));
-if (slots.some((s, i) => s !== i)) fail(`pages did not take slots 0..${PLAYERS - 1} in join order: ${slots}`);
+if (slots.some((s, i) => s !== i)) fail(`pages did not take slots 0..${STARTERS - 1} in join order: ${slots}`);
 
 // Autopilot for the page's own slot, random battle inputs, and the hash recorder.
 const install = async (p, slot) => {
@@ -506,6 +524,7 @@ const install = async (p, slot) => {
         inBattleAt: -1,
         pilotFail: null,
         lastR: undefined,
+        against: slot >= players ? 'pace' : null,
       });
       const rb = window.NetplayRollback;
       const frameNow = () => rb.getHudCounters?.()?.currentFrame ?? 0;
@@ -625,10 +644,10 @@ const install = async (p, slot) => {
         return r;
       };
     },
-    { slot, players: PLAYERS, anyFighter, rdram: RECOVERY_BYSTANDER },
+    { slot, players: STARTERS, anyFighter, rdram: RECOVERY_BYSTANDER },
   );
 };
-for (let i = 0; i < PLAYERS; i++) await install(pages[i], i);
+for (let i = 0; i < STARTERS; i++) await install(pages[i], i);
 
 // Menus: until every page is in the battle.
 const tMenu = Date.now();
@@ -654,6 +673,72 @@ for (;;) {
     fail(`not every page reached the battle within ${MENU_TIMEOUT_S} s`);
   }
   await host.waitForTimeout(5000);
+}
+let lateJoin = null;
+if (LATE_JOIN) {
+  lateJoin = { stateDropped: false, reopened: false };
+  const joiner = await openPlayer(STARTERS, async (page) => {
+    if (!LATE_JOIN_DROP_STATE) return;
+    let down = false;
+    await page.routeWebSocket(/socket\.io/, (socket) => {
+      if (down) {
+        void socket.close({ code: 4000, reason: 'signaling down (test)' });
+        return;
+      }
+      if (lateJoin.stateDropped) lateJoin.reopened = true;
+      const server = socket.connectToServer();
+      server.onMessage((message) => {
+        if (!lateJoin.stateDropped && String(message).includes('"late-join-state"')) {
+          lateJoin.stateDropped = true;
+          down = true;
+          void server.close({ code: 4000, reason: 'signaling down (test)' });
+          void socket.close({ code: 4000, reason: 'signaling down (test)' });
+          void delay(3000).then(() => {
+            down = false;
+          });
+          return;
+        }
+        socket.send(message);
+      });
+    });
+  });
+  await joiner.waitForSelector('#rom-drop', { state: 'visible', timeout: 30000 });
+  await joiner.locator("#rom-drop input[type='file']").setInputFiles(ROM);
+  const readyBy = Date.now() + 120000;
+  while (!(await joiner.evaluate(() => window.NetplayRollback?.getHudCounters?.()?.currentFrame > 0))) {
+    if (Date.now() >= readyBy) fail('late joiner never advanced');
+    const prompt = joiner.locator('#gesture-prompt:not(.hidden)');
+    if (await prompt.count()) await prompt.click({ force: true, timeout: 1000 }).catch(() => {});
+    await delay(50);
+  }
+  if ((await joiner.evaluate(() => window.KNState.slot)) !== STARTERS)
+    fail('late joiner took the wrong controller slot');
+  const stateFrame = joinStateFrame(await joiner.evaluate(() => window.NetplayRollback.exportSyncLog()));
+  if (stateFrame === null) fail('late joiner advanced without a recorded state load');
+  // The first native ticks resolve Emscripten's export thunks before we wrap post_tick.
+  await joiner.waitForFunction(
+    (frame) => window.EJS_emulator?.gameManager?.Module?._kn_get_frame?.() >= frame + 6,
+    stateFrame,
+    { timeout: 30000, polling: 50 },
+  );
+  await install(joiner, STARTERS);
+  pages.push(joiner);
+  await joiner.waitForFunction(() => window.__mesh.inBattleAt >= 0, null, { timeout: 30000, polling: 100 });
+  lateJoin.stateFrame = stateFrame;
+  console.log(
+    `P${PLAYERS} loaded state at frame ${stateFrame} (${lateJoin.stateDropped ? 'after signaling loss' : 'no signaling loss'})`,
+  );
+  // Leave enough frames for both the rollback lag and the input log's finalization margin.
+  const deadline = Date.now() + 60000;
+  const target = stateFrame + JOIN_WINDOW + 60;
+  for (;;) {
+    const frames = await Promise.all(
+      pages.map((page) => page.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame)),
+    );
+    if (frames.every((frame) => frame >= target)) break;
+    if (Date.now() >= deadline) fail(`late join did not progress to frame ${target}: ${frames}`);
+    await delay(250);
+  }
 }
 console.log(`in battle; playing ${BATTLE_SECONDS} s`);
 
@@ -1489,6 +1574,7 @@ const P = await Promise.all(
       preDropHashCount: Object.keys(window.__meshDroppedSnapshot?.hashes ?? {}).length,
       inBattleAt: window.__meshDroppedSnapshot?.inBattleAt ?? window.__mesh.inBattleAt,
       lastR: window.__mesh.lastR,
+      activeRoster: window.NetplayRollback.getDebugState()?.activeRoster,
       hashLag: window.__knHashLag ?? null,
       ticksWithoutLag: window.__mesh.ticksWithoutLag,
       // Who the battle state says is playing: each player's kind (0 = human)
@@ -1721,14 +1807,14 @@ const catchUpFailed =
       pairs.some((p) => p.postRecoveryFramesCompared < MIN_BATTLE_FRAMES)
     : !catchUpReport.catchUps.some((c) => c.frames > 0 && c.to === c.of && !c.stopped));
 
-// The battle has every page's player in it, each on the fighter its
+// The battle has every starting player in it, each on the fighter its
 // autopilot picks (PORTRAIT_TARGETS in web/src/page/menu-autopilot.ts:
 // Mario, DK, Link, Samus), and every page agrees.
 const FIGHTERS = [0, 2, 5, 3];
 const HUMAN = 0;
 const fighterProblems = P.flatMap((x, page) =>
   x.fighters.flatMap((f, i) => {
-    if (i >= PLAYERS) return [];
+    if (i >= STARTERS) return [];
     if (f.kind !== HUMAN) return [`P${page + 1} sees player ${i + 1} as kind ${f.kind}, not human`];
     if (!anyFighter && f.fkind !== FIGHTERS[i])
       return [`P${page + 1} sees player ${i + 1} on fighter ${f.fkind}, not ${FIGHTERS[i]}`];
@@ -2014,6 +2100,45 @@ const joinInputProblems = !joinInput
           ]
         : []),
     ];
+const lateJoinProblems = [];
+if (lateJoin) {
+  const names = P.map((_, slot) => `P${slot + 1}`);
+  lateJoin.hashes = joinHashAgreement(
+    P.map(({ hashes }) => hashes),
+    lateJoin.stateFrame,
+    JOIN_WINDOW,
+  );
+  lateJoin.rosters = P.map(({ activeRoster }) => activeRoster?.toSorted((a, b) => a - b) ?? []);
+  for (const [slot, roster] of lateJoin.rosters.entries()) {
+    if (roster.length !== PLAYERS || roster.some((member, i) => member !== i))
+      lateJoinProblems.push(`${names[slot]} sees roster [${roster}]`);
+  }
+  if (LATE_JOIN_DROP_STATE && !(lateJoin.stateDropped && lateJoin.reopened))
+    lateJoinProblems.push('the joiner did not lose and reopen signaling during state delivery');
+  for (const [i, pair] of lateJoin.hashes.entries()) {
+    if (pair.compared < JOIN_WINDOW * 0.8)
+      lateJoinProblems.push(`${names[i + 1]} compared only ${pair.compared}/${JOIN_WINDOW} finalized join hashes`);
+    if (pair.differing.length)
+      lateJoinProblems.push(`${names[i + 1]} differs from host after state load at frame ${pair.differing[0]}`);
+  }
+  if (joinInput?.stateFrame !== lateJoin.stateFrame)
+    lateJoinProblems.push('no applied-input evidence for the joiner state');
+  if (joinInput) {
+    const [from, to] = joinInput.tags;
+    lateJoin.activeInputTags = P.map(
+      ({ sync }) =>
+        [...appliedForTag(sync, STARTERS)].filter(([tag, value]) => tag >= from && tag <= to && value !== '0,0,0')
+          .length,
+    );
+    for (const [slot, count] of lateJoin.activeInputTags.entries()) {
+      if (!count) lateJoinProblems.push(`${names[slot]} did not apply any non-neutral input from the joiner`);
+    }
+  }
+  for (const [slot, count] of Object.entries(joinInput?.compared ?? {})) {
+    if (count < JOIN_WINDOW * 0.8)
+      lateJoinProblems.push(`only ${count} applied input tags compared for slot ${slot} around admission`);
+  }
+}
 const followUpLines = FOLLOW_UP_RECIPIENT
   ? H.sync.split('\n').filter((line) => seqOf(line) > followUpRecipient.hostAt)
   : [];
@@ -2390,6 +2515,7 @@ const summary = {
   followUpRecipient: FOLLOW_UP_RECIPIENT ? { ...followUpRecipient, problems: followUpProblems } : undefined,
   removedInput: removedInput ? { ...removedInput, problems: removedInputProblems } : undefined,
   joinInput: joinInput ? { ...joinInput, problems: joinInputProblems } : undefined,
+  lateJoin: lateJoin ? { ...lateJoin, problems: lateJoinProblems } : undefined,
   room,
   players: PLAYERS,
   browsers: BROWSERS,
@@ -2446,6 +2572,7 @@ const failed =
   missingProblems.length > 0 ||
   removedInputProblems.length > 0 ||
   joinInputProblems.length > 0 ||
+  lateJoinProblems.length > 0 ||
   followUpProblems.length > 0 ||
   recoveryProblems.length > 0 ||
   P.some((x) => x.inBattleAt < 0) ||
@@ -2461,7 +2588,7 @@ const failed =
   catchUpFailed;
 console.log(
   failed
-    ? `FAIL: ${pairs.map((p) => `P${p.slot + 1} gp=${p.gameplayMismatches} gs=${p.gameStateMismatches} battle=${p.battleFramesCompared}`).join(', ')}${catchUpFailed ? (CATCH_UP_HOLE ? `; the hole fault did not land as required: ${JSON.stringify(holeReport)}` : '; the catch-up did not run all the way') : ''}${fighterProblems.length ? `; ${fighterProblems.join('; ')}` : ''}${recoveryProblems.length ? `; ${recoveryProblems.join('; ')}` : ''}${removedInputProblems.length ? `; ${removedInputProblems.join('; ')}` : ''}${joinInputProblems.length ? `; ${joinInputProblems.join('; ')}` : ''}${dropLinkProblems.length ? `; ${dropLinkProblems.join('; ')}` : ''}`
-    : `PASS: all ${PLAYERS} fighters in the battle; every guest's hashes match the host's (${pairs.map((p) => `P${p.slot + 1} ${p.battleFramesCompared} battle frames`).join(', ')})`,
+    ? `FAIL: ${pairs.map((p) => `P${p.slot + 1} gp=${p.gameplayMismatches} gs=${p.gameStateMismatches} battle=${p.battleFramesCompared}`).join(', ')}${catchUpFailed ? (CATCH_UP_HOLE ? `; the hole fault did not land as required: ${JSON.stringify(holeReport)}` : '; the catch-up did not run all the way') : ''}${fighterProblems.length ? `; ${fighterProblems.join('; ')}` : ''}${recoveryProblems.length ? `; ${recoveryProblems.join('; ')}` : ''}${removedInputProblems.length ? `; ${removedInputProblems.join('; ')}` : ''}${joinInputProblems.length ? `; ${joinInputProblems.join('; ')}` : ''}${dropLinkProblems.length ? `; ${dropLinkProblems.join('; ')}` : ''}${lateJoinProblems.length ? `; ${lateJoinProblems.join('; ')}` : ''}`
+    : `PASS: all ${PLAYERS} pages in the battle; every guest's hashes match the host's (${pairs.map((p) => `P${p.slot + 1} ${p.battleFramesCompared} battle frames`).join(', ')})`,
 );
 process.exit(failed ? 1 : 0);
