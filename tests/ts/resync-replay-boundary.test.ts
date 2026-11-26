@@ -142,3 +142,60 @@ test('an accepted native state clears replay after writing and before aligning t
   assert.equal(applied.replaying, false);
   assert.equal(applied.installed, 100);
 });
+
+test('a host answer admitted after native replay starts cannot read the intermediate state', async () => {
+  const run: () => Promise<string> = runInNewContext(
+    `
+    const _checkpoint = null, _coreFatalError = false, _playerSlot = 0, _syncEnabled = true;
+    const _hasKnSync = true, _recovery = {}, _frameNum = 2240, DELAY_FRAMES = 2;
+    const _hostReconnectFenceVersion = 0, _workerCoprocPending = null, _syncQueueEpoch = 1;
+    const _syncQueueGen = {}, _peers = {}, _followUpWatches = new Map();
+    const _ranBeforeDelayChange = null, _queuedSyncPushes = new Map();
+    let _pushingSyncState = false, _proactivePushInFlight = false;
+    const _runQueuedSyncPush = () => {}, _syncLog = () => {}, _syncTargetsFor = () => [];
+    const performance = { now: () => 0 };
+    const _admitReconnectNativeCapture = () => true;
+    const ensureSyncBuffer = () => {};
+    const _syncBufPtr = 0, _syncBufSize = 16;
+    let replayDepth = 0, admission, reads = 0;
+    const mod = {
+      _kn_get_replay_depth: () => replayDepth,
+      _kn_peek_pending_rollback: () => 2238,
+      _kn_sync_read: () => { reads++; return 0; },
+    };
+    const window = {
+      EJS_emulator: { gameManager: { Module: mod } },
+      KNCore: { syncFollowUp: { delayOfStateAt: () => 2, correctionOwed: () => true } },
+    };
+    const _recoveryTransfers = {
+      async run(attempts, body) {
+        await new Promise((resolve) => { admission = resolve; });
+        return body(attempts);
+      },
+    };
+    ${from('  const pushSyncState = async (', '  // Host: the guests a state is for')}
+    async () => {
+      const options = { requestIds: { guest: 2 }, watchFor: ['guest'] };
+      const queued = pushSyncState('guest', false, options);
+      replayDepth = 5;
+      admission();
+      await queued;
+      const rejected = { reads, watch: _followUpWatches.has('guest'), locked: _pushingSyncState };
+
+      replayDepth = 0;
+      const retry = pushSyncState('guest', false, options);
+      admission();
+      await retry;
+      return JSON.stringify({
+        rejected,
+        stable: { reads, changed: _followUpWatches.get('guest')?.changed, locked: _pushingSyncState },
+      });
+    }
+    `,
+  );
+
+  assert.deepEqual(JSON.parse(await run()), {
+    rejected: { reads: 0, watch: false, locked: false },
+    stable: { reads: 1, changed: true, locked: false },
+  });
+});

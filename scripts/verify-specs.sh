@@ -376,6 +376,8 @@ sync_follow_up() {
   # correction ran: 6 steps. Today's rule as well as the delay rule alone.
   expect_violation "$FOLLOW" sync_follow_up_owed_unflagged theGuestEndsOnTheHostsState 6
   expect_violation "$FOLLOW" sync_follow_up_delay_unaware theGuestEndsOnTheHostsState 6
+  verify "$FOLLOW" sync_capture_boundary_fixed onlyStableSnapshots init 8
+  expect_violation "$FOLLOW" sync_capture_boundary_before onlyStableSnapshots 4
 }
 
 rom_at_start() {

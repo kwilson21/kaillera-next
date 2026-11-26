@@ -691,6 +691,13 @@ done
 $QUINT run "$FOLLOW" --main=sync_follow_up_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# Async transfer admission can reach the native capture during a replay.
+for variant in sync_capture_boundary_before sync_capture_boundary_fixed; do
+  $QUINT test "$FOLLOW" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$FOLLOW" --main=sync_capture_boundary_fixed --invariant=onlyStableSnapshots \
+  --max-samples=10000 --max-steps=20 --backend="$BACKEND"
+
 # ── A catch-up waiting on a hole after a reconnect ────────────────────────
 WAIT=specs/catch_up_wait.qnt
 $QUINT typecheck "$WAIT"

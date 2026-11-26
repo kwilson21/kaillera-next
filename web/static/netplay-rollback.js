@@ -21462,6 +21462,13 @@
           return null;
         }
         try {
+          // Transfer admission can resume between replay slices. The live core
+          // is then behind the frame a snapshot would advertise.
+          if (!capturedPublication && gm.Module?._kn_get_replay_depth?.() > 0) {
+            _syncLog(`sync capture skipped: native replay active at frame ${_frameNum}`);
+            notSent('native replay is active', attempts);
+            return null;
+          }
           if (!_admitReconnectNativeCapture(options, gm.Module)) {
             notSent('protected reconnect input is not yet confirmed', attempts);
             return null;
@@ -21500,9 +21507,9 @@
           const delay = watchFor.length
             ? window.KNCore.syncFollowUp.delayOfStateAt(frame, DELAY_FRAMES, _ranBeforeDelayChange)
             : DELAY_FRAMES;
-          // Taken while a correction is still owed, the state is already not
-          // this page's, and the input behind it was fed before this watch:
-          // the watch starts changed (specs/sync_follow_up.qnt, OWED_AT_TAKE).
+          // A pending correction can still change a state taken between replays,
+          // and the input behind it was fed before this watch. The watch starts
+          // changed (specs/sync_follow_up.qnt, OWED_AT_TAKE).
           // A captured publication was sealed with none owed (capture-incident.ts).
           const owedMod = gm.Module;
           const owed =

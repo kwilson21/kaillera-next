@@ -555,3 +555,61 @@ module sync_follow_up_owed_unflagged {
 module sync_follow_up_fixed {
   import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = true, DELAY_AWARE = true, OWED_AT_TAKE = true).*
 }
+
+// Selecting a send and reading native state are separated by transfer admission.
+// Replay can start between them, including while another transfer drains.
+module sync_capture_boundary {
+  const FENCE: bool
+  var replaying: bool
+  var admitted: bool
+  var captured: bool
+  var capturedDuringReplay: bool
+
+  action init = all {
+    replaying' = false,
+    admitted' = false,
+    captured' = false,
+    capturedDuringReplay' = false,
+  }
+
+  action replay(active: bool): bool = all {
+    replaying' = active,
+    admitted' = admitted,
+    captured' = captured,
+    capturedDuringReplay' = capturedDuringReplay,
+  }
+
+  action admit = all {
+    not(admitted),
+    admitted' = true,
+    replaying' = replaying,
+    captured' = captured,
+    capturedDuringReplay' = capturedDuringReplay,
+  }
+
+  action attemptCapture = all {
+    admitted,
+    admitted' = false,
+    replaying' = replaying,
+    captured' = not(FENCE and replaying),
+    capturedDuringReplay' = (capturedDuringReplay or (replaying and not(FENCE))),
+  }
+
+  action step = any { replay(true), replay(false), admit, attemptCapture }
+
+  val onlyStableSnapshots = not(capturedDuringReplay)
+
+  run queuedAnswerDuringReplayTest =
+    init.then(admit).then(replay(true)).then(attemptCapture)
+      .expect(captured == not(FENCE) and onlyStableSnapshots == FENCE)
+      .then(replay(false)).then(admit).then(attemptCapture)
+      .expect(captured)
+}
+
+module sync_capture_boundary_before {
+  import sync_capture_boundary(FENCE = false).*
+}
+
+module sync_capture_boundary_fixed {
+  import sync_capture_boundary(FENCE = true).*
+}
