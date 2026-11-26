@@ -404,12 +404,28 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
         updated_at=now(),
     )
     new = upsert.excluded
+    # An in-flight flush from this ring can commit after the exit batch.
+    # Its summary must retain the omission marker from the exit batch.
+    omission_path = "$.omittedOnExit"
+    stored_omissions = case((func.json_valid(SessionLog.summary), func.json_extract(SessionLog.summary, omission_path)))
+    new_summary = case((func.json_valid(new.summary), new.summary), else_="{}")
+    summary = case(
+        (
+            and_(
+                SessionLog.log_epoch == new.log_epoch,
+                stored_omissions.is_not(None),
+                func.json_extract(new_summary, omission_path).is_(None),
+            ),
+            func.json_set(new_summary, omission_path, func.json(stored_omissions)),
+        ),
+        else_=new.summary,
+    )
     # Within one epoch the high-water mark only moves forward; a new epoch replaces it.
     statements.append(
         upsert.on_conflict_do_update(
             index_elements=[SessionLog.match_id, SessionLog.slot],
             set_={
-                "summary": new.summary,
+                "summary": summary,
                 "context": new.context,
                 "ip_hash": new.ip_hash,
                 "updated_at": now(),

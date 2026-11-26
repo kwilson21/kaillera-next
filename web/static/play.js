@@ -745,11 +745,11 @@
 
   // ── Clean tab close ───────────────────────────────────────────────────
 
-  window.addEventListener('pagehide', (event) => {
-    // A cached page can resume and drain its pending records.
+  window.addEventListener('pagehide', () => {
+    // A frozen page can be discarded without another event.
     if (engine?.exportSyncLog) {
       try {
-        engine.flushSyncLog?.({ keepalive: !event.persisted });
+        engine.flushSyncLog?.({ keepalive: true });
       } catch (_) {}
     }
     // Notify peers this is intentional so they skip the 15s reconnect wait

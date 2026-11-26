@@ -7256,13 +7256,15 @@
         body,
         keepalive: !!keepalive,
       };
-      let response = await fetch(url, options);
+      let response = keepalive
+        ? await window.KNCore.sendSessionLogKeepalive(keepalive, () => fetch(url, options))
+        : await fetch(url, options);
       // A concurrent socket append may hold this slot's DB writer briefly.
       if (final && !keepalive && response.status === 429) {
         await new Promise((resolve) => setTimeout(resolve, 500));
         response = await fetch(url, options);
       }
-      if (!response.ok) return false;
+      if (!response?.ok) return false;
       const ack = _peerBoundary().ack('session-log', await response.json());
       if (!ack) return false;
       _ackSyncLogFlush(ack, payload);

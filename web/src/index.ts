@@ -106,7 +106,7 @@ import {
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { checkServerMessage, createBoundary, takeAck, takeServerMessage } from './socket-boundary.ts';
 import { startLateJoinWait } from './late-join-wait.ts';
-import { sessionLogKeepaliveBody } from './session-log-keepalive.ts';
+import { sendSessionLogKeepalive, sessionLogKeepaliveBody } from './session-log-keepalive.ts';
 import { mayHandChunk, mayReceiveState, sendPaced, transferStillFor } from './sync-send.ts';
 import {
   changesWatchedFrame,
@@ -503,6 +503,7 @@ export const KNCore = {
   signalDisposition,
   staleHoldersOf,
   startLateJoinWait,
+  sendSessionLogKeepalive,
   sessionLogKeepaliveBody,
   /** The host's resync state, a chunk at a time (sync-send.ts). */
   syncSend: { mayHandChunk, mayReceiveState, sendPaced, transferStillFor },
