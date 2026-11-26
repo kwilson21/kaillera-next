@@ -618,3 +618,16 @@ module escalation_clock_before {
 module escalation_clock_fixed {
   import escalation_clock(RECOVERY_CLOCK = true).*
 }
+
+// A wake after visibility returns may credit only the interval that was
+// continuously visible. A hidden interval counts toward the deadline.
+module recovery_wake_visibility {
+  pure def credit(lastWake: int, lastVisibilityChange: int, now: int, visible: bool): int =
+    if (visible) now - (if (lastWake > lastVisibilityChange) lastWake else lastVisibilityChange) else 0
+
+  run returningTabDoesNotCreditHiddenTimeTest =
+    assert(credit(0, 5, 5, true) == 0)
+
+  run foregroundStallAfterReturnKeepsItsCreditTest =
+    assert(credit(0, 3, 5, true) == 2 and credit(3, 0, 5, true) == 2)
+}

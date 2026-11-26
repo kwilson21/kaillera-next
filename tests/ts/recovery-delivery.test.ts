@@ -22,7 +22,8 @@ function room(guests = 2, realTransfers = false) {
   vm.runInContext(
     `
     let now = 10000;
-    const performance = { now: () => now };
+    const performance = { now: () => now }, document = {hidden: false};
+    ${source.includes('  let _recoveryVisibilityChangedAt') ? source.slice(source.indexOf('  let _recoveryVisibilityChangedAt'), source.indexOf('  const _scheduleResyncDeadline =')) : 'let _recoveryVisibilityChangedAt = 0;'}
     let recoveryPulse;
     const startEvery = (run) => { recoveryPulse = run; return () => { recoveryPulse = undefined; }; };
     const window = { KNCore: { resyncRequest, syncFollowUp, startEvery, recovery: { createRecoveryManager, createRecoveryTransferPool } } };
@@ -879,5 +880,32 @@ test('escalation time advances during checkpoint approach and pauses at the bloc
   run(`_checkpoint = null;
        now += 100; recoveryPulse?.();
        now += 100; recoveryPulse?.();`);
+  assert.equal(run('sends.length'), 2);
+});
+
+test('a host wake just after visibility returns still ages the hidden interval', () => {
+  const run = room(1);
+  run(`_escalateLostInput(_peers.a, 'push', now, 900);
+       _onEscalationTransfer(sends[0].options.escalation, 'a', true, 1000);
+       for (let i = 0; i < 40; i++) { now += 100; recoveryPulse?.(); }
+       document.hidden = true;
+       _recoveryVisibilityChangedAt = now;
+       now += 2000;
+       document.hidden = false;
+       _recoveryVisibilityChangedAt = now;
+       recoveryPulse?.();`);
+  assert.equal(run('sends.length'), 2);
+});
+
+test('a throwing recovery callback cannot terminate the host deadline clock', () => {
+  const run = room(1);
+  run(`_escalateLostInput(_peers.a, 'push', now, 900);
+       _onEscalationTransfer(sends[0].options.escalation, 'a', false, 1000);
+       const event = _recovery.event;
+       _recovery.event = () => { throw Error('fixture callback failure'); };
+       now += 100;`);
+  assert.doesNotThrow(() => run('recoveryPulse?.();'));
+  run(`_recovery.event = event;
+       for (let i = 0; i < 49; i++) { now += 100; recoveryPulse?.(); }`);
   assert.equal(run('sends.length'), 2);
 });
