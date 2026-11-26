@@ -535,6 +535,15 @@
         "tests/ts/resync-replay-boundary.test.ts",
         "specs/sync_follow_up.qnt"
       ]
+    },
+    "guest-coordinated-hold-clock": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _armSyncTarget =",
+      "line": 9127,
+      "coverage": [
+        "tests/ts/resync-replay-boundary.test.ts",
+        "specs/resync_flow.qnt"
+      ]
     }
   },
   "baseline": {
@@ -1138,12 +1147,13 @@
         "fr": "FR-recovery",
         "dp": "DP-pacing",
         "kind": "necessary",
-        "mechanism": "Escalation deadlines still use tick freeze credits, and coordinated installation still observes frame progression. Generic guest retries and the host coordinated capture deadline run on recovery-owned timers.",
+        "mechanism": "Frame ticks still service protected reconnect and verified-checkpoint recovery. A pacing timeout can mark a peer phantom and end its recovery attempt. Coordinated installation observes frame progression. Host escalation still uses tick freeze credit. Guest hold expiry runs on a recovery-owned timer.",
         "evidence": [
           "tick",
           "freeze-credit",
           "recovery-request",
-          "coordinated-capture-clock"
+          "coordinated-capture-clock",
+          "guest-coordinated-hold-clock"
         ]
       }
     ],
