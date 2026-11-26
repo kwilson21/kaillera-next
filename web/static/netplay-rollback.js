@@ -5573,8 +5573,7 @@
     }
     const hostDc = Object.values(_peers).find((p) => p.slot === 0)?.dc;
     if (hostDc?.readyState !== 'open') return;
-    _syncTargetFrame = -1;
-    _syncTargetDeadlineAt = 0;
+    _clearSyncTarget();
     const requestId = _beginResyncRequest();
     try {
       _sendResyncRequest(hostDc, requestId, 'sync-request-full');
@@ -6341,8 +6340,7 @@
       _syncLog(`${tag}: a resync request is out already; its state is run on with what the roster filed`);
       return;
     }
-    _syncTargetFrame = -1;
-    _syncTargetDeadlineAt = 0;
+    _clearSyncTarget();
     const hostDc = Object.values(_peers).find((p) => p.slot === 0)?.dc;
     if (hostDc?.readyState === 'open') {
       try {
@@ -7654,8 +7652,7 @@
     const ask = `${_owedResyncAsksAgain}/${RESYNC_MAX_ASKS_AGAIN}`;
     const debt = _reconnectAnswerDebt?.id === _resyncRequestId ? _reconnectAnswerDebt : null;
     _setLastSyncState(null, 'resync-reask');
-    _syncTargetFrame = -1;
-    _syncTargetDeadlineAt = 0;
+    _clearSyncTarget();
     const hostDc = Object.values(_peers).find((p) => p.slot === 0)?.dc;
     if (hostDc?.readyState === 'open') {
       const requestId = _beginResyncRequest(-1, true);
@@ -8063,8 +8060,7 @@
     _unsafeCheckpointRoutes.clear();
     _checkpointRoute = null;
     _resyncRequestAt = -1;
-    _syncTargetFrame = -1;
-    _syncTargetDeadlineAt = 0;
+    _clearSyncTarget();
     _scheduledSyncRequests = [];
     _cancelScheduledSyncClock();
     _followUpWatches.clear();
@@ -9158,6 +9154,34 @@
   let _syncTargetFrame = -1; // guest: hold incoming state until this frame, then apply (or stall)
   let _syncTargetDeadlineAt = 0; // I1 (MF3): wall-clock deadline for _syncTargetFrame
   const SYNC_COORD_TIMEOUT_MS = 3000;
+  let _cancelSyncTargetClock = null;
+  const _clearSyncTarget = () => {
+    _syncTargetFrame = -1;
+    _syncTargetDeadlineAt = 0;
+    const cancel = _cancelSyncTargetClock;
+    _cancelSyncTargetClock = null;
+    cancel?.();
+  };
+  const _armSyncTarget = (frame) => {
+    _clearSyncTarget();
+    const epoch = _syncQueueEpoch;
+    _syncTargetFrame = frame;
+    _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
+    const cancel = window.KNCore.startAfter(() => {
+      if (_cancelSyncTargetClock !== cancel || _syncQueueEpoch !== epoch) return;
+      _cancelSyncTargetClock = null;
+      const elapsed = Math.round(performance.now() - (_syncTargetDeadlineAt - SYNC_COORD_TIMEOUT_MS));
+      _syncLog(
+        `COORD-SYNC-TIMEOUT target=${_syncTargetFrame} f=${_frameNum} ` +
+          `elapsed=${elapsed}ms pendingState=${!!_pendingResyncState} — dropping target`,
+      );
+      // MF3: release the hold even when the frame clock is stopped. The
+      // next eligible frame boundary still owns native installation.
+      _clearSyncTarget();
+      if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
+    }, SYNC_COORD_TIMEOUT_MS);
+    _cancelSyncTargetClock = cancel;
+  };
   // A resync state at most this many frames ahead of the guest is held until the
   // guest reaches its frame instead of applying at once (see tick()). Larger
   // gaps (boot sync) realign the guest's frame counter in applySyncState.
@@ -9343,8 +9367,7 @@
     try {
       _beginLifecycleResyncGuard(reason);
       const requestId = _beginResyncRequest(-1, again);
-      _syncTargetFrame = -1;
-      _syncTargetDeadlineAt = 0;
+      _clearSyncTarget();
       _signalSocket.emit('data-message', {
         type: 'sync-request-full-socket',
         targetSid: hostSid,
@@ -11367,8 +11390,7 @@
           _resyncRequestInFlight = false;
           _consecutiveResyncs = 0;
           const _recoveryTarget = _frameNum + SYNC_COORD_DELTA;
-          _syncTargetFrame = _recoveryTarget;
-          _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS; // I1 (MF3)
+          _armSyncTarget(_recoveryTarget);
           const _recoveryRequestId = _beginResyncRequest(_recoveryTarget);
           try {
             const peerDc = _peers[remoteSid]?.dc;
@@ -11379,8 +11401,7 @@
           } catch (e) {
             _syncLog(`peer-recovery resync send failed: ${e}`);
             _resyncRequestInFlight = false;
-            _syncTargetFrame = -1;
-            _syncTargetDeadlineAt = 0;
+            _clearSyncTarget();
           }
         } else if (recoveryStep === 'resync-guests') {
           if (_hostReconnectBlocksNativeCapture()) {
@@ -11592,8 +11613,7 @@
           const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
           const hostDc = hostPeer?.dc;
           if (hostDc?.readyState === 'open') {
-            _syncTargetFrame = -1;
-            _syncTargetDeadlineAt = 0;
+            _clearSyncTarget();
             const _reconnectRequestId = _beginResyncRequest();
             try {
               const qualify =
@@ -12191,8 +12211,7 @@
             _lastResyncTime = now2;
             const _coordTarget = _frameNum + SYNC_COORD_DELTA;
             const _desyncRequestId = _beginResyncRequest(_coordTarget);
-            _syncTargetFrame = _coordTarget;
-            _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS; // I1 (MF3)
+            _armSyncTarget(_coordTarget);
             _syncLog(
               `sending sync-request-full-at:${_coordTarget} (RDRAM desync, cooldown=${Math.round(cooldownElapsed)}ms)`,
             );
@@ -12201,8 +12220,7 @@
             } catch (e2) {
               _syncLog(`sync-request send failed: ${e2}`);
               _resyncRequestInFlight = false;
-              _syncTargetFrame = -1;
-              _syncTargetDeadlineAt = 0;
+              _clearSyncTarget();
             }
           } else {
             _syncLog(
@@ -15033,8 +15051,7 @@
     }
     _lateJoinLostHostAsks++;
     _setLastSyncState(null, 'late-join-lost-host');
-    _syncTargetFrame = -1;
-    _syncTargetDeadlineAt = 0;
+    _clearSyncTarget();
     const requestId = _beginResyncRequest();
     try {
       _sendResyncRequest(hostDc, requestId, 'sync-request-full');
@@ -17503,8 +17520,7 @@
         _setLastSyncState(null, 'network-change');
         _lastResyncTime = 0; // clear cooldown
         _resyncRequestInFlight = false; // override — network change resync always wins
-        _syncTargetFrame = -1; // cancel any pending coord target — network path changed, immediate sync needed
-        _syncTargetDeadlineAt = 0;
+        _clearSyncTarget();
         const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
         if (hostPeer?.dc?.readyState === 'open') {
           try {
@@ -17598,6 +17614,7 @@
     _phase = PHASE_STOPPED;
     _cancelEscalationClock();
     _cancelResyncDeadline();
+    _clearSyncTarget();
     _cancelScheduledSyncClock();
     _endCatchUp(window.EJS_emulator?.gameManager?.Module ?? {}, 'the match stopped');
     // Every connection is about to close; each machine is told, and its per-match state goes.
@@ -18385,25 +18402,6 @@
     // Coordinated injection: hold state until _syncTargetFrame so host and guest
     // both reach that frame before the state is applied — snap = 0.
     //
-    // I1 (MF3): every coord-sync target has a wall-clock deadline
-    // (_syncTargetDeadlineAt). If frame pacing prevents reaching
-    // _syncTargetFrame before the deadline, drop the target — the
-    // block below will then apply any _pendingResyncState
-    // immediately at current frame (non-coordinated branch). This
-    // closes the frame-target-unreachable deadlock class from room
-    // 1Q6ZF7N6. See docs/netplay-invariants.md §I1 and spec §MF3.
-    if (_syncTargetFrame > 0 && _syncTargetDeadlineAt > 0 && performance.now() > _syncTargetDeadlineAt) {
-      const _coordElapsed = Math.round(performance.now() - (_syncTargetDeadlineAt - SYNC_COORD_TIMEOUT_MS));
-      _syncLog(
-        `COORD-SYNC-TIMEOUT target=${_syncTargetFrame} f=${_frameNum} ` +
-          `elapsed=${_coordElapsed}ms pendingState=${!!_pendingResyncState} — ` +
-          `dropping target, applying at current frame`,
-      );
-      _syncTargetFrame = -1;
-      _syncTargetDeadlineAt = 0;
-      if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-    }
-
     // A state can't be loaded while a rollback replay is in flight: C refuses
     // kn_set_frame then, so JS would rewind its frame counter while C kept
     // its own and finished the old replay over the new state (the peers
@@ -18455,8 +18453,8 @@
         // Wait for the snapshot's frame to avoid skipping local inputs. A
         // replacement ahead of a coordinated target keeps the original deadline.
         pending.held = true;
-        _syncTargetFrame = pending.frame;
-        if (!_syncTargetDeadlineAt) _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
+        if (_syncTargetDeadlineAt) _syncTargetFrame = pending.frame;
+        else _armSyncTarget(pending.frame);
         if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
         _syncApplyDeferredAt = 0;
         _syncLog(`sync held: state frame ${pending.frame} is ${ahead} ahead of f=${_frameNum}, applying there`);
@@ -18467,8 +18465,7 @@
         if (replayStep !== 'wait') {
           _pendingResyncState = null;
           if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-          _syncTargetFrame = -1;
-          _syncTargetDeadlineAt = 0;
+          _clearSyncTarget();
           if (canInstall) {
             applySyncState(
               pending.bytes,
@@ -22082,8 +22079,7 @@
         );
         _resyncRequestInFlight = false; // allow fresh request
         if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-        _syncTargetFrame = -1;
-        _syncTargetDeadlineAt = 0;
+        _clearSyncTarget();
         if (!_requestSocketFullResync('delta-base-missing')) {
           const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
           const hostSyncDc = hostPeer?.syncDc?.readyState === 'open' ? hostPeer.syncDc : hostPeer?.dc;
@@ -22924,8 +22920,7 @@
     _resumeInputGuardUntil = 0;
     if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
     _awaitingResyncAt = 0;
-    _syncTargetFrame = -1;
-    _syncTargetDeadlineAt = 0;
+    _clearSyncTarget();
     _scheduledSyncRequests = [];
     _cancelScheduledSyncClock();
     _followUpWatches.clear();

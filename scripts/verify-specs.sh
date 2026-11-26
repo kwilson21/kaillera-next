@@ -231,6 +231,8 @@ late_join_pause() {
 
 resync_flow() {
   local FLOW=specs/resync_flow.qnt
+  verify "$FLOW" coordinated_guest_hold_clock_fixed servicedDeadlineReleasesHold init 8
+  expect_violation "$FLOW" coordinated_guest_hold_clock_before servicedDeadlineReleasesHold 4
   verify "$FLOW" resync_replay_boundary_fixed futureStateHasNoReplayDeadline init 8
   expect_violation "$FLOW" resync_replay_boundary_before futureStateHasNoReplayDeadline 3
   verify "$FLOW" resync_replay_boundary_fixed rejectedStateKeepsReplay init 8
