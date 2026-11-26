@@ -11406,6 +11406,12 @@
     const onOpen = () => {
       const peer = _peers[remoteSid];
       if (!peer) return;
+      // Roster preludes belong to the selected ordered channel. A replacement
+      // can publish at the same frame without that channel's mask or cuts.
+      if (peer.slot === 0) {
+        _maskAnnouncedFrame = -1;
+        _heardRosterCuts.clear();
+      }
       const openedAttempt = ch._knPc?._knAttempt;
       const openedFrame = _peerDriver()?.open(peer.slot, remoteSid);
       const known = _knownPlayers[remoteSid];

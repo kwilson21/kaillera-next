@@ -457,3 +457,51 @@ module controller_mask_unversioned {
 module controller_mask_fixed {
   import controller_mask(AT_FRAME = true, VERSIONED = true).*
 }
+
+// The roster's mask announcement and cut words are sent ahead of it on the
+// same selected primary channel. Two broadcasts while the host is paused
+// may share one frame, even if the host has fallen back to immediate masks.
+module roster_prelude_lane {
+  const CLEAR_ON_ACTIVATION: bool
+
+  var lane: int
+  var announcedBy: int
+  var cutBy: int
+  var mixedRoster: bool
+
+  action init = all {
+    lane' = 0, announcedBy' = -1, cutBy' = -1, mixedRoster' = false,
+  }
+
+  action hearPrelude = all {
+    lane' = lane, announcedBy' = lane, cutBy' = lane, mixedRoster' = mixedRoster,
+  }
+
+  action replaceLane = all {
+    lane' = lane + 1,
+    announcedBy' = if (CLEAR_ON_ACTIVATION) -1 else announcedBy,
+    cutBy' = if (CLEAR_ON_ACTIVATION) -1 else cutBy,
+    mixedRoster' = mixedRoster,
+  }
+
+  action hearSameFrameRoster = all {
+    lane' = lane, announcedBy' = -1, cutBy' = -1,
+    mixedRoster' = (mixedRoster or (announcedBy >= 0 and announcedBy != lane) or (cutBy >= 0 and cutBy != lane)),
+  }
+
+  action step = any { hearPrelude, replaceLane, hearSameFrameRoster }
+
+  val rosterPreludeStaysOnItsLane = not(mixedRoster)
+
+  run replacementLaneCannotInheritPreludeTest =
+    init.then(hearPrelude).then(replaceLane).then(hearSameFrameRoster)
+      .expect(rosterPreludeStaysOnItsLane == CLEAR_ON_ACTIVATION)
+}
+
+module roster_prelude_lane_before {
+  import roster_prelude_lane(CLEAR_ON_ACTIVATION = false).*
+}
+
+module roster_prelude_lane_fixed {
+  import roster_prelude_lane(CLEAR_ON_ACTIVATION = true).*
+}

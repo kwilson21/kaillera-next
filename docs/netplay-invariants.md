@@ -263,6 +263,11 @@ safe: a player's first input can arrive before the roster lists them
 the ends of a stretch, and the C-PERF line's `serSkip` counts the
 frames skipped.
 
+A received roster cut or mask announcement is staged for the matching roster
+on the same selected host data channel. Activating a different host channel
+discards incomplete metadata, even when the host publishes again at the same
+frame (`specs/controller_mask.qnt`, `rosterPreludeStaysOnItsLane`).
+
 Violations during a misprediction-triggered restore log
 `FATAL-RING-STALE` and throw in dev (RF7).
 
