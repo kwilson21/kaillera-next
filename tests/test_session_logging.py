@@ -160,6 +160,14 @@ def test_older_upload_preserves_exit_omissions_in_same_epoch(tmp_db):
             [row] = await query("SELECT summary FROM session_logs WHERE match_id='m1'", ())
             assert json.loads(row["summary"])["omittedOnExit"] == omissions
 
+            for reported, expected in [
+                ({"logEntries": 0, "auditEntries": 0}, omissions),
+                ({"logEntries": 0, "auditEntries": 4}, {"logEntries": 8, "auditEntries": 4}),
+            ]:
+                await append_session_log({**base, "summary": json.dumps({"omittedOnExit": reported})})
+                [row] = await query("SELECT summary FROM session_logs WHERE match_id='m1'", ())
+                assert json.loads(row["summary"])["omittedOnExit"] == expected
+
             await append_session_log({**base, "epoch": "new", "summary": "{}"})
             [row] = await query("SELECT summary FROM session_logs WHERE match_id='m1'", ())
             assert "omittedOnExit" not in json.loads(row["summary"])
