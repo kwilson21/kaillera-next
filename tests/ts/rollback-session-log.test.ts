@@ -7,13 +7,17 @@ import { createBoundary } from '../../web/src/socket-boundary.ts';
 import { sessionLogKeepaliveBody } from '../../web/src/session-log-keepalive.ts';
 
 const engine = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
-const source = engine.slice(engine.indexOf('  const _buildFlushPayload'), engine.indexOf('  // -- Canvas pixel hash'));
+const source = engine.slice(engine.indexOf('  const _buildRollbackStats'), engine.indexOf('  // -- Canvas pixel hash'));
 interface Body {
   matchId: string;
   epoch: string;
   entries: { seq: number }[];
   audit: { epoch: string; entries: { seq: number }[] };
-  summary: { frames: number; omittedOnExit?: { logEntries: number; auditEntries: number } };
+  summary: {
+    frames: number;
+    rollback?: { rollbacks: number } | null;
+    omittedOnExit?: { logEntries: number; auditEntries: number };
+  };
 }
 
 function page(cap: number) {
@@ -45,8 +49,10 @@ function page(cap: number) {
     _modeName: () => 'rollback',
     _frameNum: 44,
     _startTime: 0,
-    _buildRollbackStats: () => null,
     _useCRollback: false,
+    _rbTransport: 'dual',
+    _rbTransportPacketsSent: 0,
+    _rbTransportDupsRecv: 0,
     _peerBoundary: () => createBoundary(() => {}),
     socket: {
       connected: true,
@@ -87,6 +93,65 @@ function page(cap: number) {
     },
   };
 }
+
+test('final flush preserves buffered evidence when a native counter traps', async () => {
+  const p = page(10);
+  p.ctx._useCRollback = true;
+  p.ctx.window.EJS_emulator = {
+    gameManager: {
+      Module: {
+        _kn_get_rollback_count: () => {
+          throw new WebAssembly.RuntimeError('core trapped');
+        },
+      },
+    },
+  };
+  const epoch = p.ring.epoch;
+  p.ring.push({ t: 1, f: 1, msg: 'FATAL-CORE-ABORT' });
+  p.ctx._auditPending.push({ seq: 0 });
+
+  await p.flush({ final: true });
+
+  const body = p.posts[0]?.body;
+  assert.equal(body?.epoch, epoch);
+  assert.deepEqual(
+    body.entries.map(({ seq }) => seq),
+    [0],
+  );
+  assert.deepEqual(
+    body.audit.entries.map(({ seq }) => seq),
+    [0],
+  );
+  assert.equal(body.summary.rollback, null);
+});
+
+test('optional native breakdown failure preserves aggregate counters and log rows', async () => {
+  const p = page(10);
+  p.ctx._useCRollback = true;
+  p.ctx.window.EJS_emulator = {
+    gameManager: {
+      Module: {
+        _kn_get_rollback_count: () => 2,
+        _kn_get_prediction_count: () => 8,
+        _kn_get_correct_predictions: () => 6,
+        _kn_get_mispred_breakdown: () => {},
+        _malloc: () => {
+          throw new WebAssembly.RuntimeError('memory allocation trapped');
+        },
+      },
+    },
+  };
+  p.ring.push({ t: 1, f: 1, msg: 'row 0' });
+
+  await p.flush({ final: true });
+
+  const body = p.posts[0]?.body;
+  assert.deepEqual(
+    body?.entries.map(({ seq }) => seq),
+    [0],
+  );
+  assert.equal(body?.summary.rollback?.rollbacks, 2);
+});
 
 test('stop freezes log, audit and credentials across a busy retry, late socket reply and a new match', async () => {
   const p = page(2);
