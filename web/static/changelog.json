@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.73.14",
+    "date": "2026-11-26",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "verify returning player history from native receipts (#367)"
+      }
+    ]
+  },
+  {
     "version": "0.73.13",
     "date": "2026-11-26",
     "changes": [
