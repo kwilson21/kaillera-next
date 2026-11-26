@@ -680,3 +680,45 @@ module sync_publication_boundary_before {
 module sync_publication_boundary_fixed {
   import sync_publication_boundary(FENCE = true).*
 }
+
+// A coordinated request expires even when the browser is live and the frame
+// scheduler has stopped. Replay can still withhold the native capture.
+module coordinated_capture_clock {
+  const RECOVERY_CLOCK: bool
+  var elapsed: bool
+  var replaying: bool
+  var sent: bool
+  var stopped: bool
+  action init = all {
+    elapsed' = false,
+    replaying' = false,
+    sent' = false,
+    stopped' = false,
+  }
+  action advance(active: bool, ended: bool): bool = all {
+    elapsed' = true,
+    replaying' = active,
+    stopped' = (stopped or ended),
+    sent' = sent,
+  }
+  action service(frameTick: bool): bool = all {
+    elapsed' = elapsed,
+    replaying' = replaying,
+    stopped' = stopped,
+    sent' = (sent or (not(stopped) and elapsed and not(replaying) and (RECOVERY_CLOCK or frameTick))),
+  }
+  action step = any { advance(true, false), advance(false, false), advance(false, true), service(false), service(true) }
+  run deadlineWithoutFrameTickTest =
+    init.then(advance(false, false)).then(service(false)).expect(sent == RECOVERY_CLOCK)
+  run waitsForReplayAndHonorsStopTest =
+    init.then(advance(true, false)).then(service(false)).expect(not(sent))
+      .then(advance(false, true)).then(service(true)).expect(not(sent))
+}
+
+module coordinated_capture_clock_before {
+  import coordinated_capture_clock(RECOVERY_CLOCK = false).*
+}
+
+module coordinated_capture_clock_fixed {
+  import coordinated_capture_clock(RECOVERY_CLOCK = true).*
+}
