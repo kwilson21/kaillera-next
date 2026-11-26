@@ -15,6 +15,41 @@ function between(start: string, end: string) {
 function engineFunction(name: string) {
   return between('  const ' + name + ' =', '\n  };') + '\n  };';
 }
+for (const mode of ['dual', 'unreliable']) {
+  test(`closing the optional channel in ${mode} keeps existing input wait deadlines`, () => {
+    const closed = { readyState: 'connecting' };
+    const peer = { slot: 2, rbDc: closed, rbDcUnreliable: true };
+    const context = vm.createContext({ closed, peer, mode });
+    const state = vm.runInContext(
+      `
+      const _peers = { remote: peer }, _dcBufferStaleStreak = { remote: 2 }, _rbTransport = mode;
+      let _rbInputStallKey = '1:140', _rbInputStallStartTime = 1000;
+      let _lockstepWaitFrame = 141, _lockstepWaitStart = 1100, fallback = null;
+      const _syncLog = () => {};
+      const _switchInputsToReliable = (reason) => { fallback = reason; };
+      ${engineFunction('clearPeerStallTimers')}
+      ${engineFunction('resetPeerRollbackTransport')}
+      ${engineFunction('setupRollbackInputDataChannel')}
+      setupRollbackInputDataChannel('remote', closed);
+      closed.onclose();
+      [_rbInputStallKey, _rbInputStallStartTime, _lockstepWaitFrame, _lockstepWaitStart,
+        peer.rbDc, peer.rbDcUnreliable, _dcBufferStaleStreak.remote, fallback];
+      `,
+      context,
+    );
+    assert.deepEqual(Array.from(state), [
+      '1:140',
+      1000,
+      141,
+      1100,
+      null,
+      false,
+      0,
+      mode === 'unreliable' ? 'rb-dc-close' : null,
+    ]);
+  });
+}
+
 const pad = { buttons: 8, lx: -48, ly: 29, cx: -12, cy: 24 };
 const frame = 140;
 function sender(mode: 'dual' | 'reliable' | 'unreliable' = 'dual') {
