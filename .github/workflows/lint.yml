@@ -13,6 +13,7 @@ on:
       - 'deploy/static/**'
       - 'tests/**'
       - 'specs/**'
+      - 'docs/architecture/design-matrix.json'
       - 'tools/oxlint/**'
       - 'scripts/check-specs.sh'
       - 'scripts/browser_shard.py'
@@ -48,6 +49,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
       # Node 24 in every job that runs Node, as in the Docker image's web
       # stage: the TypeScript tests strip types without a flag (22.18+), the
       # observer-report helpers read node:sqlite (22.13+), and the image job
@@ -65,6 +68,15 @@ jobs:
         run: npm run typecheck
       - name: TypeScript tests
         run: npm run test:ts
+      - name: Check architectural design matrix
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -n "$PR_BASE" ]; then
+            node scripts/check-design-matrix.ts --base "$PR_BASE"
+          else
+            node scripts/check-design-matrix.ts
+          fi
       - name: Two-player test's own helpers
         run: node --test tests/frozen-recovery.test.mjs tests/hash-lag.test.mjs tests/join-input-check.test.mjs tests/observer-reports.test.mjs tests/link-schedule.test.mjs tests/directional-input-gate.test.mjs tests/native-input-observer.test.mjs tests/bundle-check.test.mjs tests/drop-link-check.test.mjs tests/manual-main-loop.test.mjs
       - name: Admin viewer loading and cancellation
