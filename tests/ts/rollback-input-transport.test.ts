@@ -23,8 +23,9 @@ for (const mode of ['dual', 'unreliable']) {
     const state = vm.runInContext(
       `
       const _peers = { remote: peer }, _dcBufferStaleStreak = { remote: 2 }, _rbTransport = mode;
-      let _rbInputStallKey = '1:140', _rbInputStallStartTime = 1000;
-      let _lockstepWaitFrame = 141, _lockstepWaitStart = 1100, fallback = null;
+      const _rbInputStallAt = new Map([[1, 1000], [2, 1050]]);
+      const _lockstepWaitAt = new Map([[2, 1100]]);
+      let fallback = null;
       const _syncLog = () => {};
       const _switchInputsToReliable = (reason) => { fallback = reason; };
       ${engineFunction('clearPeerStallTimers')}
@@ -32,15 +33,14 @@ for (const mode of ['dual', 'unreliable']) {
       ${engineFunction('setupRollbackInputDataChannel')}
       setupRollbackInputDataChannel('remote', closed);
       closed.onclose();
-      [_rbInputStallKey, _rbInputStallStartTime, _lockstepWaitFrame, _lockstepWaitStart,
+      [_rbInputStallAt.get(1), _rbInputStallAt.get(2), _lockstepWaitAt.get(2),
         peer.rbDc, peer.rbDcUnreliable, _dcBufferStaleStreak.remote, fallback];
       `,
       context,
     );
     assert.deepEqual(Array.from(state), [
-      '1:140',
       1000,
-      141,
+      1050,
       1100,
       null,
       false,
