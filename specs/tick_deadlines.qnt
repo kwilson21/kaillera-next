@@ -201,6 +201,49 @@ module tick_deadlines_current {
   import tick_deadlines(CREDIT_ALL = true, LOCKSTEP_DEADLINE = true).*
 }
 
+// An optional input channel closes while reliable delivery is still
+// available. The current wait may even belong to a different player.
+module optional_input_close {
+  const CLEARS_WAIT: bool
+  pure val LIMIT = 5
+  var elapsed: int
+  var awake: int
+  var timedOut: bool
+
+  action init = all { elapsed' = 0, awake' = 0, timedOut' = false }
+  action second = all {
+    not(timedOut), awake < LIMIT,
+    elapsed' = elapsed + 1, awake' = awake + 1, timedOut' = false,
+  }
+  action close = all {
+    elapsed' = if (CLEARS_WAIT and not(timedOut)) 0 else elapsed,
+    awake' = awake, timedOut' = timedOut,
+  }
+  action expire = all {
+    not(timedOut), elapsed == LIMIT,
+    elapsed' = elapsed, awake' = awake, timedOut' = true,
+  }
+  action step = any { second, close, expire }
+  val deadlineHasNotMoved = elapsed == awake
+
+  // Even repeated closes with one second of awake time between them
+  // leave expiration enabled at the original deadline.
+  run repeatedCloseTest =
+    init
+      .then(LIMIT.reps(_ => second.then(close)))
+      .expect(elapsed == (if (CLEARS_WAIT) 0 else LIMIT))
+      .then(if (CLEARS_WAIT) close else expire)
+      .expect(timedOut == not(CLEARS_WAIT))
+}
+
+module optional_input_close_before {
+  import optional_input_close(CLEARS_WAIT = true).*
+}
+
+module optional_input_close_current {
+  import optional_input_close(CLEARS_WAIT = false).*
+}
+
 // ── A state transfer and the inputs behind it ───────────────────────────────
 //
 // The host's state for a resync (1.4 MB compressed, 24 chunks of 64 KB) and

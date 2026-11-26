@@ -124,7 +124,7 @@ Both channels feed the same receiver, which applies each identical input once.
 If the unordered channel closes, the reliable path continues. In explicit
 unreliable mode, closing the channel also resends unacknowledged inputs on
 the reliable path. In both modes `resetPeerRollbackTransport` preserves
-`_remoteInputs[slot]` and phase history.
+`_remoteInputs[slot]`, phase history and existing input wait deadlines.
 
 ### Call sites
 

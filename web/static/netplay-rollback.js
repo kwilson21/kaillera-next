@@ -12436,7 +12436,7 @@
     peer.rbDc = null;
     peer.rbDcUnreliable = false;
     if (sid) _dcBufferStaleStreak[sid] = 0;
-    clearPeerStallTimers();
+    // Optional delivery changes do not restart a simulation wait.
     _syncLog(`RB-TRANSPORT-RESET slot=${peer.slot ?? 'null'} reason=${reason}`);
   };
 
