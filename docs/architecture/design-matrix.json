@@ -535,6 +535,15 @@
         "tests/ts/resync-replay-boundary.test.ts",
         "specs/sync_follow_up.qnt"
       ]
+    },
+    "escalation-clock": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _armEscalationClock =",
+      "line": 5609,
+      "coverage": [
+        "tests/ts/recovery-delivery.test.ts",
+        "specs/escalation_push.qnt"
+      ]
     }
   },
   "baseline": {
@@ -1138,12 +1147,12 @@
         "fr": "FR-recovery",
         "dp": "DP-pacing",
         "kind": "necessary",
-        "mechanism": "Escalation deadlines still use tick freeze credits, and coordinated installation still observes frame progression. Generic guest retries and the host coordinated capture deadline run on recovery-owned timers.",
+        "mechanism": "Reconnect answer deadlines and coordinated guest holds still use the frame tick. Coordinated installation observes frame progression. Generic guest retries, host coordinated capture deadlines, and host escalation delivery deadlines run on recovery-owned timers.",
         "evidence": [
           "tick",
-          "freeze-credit",
-          "recovery-request",
-          "coordinated-capture-clock"
+          "recovery-apply",
+          "coordinated-capture-clock",
+          "escalation-clock"
         ]
       }
     ],

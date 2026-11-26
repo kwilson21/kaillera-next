@@ -5504,6 +5504,7 @@
       // broadcast's frame, it is from before that hole. Push it afresh.
       const next = _recovery.followUp(attempt, performance.now(), settledFrame);
       if (next.kind === 'push') {
+        _armEscalationClock();
         _syncLog(`INPUT-ASK-PUSH-FOLLOWUP f=${_frameNum} slot=${slot} id=${next.attempt.wireId}`);
         pushSyncState(sid, false, { escalation: [next.attempt] });
       } else if (next.kind === 'covered') {
@@ -5561,6 +5562,7 @@
       }));
       const attempts = _recovery.begin(slot, hole, recipients, _frameNum, now, _syncEnabled);
       if (!attempts.length) return;
+      _armEscalationClock();
       _syncLog(`INPUT-ASK-PUSH f=${_frameNum} slot=${slot} hole=${hole}`);
       if (atOverdue && typeof _startOwnerRepair === 'function') {
         if (_startOwnerRepair(peer, hole, attempts, now)) return;
@@ -5582,8 +5584,6 @@
     }
   };
 
-  // The game clock (including local-freeze credit) drives the typed actor.
-  // No independent wall timer may drop a peer while this page is frozen.
   const _checkOverduePushes = () => {
     if (_playerSlot !== 0) return;
     const now = performance.now();
@@ -5597,6 +5597,43 @@
         chainProgress: _syncChainMovedAt[attempt.sid] ?? 0,
       });
     }
+  };
+
+  const ESCALATION_CLOCK_INTERVAL_MS = 100;
+  let _stopEscalationClock = null;
+  const _cancelEscalationClock = () => {
+    const stop = _stopEscalationClock;
+    _stopEscalationClock = null;
+    stop?.();
+  };
+  const _armEscalationClock = () => {
+    if (_stopEscalationClock) return;
+    let lastWake = performance.now();
+    let blockedSince = null;
+    const stop = window.KNCore.startEvery(() => {
+      if (_stopEscalationClock !== stop) return;
+      if (_phase !== PHASE_RUNNING || (!_recovery.entries().length && !_recovery.publication?.holding())) {
+        _cancelEscalationClock();
+        return;
+      }
+      const now = performance.now();
+      const previousWake = lastWake;
+      lastWake = now;
+      if (_checkpoint?.blocksInput || (_config?.matchReturn && !_config.matchReturn.playing)) {
+        blockedSince ??= previousWake;
+        return;
+      }
+      // A late wake measures a suspended browser independently of frame ticks.
+      // Hidden pages can handle acknowledgements between throttled wakeups.
+      const gap = now - (blockedSince ?? previousWake);
+      blockedSince = null;
+      if (gap >= LOCAL_FREEZE_CREDIT_MS && !(typeof document !== 'undefined' && document.hidden)) {
+        _recovery.freeze(gap, now);
+        for (const sid in _syncChainMovedAt) _syncChainMovedAt[sid] = Math.min(now, _syncChainMovedAt[sid] + gap);
+      }
+      _checkOverduePushes();
+    }, ESCALATION_CLOCK_INTERVAL_MS);
+    _stopEscalationClock = stop;
   };
 
   // RESEND lines are throttled to one a second per peer, with the count they
@@ -6133,6 +6170,7 @@
   // Every slot's entry in the table, when the input timeline starts over (a
   // new match, stop).
   const _resetInputMaps = () => {
+    _cancelEscalationClock();
     _recovery.resetAll();
     _keptSlotFirstInputAt.clear();
     _corePhantomHistory.clear();
@@ -17558,6 +17596,7 @@
 
   const stopSync = () => {
     _phase = PHASE_STOPPED;
+    _cancelEscalationClock();
     _cancelResyncDeadline();
     _cancelScheduledSyncClock();
     _endCatchUp(window.EJS_emulator?.gameManager?.Module ?? {}, 'the match stopped');
@@ -18251,10 +18290,6 @@
     // tick before the throttle can end (specs/tick_deadlines.qnt): a page
     // that froze while held back would drop a peer that never stopped sending.
     if (_pacingThrottleStartAt > 0) _pacingThrottleStartAt = Math.min(now, _pacingThrottleStartAt + gap);
-    // The escalation push's clocks: the guest's answer could not be handled
-    // while this page stood still (specs/escalation_push.qnt, CREDIT_FREEZE).
-    _recovery.freeze(gap, now);
-    for (const sid in _syncChainMovedAt) _syncChainMovedAt[sid] = Math.min(now, _syncChainMovedAt[sid] + gap);
     _syncLog(`LOCAL-FREEZE f=${_frameNum} gap=${Math.round(gap)}ms — peer staleness clocks credited`);
   };
 
@@ -18285,7 +18320,6 @@
     _creditLocalFreeze();
     if (!_checkpoint?.busy) _checkReconnectAnswerDebt();
     _serviceReconnectHostAnswers();
-    _checkOverduePushes();
     _flushResendLogs();
     _checkStateTransition();
     _chk('post-state-transition');

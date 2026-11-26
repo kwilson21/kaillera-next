@@ -23,7 +23,11 @@ function room(guests = 2, realTransfers = false) {
     `
     let now = 10000;
     const performance = { now: () => now };
-    const window = { KNCore: { resyncRequest, syncFollowUp, recovery: { createRecoveryManager, createRecoveryTransferPool } } };
+    let recoveryPulse;
+    const startEvery = (run) => { recoveryPulse = run; return () => { recoveryPulse = undefined; }; };
+    const window = { KNCore: { resyncRequest, syncFollowUp, startEvery, recovery: { createRecoveryManager, createRecoveryTransferPool } } };
+    const PHASE_RUNNING = 4, LOCAL_FREEZE_CREDIT_MS = 1000;
+    let _phase = PHASE_RUNNING, _syncQueueEpoch = 1;
     const _playerSlot = 0, _frameNum = 1000, DELAY_FRAMES = 3, _ranBeforeDelayChange = -1, _workerCoprocPending = null;
     const INPUT_ASK_OVERDUE_ASKS = 3, INPUT_ASK_OVERDUE_MS = 1500;
     const OVERDUE_MAX_PUSHES = 3, OVERDUE_PUSH_QUIET_MS = 20000, OVERDUE_PUSH_TIMEOUT_MS = 5000;
@@ -43,7 +47,7 @@ function room(guests = 2, realTransfers = false) {
       let _pushingSyncState = false, _proactivePushInFlight = false;
       const _queuedSyncPushes = new Map(), _followUpWatches = new Map(), _directAnswerNewest = new Map();
       const _coreFatalError = false, _hasKnSync = false;
-      const _syncQueueEpoch = 1, _syncQueueGen = {}, _syncSendChains = {};
+      const _syncQueueGen = {}, _syncSendChains = {};
       let captureThrows = false, compressions = 0, holdCompression = false, releaseCompression;
       const compressionGate = new Promise(resolve => { releaseCompression = resolve; });
       window.EJS_emulator = { gameManager: { getState: () => {
@@ -68,6 +72,7 @@ function room(guests = 2, realTransfers = false) {
 
     ${engineFunction('_escalateLostInput')}
     ${engineFunction('_checkOverduePushes')}
+    ${source.includes('  let _stopEscalationClock') ? source.slice(source.indexOf('  const ESCALATION_CLOCK_INTERVAL_MS'), source.indexOf('  // RESEND lines')) : ''}
   `,
     context,
   );
@@ -834,4 +839,45 @@ test('room cap stops actual capture and compression before a fresh identity can 
   await flush();
   assert.equal(run('compressions'), 9);
   assert.equal(run('JSON.stringify(drops)'), '["a"]');
+});
+
+test('the host retries a failed transfer on its own clock with frame ticks stopped', () => {
+  const run = room();
+  run(`_escalateLostInput(_peers.a, 'push', now, 900);
+       _onEscalationTransfer(sends[0].options.escalation, 'a', false, 1000); `);
+  run('for (let i = 0; i < 50; i++) { now += 100; recoveryPulse?.(); }');
+  assert.deepEqual(JSON.parse(run('JSON.stringify(sends.map(s => s.sid))')), [null, 'a']);
+});
+
+for (const freezeMs of [1050, 6000]) {
+  test(`a ${freezeMs}ms visible wake gap preserves the queued ack window`, () => {
+    const run = room(1);
+    run(`_escalateLostInput(_peers.a, 'push', now, 900);
+         const attempt = sends[0].options.escalation[0];
+         _onEscalationTransfer([attempt], 'a', true, 1000);
+         for (let i = 0; i < 40; i++) { now += 100; recoveryPulse?.(); }
+         now += ${freezeMs};
+         recoveryPulse?.();`);
+    assert.equal(run('sends.length'), 1);
+    run(`_recovery.acknowledge(1, 997, attempt.wireId);
+         now += 100;
+         recoveryPulse?.();`);
+    assert.equal(run('_recovery.entries().length'), 0);
+    assert.equal(run('recoveryPulse'), undefined);
+  });
+}
+
+test('escalation time advances during checkpoint approach and pauses at the blocking boundary', () => {
+  const run = room(1);
+  run(`_escalateLostInput(_peers.a, 'push', now, 900);
+       _onEscalationTransfer(sends[0].options.escalation, 'a', false, 1000);
+       _checkpoint = {busy: true, blocksInput: false};
+       for (let i = 0; i < 49; i++) { now += 100; recoveryPulse?.(); }
+       _checkpoint.blocksInput = true;
+       for (let i = 0; i < 20; i++) { now += 100; recoveryPulse?.(); }`);
+  assert.equal(run('sends.length'), 1);
+  run(`_checkpoint = null;
+       now += 100; recoveryPulse?.();
+       now += 100; recoveryPulse?.();`);
+  assert.equal(run('sends.length'), 2);
 });

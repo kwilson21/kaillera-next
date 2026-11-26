@@ -49,6 +49,7 @@ function room(realTransfer = false) {
     `
     let now=1, _frameNum=1076, nativeFrame=1076, depth=0, pending=-1, failures=0;
     let _syncQueueEpoch=9, _pushingSyncState=false, _proactivePushInFlight=false;
+    const _armEscalationClock = () => {};
     const PHASE_RUNNING=5, RUN_LATE_JOIN_PAUSE=1, _phase=5, _runSubstate=0; let _playerSlot=0;
     const _useCRollback=true, _hasKnSync=true, _isSpectator=false, _demoMode=false, _catchUpTo=-1;
     let RB_WORKER_COPROC=false;
