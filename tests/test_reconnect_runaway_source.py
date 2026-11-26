@@ -92,7 +92,10 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     assert "pushDeadlineStep(" in machine
     assert "_recovery.event(attempt," in pushes
     assert "_inputSettledBefore[slot]" not in pushes
-    assert "_serviceReconnectHostAnswers();\n    _checkOverduePushes();" in src
+    assert "_armEscalationClock();" in escalate
+    tick = src[src.index("const tick = () => {") :]
+    tick = tick[: tick.index("\n  };\n")]
+    assert "_checkOverduePushes();" not in tick
     assert "hardDisconnectPeer(sid, { tell: 'desync' });" in src
     assert "could not be brought back in sync and was dropped" in src
     # Every ask that goes out is counted.
@@ -297,7 +300,7 @@ def test_the_push_deadline_runs_only_on_the_pushs_own_hand_over():
     assert src.count("_syncChainMovedAt[t.sid] = performance.now();") == 3
     assert "_recovery.event(a, { type: 'enqueued', attempt: a.sequence, now: performance.now() });" in send
     # A freeze of the host's page is credited to the push's clocks.
-    credit = src[src.index("const _creditLocalFreeze = () => {") :]
+    credit = src[src.index("const _armEscalationClock = () => {") :]
     credit = credit[: credit.index("\n  };\n")]
     assert "_recovery.freeze(gap, now);" in credit
     assert (
@@ -326,7 +329,7 @@ def test_the_push_deadline_runs_only_on_the_pushs_own_hand_over():
     flush = flush[: flush.index("\n  };\n")]
     assert "if (now - log.lastAt < INPUT_OOR_LOG_EVERY_MS) continue;" in flush
     assert "Object.entries" not in flush
-    assert "_checkOverduePushes();\n    _flushResendLogs();" in src
+    assert "_serviceReconnectHostAnswers();\n    _flushResendLogs();" in src
 
 
 def test_an_escalation_push_is_a_full_state_and_the_counter_is_per_match():

@@ -586,3 +586,35 @@ module hole_counts_one_record {
 module hole_counts_fixed {
   import hole_counts(PER_HOLE = true).*
 }
+
+// A live browser's recovery wakeup is independent of native frame ticks.
+// A late visible wake credits the part of the interval when it could not
+// service acknowledgements. The real actor retains its own attempt budget.
+module escalation_clock {
+  const RECOVERY_CLOCK: bool
+  var remaining: int
+  var retried: bool
+
+  action init = all { remaining' = 5, retried' = false }
+
+  action pulse(elapsed: int, freeze: int, frameTick: bool): bool = {
+    val service = RECOVERY_CLOCK or frameTick
+    val left = if (service) remaining - (elapsed - freeze) else remaining
+    all { remaining' = left, retried' = (retried or left <= 0) }
+  }
+
+  run responsivePageWithoutFrameTicksTest =
+    init.then(pulse(5, 0, false)).expect(retried == RECOVERY_CLOCK)
+
+  run frozenPageCanStillReceiveAckTest =
+    init.then(pulse(10, 9, true)).expect(not(retried) and remaining == 4)
+      .then(pulse(4, 0, true)).expect(retried)
+}
+
+module escalation_clock_before {
+  import escalation_clock(RECOVERY_CLOCK = false).*
+}
+
+module escalation_clock_fixed {
+  import escalation_clock(RECOVERY_CLOCK = true).*
+}
