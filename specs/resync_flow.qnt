@@ -1022,3 +1022,54 @@ module coordinated_guest_hold_clock_before {
 module coordinated_guest_hold_clock_fixed {
   import coordinated_guest_hold_clock(RECOVERY_CLOCK = true).*
 }
+
+// A frame tick and a recovery wake are independent. Live progression
+// observes the pending restore boundary without carrying out the install.
+module guest_restore_clock {
+  const OWN_CLOCK: bool
+  pure val TARGET = 2
+  pure val REPLAY_GRACE = 3
+  var frame: int
+  var installedAt: int
+  var replaying: bool
+  var waited: int
+
+  action init = all { frame' = 1, installedAt' = -1, replaying' = true, waited' = 0 }
+  action wake(frameTick: bool, nativeReplay: bool): bool = {
+    val ownsService = OWN_CLOCK != frameTick
+    val due = frame >= TARGET and installedAt < 0
+    val canInstall = due and (not(nativeReplay) or waited >= REPLAY_GRACE)
+    all {
+      frame' = if (frameTick and not(canInstall) and not(nativeReplay)) frame + 1 else frame,
+      installedAt' = if (ownsService and canInstall) frame else installedAt,
+      replaying' = nativeReplay,
+      waited' = if (ownsService and due and nativeReplay) waited + 1 else waited,
+    }
+  }
+  action step = {
+    nondet frameTick = Bool.oneOf()
+    nondet replay = Bool.oneOf()
+    wake(frameTick, replay)
+  }
+  val onlyInstallsAtBoundary = installedAt == -1 or installedAt >= TARGET
+
+  run waitingClockInstallsAtNativeBoundaryTest =
+    init.then(wake(false, false)).expect(installedAt == -1 and frame == 1)
+      .then(wake(true, false)).expect(frame == TARGET and installedAt == -1)
+      .then(wake(false, false))
+      .expect(frame == TARGET and installedAt == (if (OWN_CLOCK) TARGET else -1))
+
+  run replayGraceExpiresWithoutFurtherFramesTest =
+    init.then(wake(true, false)).then(wake(false, true)).then(wake(false, true)).then(wake(false, true))
+      .expect(installedAt == -1)
+      .then(wake(false, true))
+      .expect(frame == TARGET and installedAt == (if (OWN_CLOCK) TARGET else -1))
+}
+
+module guest_restore_clock_before {
+  import guest_restore_clock(OWN_CLOCK = false).*
+}
+
+module guest_restore_clock_fixed {
+  import guest_restore_clock(OWN_CLOCK = true).*
+}

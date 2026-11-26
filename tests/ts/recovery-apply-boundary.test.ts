@@ -12,6 +12,9 @@ function decoder() {
     `
  let _lastAppliedRecoveryId=0,_lastAppliedSyncHostFrame=99;
  let _pendingResyncState={frame:101,recoveryId:8,answerFor:0,bytes:'new'};
+ let _syncApplyDeferredAt = 0;
+ const _armGuestRecoveryClock = () => {};
+ ${between('  const _stageGuestRecovery =', '  const _serviceGuestRecoveryBoundary =')}
  const _endsResyncRequest=()=>false,_syncLog=()=>{},_keepsAwaitedAnswer=()=>false;
  let _resyncRequestInFlight=false;const _resyncRequestId=0,_lastSyncState={length:1};
  let finishXor;const workerPost=()=>new Promise(r=>finishXor=r);

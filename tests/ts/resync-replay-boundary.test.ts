@@ -14,7 +14,9 @@ const from = (start: string, end: string) => {
 type Tick = (
   ms: number,
   frame: number,
+  catchingUp?: boolean,
 ) => {
+  held: boolean;
   replaying: boolean;
   installed?: number;
   writeWhileReplaying?: boolean;
@@ -26,7 +28,7 @@ type Tick = (
 const fixture = (
   target: number,
   stateFrame: number,
-  { warnAt = Infinity, capacity = 8, nativeResult = 0, nativeThrows = false } = {},
+  { warnAt = Infinity, capacity = 8, nativeResult = 0, nativeThrows = false, recoveryWakeOnly = false } = {},
 ): Tick =>
   runInNewContext(
     `
@@ -34,7 +36,12 @@ const fixture = (
     const performance = {now: () => now};
     let installed, writeWhileReplaying, fatalBranch;
     let _coreFatalError = false;
-    const _handleCoreFatal = (branch) => { fatalBranch = branch; _coreFatalError = true; };
+    const _handleCoreFatal = (branch, error) => {
+      if (error?.message !== 'settled-test-boundary') {
+        fatalBranch = branch;
+        _coreFatalError = true;
+      }
+    };
     const mod = {
       HEAPU8: new Uint8Array(16),
       _kn_sync_write: () => {
@@ -51,9 +58,20 @@ const fixture = (
       _kn_peek_pending_rollback: () => replaying ? 99 : -1,
       _kn_clear_replay_state: () => { replaying = false; },
     };
-    const window = { EJS_emulator: {gameManager: {Module: mod}}, KNCore: {startAfter: () => () => {}} };
+    let wake;
+    const PHASE_RUNNING = 'running', PHASE_STOPPED = 'stopped', _phase = PHASE_RUNNING;
+    const RUN_LATE_JOIN_PAUSE = 'late-join-pause';
+    const _config = {}, _workerCoprocPending = null, _playerSlot = 1, _isSpectator = false;
+    const _lastUsersUpdated = null;
+    const window = { EJS_emulator: {gameManager: {Module: mod}},
+      KNCore: {startAfter: () => () => {}, startEvery: run => {
+        wake = run;
+        return () => { wake = undefined; };
+      }} };
     const _syncQueueEpoch = 1;
-    const _catchUpTo = -1, _syncLog = () => {};
+    let _catchUpTo = -1;
+    const _syncLog = () => {};
+    const _isLateAnswerBehind = () => false, _canCatchUp = () => false;
     const RUN_AWAITING_RESYNC = 2, RUN_NORMAL = 0;
     let _runSubstate = RUN_NORMAL, _awaitingResyncAt = 0;
     let _syncTargetFrame = target, _syncTargetDeadlineAt = target > 0 ? 3100 : 0;
@@ -72,25 +90,29 @@ const fixture = (
     const _guestAllowsReconnectState = () => true;
     ${from('  const _syncStateCanInstall =', '  // -- Init / Stop API')}
     ${from('  let _cancelSyncTargetClock', '  // A resync state at most')}
-    ${from('  const SYNC_APPLY_REPLAY_WAIT_MS', '  // Coordinated sync dispatch')}
+    ${from('  const SYNC_APPLY_REPLAY_WAIT_MS', '  const COORDINATED_CAPTURE_POLL_MS')}
     const applyAtBoundary = () => {
       try {
-        ${from('    const pending = _pendingResyncState;\n    const atSyncBoundary =', '    if (_coreFatalError) return; // sync application')}
+        _serviceGuestRecoveryBoundary();
       } catch (error) {
         if (error.message !== 'settled-test-boundary') throw error;
       }
       if (_coreFatalError) return false;
       return true;
     };
-    const tick = (ms, frame) => {
+    const tick = (ms, frame, catchingUp = false) => {
       now = ms;
       _frameNum = frame;
-      const canContinue = !_coreFatalError && applyAtBoundary();
-      return { replaying, installed, writeWhileReplaying, target: _syncTargetFrame, fatalBranch, canContinue };
+      _catchUpTo = catchingUp ? frame + 1 : -1;
+      const held = !!_pendingResyncState && _guestRecoveryHoldsFrame();
+      if (recoveryWakeOnly) wake?.();
+      const canContinue = !_coreFatalError && (recoveryWakeOnly || applyAtBoundary());
+      return { held, replaying, installed, writeWhileReplaying, target: _syncTargetFrame, fatalBranch, canContinue };
     };
+    if (typeof _armGuestRecoveryClock !== 'undefined') _armGuestRecoveryClock();
     tick;
     `,
-    { target, stateFrame, warnAt, capacity, nativeResult, nativeThrows },
+    { target, stateFrame, warnAt, capacity, nativeResult, nativeThrows, recoveryWakeOnly },
   );
 
 test('a coordinated future snapshot keeps pending replay until its install boundary', () => {
@@ -451,4 +473,23 @@ test('a trap during native resync terminates the match before replay can step', 
   assert.equal(trapped.fatalBranch, 'kn-sync-write');
   assert.equal(trapped.canContinue, false);
   assert.equal(tick(1200, 100).canContinue, false);
+});
+
+test('a guest can install at its native boundary while the frame pump is stopped', () => {
+  const wake = fixture(102, 102, { recoveryWakeOnly: true });
+  assert.equal(wake(100, 101).installed, undefined);
+  assert.equal(wake(200, 102).installed, undefined);
+  assert.equal(wake(1199, 102).installed, undefined);
+  assert.equal(wake(1200, 102).installed, 102);
+});
+
+test('the frame gate lets catch-up finish and holds once replay reaches its grace limit', () => {
+  const wake = fixture(102, 102, { recoveryWakeOnly: true });
+  assert.equal(wake(100, 102, true).held, false);
+  assert.equal(wake(1200, 102, true).installed, undefined);
+  assert.equal(wake(1201, 102).held, false);
+  assert.equal(wake(2200, 102).held, false);
+  const ready = wake(2201, 102);
+  assert.equal(ready.held, true);
+  assert.equal(ready.installed, 102);
 });

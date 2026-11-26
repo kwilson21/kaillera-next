@@ -8090,6 +8090,7 @@
     _hostAuthoredReceipts.clear();
     _deferredPhantomRecovery.clear();
     _pendingResyncState = null;
+    _cancelGuestRecoveryClock();
     _resyncRequestInFlight = false;
     _owedResync = false;
     _owedResyncAsksAgain = 0;
@@ -18004,13 +18005,15 @@
   // an installed state can supersede it.
   const SYNC_APPLY_REPLAY_WAIT_MS = 1000;
   let _syncApplyDeferredAt = 0;
+  const _syncReplayActive = () => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    return mod?._kn_get_replay_depth?.() > 0 || (mod?._kn_peek_pending_rollback?.() ?? -1) >= 0;
+  };
   const _syncApplyReplayStep = () => {
     // A catch-up ends within MAX_CATCH_UP_FRAMES ticks (_startCatchUp): the
     // newer state is applied then, from the frame the guest is back on.
     if (_catchUpTo >= 0) return 'wait';
-    const mod = window.EJS_emulator?.gameManager?.Module;
-    const busy = mod?._kn_get_replay_depth?.() > 0 || (mod?._kn_peek_pending_rollback?.() ?? -1) >= 0;
-    if (!busy) {
+    if (!_syncReplayActive()) {
       _syncApplyDeferredAt = 0;
       return 'apply';
     }
@@ -18023,6 +18026,143 @@
     _syncLog(`SYNC-APPLY-DEFERRED timeout f=${_frameNum} — attempting state install`);
     _syncApplyDeferredAt = 0;
     return 'replace';
+  };
+
+  let _stopGuestRecoveryClock = null;
+  const _cancelGuestRecoveryClock = () => {
+    const stop = _stopGuestRecoveryClock;
+    _stopGuestRecoveryClock = null;
+    _syncApplyDeferredAt = 0;
+    stop?.();
+  };
+  const _guestRecoveryAtBoundary = () => _syncTargetFrame <= 0 || _frameNum >= _syncTargetFrame;
+  const _guestRecoveryBlocked = () =>
+    _checkpoint?.busy ||
+    (_config?.matchReturn && !_config.matchReturn.playing) ||
+    _runSubstate === RUN_LATE_JOIN_PAUSE ||
+    window._rbPendingInit ||
+    _workerCoprocPending ||
+    (_playerSlot !== 0 && !_isSpectator && _lastUsersUpdated?.hostReturnDeadline && !hostGameConnected());
+  const _guestRecoveryHoldsFrame = () => {
+    if (_catchUpTo >= 0 || !_guestRecoveryAtBoundary() || _guestRecoveryBlocked()) return false;
+    const replaying = _syncReplayActive();
+    // Pending replay must be allowed to run. Once it is settled (or its
+    // existing grace expires), pause normal steps for the recovery wake.
+    return (
+      !replaying || (_syncApplyDeferredAt > 0 && performance.now() - _syncApplyDeferredAt >= SYNC_APPLY_REPLAY_WAIT_MS)
+    );
+  };
+  const _armGuestRecoveryClock = () => {
+    if (_stopGuestRecoveryClock) return;
+    const epoch = _syncQueueEpoch;
+    const stop = window.KNCore.startEvery(() => {
+      if (_stopGuestRecoveryClock !== stop) return;
+      if (epoch !== _syncQueueEpoch || _phase === PHASE_STOPPED || _coreFatalError || !_pendingResyncState) {
+        _cancelGuestRecoveryClock();
+        return;
+      }
+      if (_phase !== PHASE_RUNNING || _guestRecoveryBlocked()) return;
+      try {
+        _serviceGuestRecoveryBoundary();
+      } catch (error) {
+        _handleCoreFatal('guest-resync-boundary', error);
+      }
+      if (!_pendingResyncState || _coreFatalError) _cancelGuestRecoveryClock();
+    }, 16);
+    _stopGuestRecoveryClock = stop;
+  };
+  const _stageGuestRecovery = (state) => {
+    if (!_pendingResyncState) _syncApplyDeferredAt = 0;
+    _pendingResyncState = state;
+    _armGuestRecoveryClock();
+  };
+  const _serviceGuestRecoveryBoundary = () => {
+    // Async resync: apply buffered state at clean frame boundary.
+    // Coordinated injection: hold state until _syncTargetFrame so host and guest
+    // both reach that frame before the state is applied — snap = 0.
+    //
+    // A state can't be loaded while a rollback replay is in flight: C refuses
+    // kn_set_frame then, so JS would rewind its frame counter while C kept
+    // its own and finished the old replay over the new state (the peers
+    // split from that frame). Hold the state until the replay finishes.
+    // The answer to a request given up on, from before this guest's frame or
+    // the frame the newest request named: applied, it would take this guest
+    // back (specs/resync_flow.qnt, aLateAnswerDoesNotTakeTheGuestBack).
+    // The same freshness check applies before and after the target's
+    // deadline. Dropping an older answer leaves the current target armed.
+    if (_isLateAnswerBehind(_pendingResyncState)) {
+      _syncLog(
+        `SYNC-LATE-ANSWER-DROPPED f=${_frameNum} answerFor=${_pendingResyncState.answerFor} ` +
+          `newest=${_resyncRequestId} frame=${_pendingResyncState.frame} asked=${_resyncRequestAt} ` +
+          `target=${_syncTargetFrame}`,
+      );
+      _pendingResyncState = null;
+    }
+    // A state further back than this guest catches up from (KNCore.catchUp.catchUpStep,
+    // proved; specs/resync_flow.qnt, tooOldToCatchUpTest): not applied, as a
+    // late answer is not. The request it answered has ended, so an owed
+    // resync is asked for again here, or given up visibly.
+    if (
+      _pendingResyncState &&
+      _canCatchUp() &&
+      window.KNCore.catchUp.catchUpStep(_pendingResyncState.frame, _frameNum, MAX_CATCH_UP_FRAMES) === 'refuse'
+    ) {
+      _syncLog(
+        `SYNC-TOO-OLD-DROPPED f=${_frameNum} frame=${_pendingResyncState.frame} ` +
+          `behind=${_frameNum - _pendingResyncState.frame} max=${MAX_CATCH_UP_FRAMES} ` +
+          `answerFor=${_pendingResyncState.answerFor ?? 0} newest=${_resyncRequestId}`,
+      );
+      _pendingResyncState = null;
+      const then = window.KNCore.catchUp.tooOldStep(
+        _owedResync,
+        _resyncRequestInFlight,
+        _owedResyncAsksAgain,
+        RESYNC_MAX_ASKS_AGAIN,
+      );
+      if (then === 'askAgain') _askAgainForOwedResync();
+      else if (then === 'stopAsking') _stopAskingForOwedResync('its answers came too late to catch up from');
+    }
+    const pending = _pendingResyncState;
+    const atSyncBoundary = _guestRecoveryAtBoundary();
+    if (pending && atSyncBoundary) {
+      const ahead = pending.frame != null ? pending.frame - _frameNum : 0;
+      if (ahead > 0 && ahead <= SYNC_HOLD_MAX_FRAMES && (_syncTargetFrame > 0 || !pending.held)) {
+        // Wait for the snapshot's frame to avoid skipping local inputs. A
+        // replacement ahead of a coordinated target keeps the original deadline.
+        pending.held = true;
+        if (_syncTargetDeadlineAt) _syncTargetFrame = pending.frame;
+        else _armSyncTarget(pending.frame);
+        if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
+        _syncApplyDeferredAt = 0;
+        _syncLog(`sync held: state frame ${pending.frame} is ${ahead} ahead of f=${_frameNum}, applying there`);
+      } else {
+        // A rejected snapshot has no authority to discard local replay.
+        const canInstall = _syncStateCanInstall(pending);
+        const replayStep = canInstall ? _syncApplyReplayStep() : null;
+        if (replayStep !== 'wait') {
+          _pendingResyncState = null;
+          if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
+          _clearSyncTarget();
+          if (canInstall) {
+            applySyncState(
+              pending.bytes,
+              pending.frame,
+              pending.fromProactive,
+              pending.recoveryId,
+              pending.extras,
+              pending.answerFor,
+              pending.answerScope,
+              pending.proofFor,
+              replayStep === 'replace',
+            );
+          } else {
+            _syncApplyDeferredAt = 0;
+          }
+        }
+      }
+    } else {
+      _syncApplyDeferredAt = 0;
+    }
   };
 
   const COORDINATED_CAPTURE_POLL_MS = 16;
@@ -18483,98 +18623,19 @@
       }
     }
 
-    // Async resync: apply buffered state at clean frame boundary.
-    // Coordinated injection: hold state until _syncTargetFrame so host and guest
-    // both reach that frame before the state is applied — snap = 0.
-    //
-    // A state can't be loaded while a rollback replay is in flight: C refuses
-    // kn_set_frame then, so JS would rewind its frame counter while C kept
-    // its own and finished the old replay over the new state (the peers
-    // split from that frame). Hold the state until the replay finishes.
-    // The answer to a request given up on, from before this guest's frame or
-    // the frame the newest request named: applied, it would take this guest
-    // back (specs/resync_flow.qnt, aLateAnswerDoesNotTakeTheGuestBack).
-    // Dropped here, before either branch below, so it is dropped after the
-    // target's deadline too (lateAnswerAfterTheTargetDeadlineTest), and on
-    // the tick the guest moves past a late answer it held. A wait at the
-    // target goes on, to that deadline (I1).
-    if (_isLateAnswerBehind(_pendingResyncState)) {
-      _syncLog(
-        `SYNC-LATE-ANSWER-DROPPED f=${_frameNum} answerFor=${_pendingResyncState.answerFor} ` +
-          `newest=${_resyncRequestId} frame=${_pendingResyncState.frame} asked=${_resyncRequestAt} ` +
-          `target=${_syncTargetFrame}`,
-      );
-      _pendingResyncState = null;
+    if (_pendingResyncState && _guestRecoveryHoldsFrame()) {
+      _markTickReturn('skip:guest-recovery-boundary');
+      return;
     }
-    // A state further back than this guest catches up from (KNCore.catchUp.catchUpStep,
-    // proved; specs/resync_flow.qnt, tooOldToCatchUpTest): not applied, as a
-    // late answer is not. The request it answered has ended, so an owed
-    // resync is asked for again here, or given up visibly.
     if (
-      _pendingResyncState &&
-      _canCatchUp() &&
-      window.KNCore.catchUp.catchUpStep(_pendingResyncState.frame, _frameNum, MAX_CATCH_UP_FRAMES) === 'refuse'
+      !_pendingResyncState &&
+      _syncTargetFrame > 0 &&
+      _frameNum >= _syncTargetFrame &&
+      _runSubstate !== RUN_AWAITING_RESYNC
     ) {
-      _syncLog(
-        `SYNC-TOO-OLD-DROPPED f=${_frameNum} frame=${_pendingResyncState.frame} ` +
-          `behind=${_frameNum - _pendingResyncState.frame} max=${MAX_CATCH_UP_FRAMES} ` +
-          `answerFor=${_pendingResyncState.answerFor ?? 0} newest=${_resyncRequestId}`,
-      );
-      _pendingResyncState = null;
-      const then = window.KNCore.catchUp.tooOldStep(
-        _owedResync,
-        _resyncRequestInFlight,
-        _owedResyncAsksAgain,
-        RESYNC_MAX_ASKS_AGAIN,
-      );
-      if (then === 'askAgain') _askAgainForOwedResync();
-      else if (then === 'stopAsking') _stopAskingForOwedResync('its answers came too late to catch up from');
-    }
-    const pending = _pendingResyncState;
-    const atSyncBoundary = _syncTargetFrame <= 0 || _frameNum >= _syncTargetFrame;
-    if (pending && atSyncBoundary) {
-      const ahead = pending.frame != null ? pending.frame - _frameNum : 0;
-      if (ahead > 0 && ahead <= SYNC_HOLD_MAX_FRAMES && (_syncTargetFrame > 0 || !pending.held)) {
-        // Wait for the snapshot's frame to avoid skipping local inputs. A
-        // replacement ahead of a coordinated target keeps the original deadline.
-        pending.held = true;
-        if (_syncTargetDeadlineAt) _syncTargetFrame = pending.frame;
-        else _armSyncTarget(pending.frame);
-        if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-        _syncApplyDeferredAt = 0;
-        _syncLog(`sync held: state frame ${pending.frame} is ${ahead} ahead of f=${_frameNum}, applying there`);
-      } else {
-        // A rejected snapshot has no authority to discard local replay.
-        const canInstall = _syncStateCanInstall(pending);
-        const replayStep = canInstall ? _syncApplyReplayStep() : null;
-        if (replayStep !== 'wait') {
-          _pendingResyncState = null;
-          if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-          _clearSyncTarget();
-          if (canInstall) {
-            applySyncState(
-              pending.bytes,
-              pending.frame,
-              pending.fromProactive,
-              pending.recoveryId,
-              pending.extras,
-              pending.answerFor,
-              pending.answerScope,
-              pending.proofFor,
-              replayStep === 'replace',
-            );
-          } else {
-            _syncApplyDeferredAt = 0;
-          }
-        }
-      }
-    } else {
-      _syncApplyDeferredAt = 0;
-      if (_syncTargetFrame > 0 && atSyncBoundary && _runSubstate !== RUN_AWAITING_RESYNC) {
-        _runSubstate = RUN_AWAITING_RESYNC;
-        _awaitingResyncAt = performance.now();
-        _syncLog(`coord stall at frame ${_frameNum} (target=${_syncTargetFrame}) — waiting for state`);
-      }
+      _runSubstate = RUN_AWAITING_RESYNC;
+      _awaitingResyncAt = performance.now();
+      _syncLog(`coord stall at frame ${_frameNum} (target=${_syncTargetFrame}) — waiting for state`);
     }
 
     if (_coreFatalError) return; // sync application may have failed after loading native state
@@ -22155,7 +22216,7 @@
         return;
       }
       if (_keepsAwaitedAnswer(answerFor, frame)) return;
-      _pendingResyncState = { bytes: decompressed, frame, isRegions: true, answerFor };
+      _stageGuestRecovery({ bytes: decompressed, frame, isRegions: true, answerFor });
       _syncLog(`regions resync ready: ${Math.round(wireSize / 1024)}KB wire frame=${frame}`);
       return;
     }
@@ -22225,7 +22286,7 @@
         !_readReconnectAnswer(answerFor, answerScope, proofFor)
       )
         return;
-      _pendingResyncState = { bytes: fullBytes, frame, answerFor, answerScope, proofFor, recoveryId, extras };
+      _stageGuestRecovery({ bytes: fullBytes, frame, answerFor, answerScope, proofFor, recoveryId, extras });
       _syncLog(
         `resync ready (${isFull ? 'full' : 'delta'}, ${Math.round(wireSize / 1024)}KB wire, source=${source}, ` +
           `answerFor=${answerFor} newest=${_resyncRequestId} endsRequest=${endsRequest})`,
@@ -23016,6 +23077,7 @@
     _queuedSyncPushes.clear();
     _proactivePushInFlight = false;
     _pendingResyncState = null;
+    _cancelGuestRecoveryClock();
     _lifecycleResyncPending = false;
     _lifecycleResyncStartedAt = 0;
     _resumeInputGuardUntil = 0;

@@ -598,6 +598,8 @@ test('recovery ACK identifies the exact recipient and attempt across retries and
 test('actual receiver keeps tokens across buffering, rejects stale decode and same-frame duplicate', async () => {
   const start = source.indexOf('  async function _handleDecodedSyncPayload(');
   const handler = source.slice(start, source.indexOf('\n  const handleSyncChunksComplete', start));
+  const stageStart = source.indexOf('  const _stageGuestRecovery =');
+  const stage = source.slice(stageStart, source.indexOf('  const _serviceGuestRecoveryBoundary =', stageStart));
   const context = vm.createContext({});
   vm.runInContext(
     `
@@ -606,6 +608,9 @@ test('actual receiver keeps tokens across buffering, rejects stale decode and sa
     const _syncLog = () => {}, _clearLifecycleResyncGuard = () => {};
     const _endsResyncRequest = () => false, _answersAnOlderRequest = () => false;
     const _keepsAwaitedAnswer = () => false;
+    let _syncApplyDeferredAt = 0;
+    const _armGuestRecoveryClock = () => {};
+    ${stage}
     ${reconnectProofSource(source)}
     ${handler}
     const receive = (id, frame=1000, full=true) => _handleDecodedSyncPayload({

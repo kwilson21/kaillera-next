@@ -454,7 +454,7 @@ def test_pending_rollback_init_keeps_reliable_input_stream_alive():
         assert snippet in helper_src
 
     pending_idx = src.index("if (window._rbPendingInit) {")
-    pending_src = src[pending_idx : src.index("if (_syncTargetFrame > 0", pending_idx)]
+    pending_src = src[pending_idx : src.index("if (_pendingResyncState && _guestRecoveryHoldsFrame())", pending_idx)]
     send_idx = pending_src.index("_sendPendingRollbackInitInput();")
     decide_idx = pending_src.index("if (!_guestStart('tick')) {")
     assert send_idx < decide_idx
@@ -1081,10 +1081,10 @@ def test_only_its_own_answer_ends_a_resync_request():
     assert handle.count("_resyncRequestInFlight = false;") == 4
     assert "_resyncRequestInFlight = false; // allow fresh request" in handle
     assert (
-        "_pendingResyncState = { bytes: fullBytes, frame, answerFor, answerScope, proofFor, recoveryId, extras };"
+        "_stageGuestRecovery({ bytes: fullBytes, frame, answerFor, answerScope, proofFor, recoveryId, extras });"
         in handle
     )
-    assert "_pendingResyncState = { bytes: decompressed, frame, isRegions: true, answerFor };" in handle
+    assert "_stageGuestRecovery({ bytes: decompressed, frame, isRegions: true, answerFor });" in handle
 
     # Host: the number comes just ahead of the request and is for that
     # request only, answered or rate limited.
@@ -1171,21 +1171,21 @@ def test_a_late_answer_that_would_take_the_guest_back_is_dropped():
         "      state.frame,\n      _resyncRequestId,\n      _resyncRequestAt,\n      _frameNum,\n    )"
     ) in late
     assert "_syncTargetFrame" not in late
-    tick = src[src.index("const tick = () => {") :]
-    drop_at = tick.index("if (_isLateAnswerBehind(_pendingResyncState)) {")
-    dropped = tick[drop_at : tick.index("\n    }\n", drop_at)]
+    recovery = src[src.index("const _serviceGuestRecoveryBoundary = () => {") :]
+    drop_at = recovery.index("if (_isLateAnswerBehind(_pendingResyncState)) {")
+    dropped = recovery[drop_at : recovery.index("\n    }\n", drop_at)]
     assert "SYNC-LATE-ANSWER-DROPPED f=${_frameNum}" in dropped
     assert "_pendingResyncState = null;" in dropped
     # The wait goes on: the target and its deadline are left as they are.
     assert "_syncTargetFrame = " not in dropped and "_syncTargetDeadlineAt" not in dropped
-    # The recovery timer releases the target. Only the frame path applies the
-    # buffered state and re-checks its eligibility first.
+    # The target deadline releases the target while the install wake checks
+    # the buffered state again at its native frame boundary.
     clock = src[src.index("const _armSyncTarget =") : src.index("// A resync state at most")]
     assert "COORD-SYNC-TIMEOUT target=" in clock
     assert "applySyncState(" not in clock
     assert "_clearSyncTarget();" not in dropped
-    hold_at = tick.index("if (pending && atSyncBoundary) {")
-    replay_at = tick.index("const replayStep = canInstall ? _syncApplyReplayStep() : null;")
+    hold_at = recovery.index("if (pending && atSyncBoundary) {")
+    replay_at = recovery.index("const replayStep = canInstall ? _syncApplyReplayStep() : null;")
     assert drop_at < hold_at < replay_at
     # The stale-state check stays.
     assert "explicit sync discarded: stale frame=${frame} <= lastApplied=${_lastAppliedSyncHostFrame}" in src
@@ -1209,8 +1209,8 @@ def test_a_late_answer_does_not_replace_the_awaited_one():
         )
     ]
     for pending in (
-        "_pendingResyncState = { bytes: decompressed, frame, isRegions: true, answerFor };",
-        "_pendingResyncState = { bytes: fullBytes, frame, answerFor, answerScope, proofFor, recoveryId, extras };",
+        "_stageGuestRecovery({ bytes: decompressed, frame, isRegions: true, answerFor });",
+        "_stageGuestRecovery({ bytes: fullBytes, frame, answerFor, answerScope, proofFor, recoveryId, extras });",
     ):
         at = payload.index(pending)
         assert payload.rindex("if (_keepsAwaitedAnswer(answerFor, frame)) return;", 0, at) > at - 400
