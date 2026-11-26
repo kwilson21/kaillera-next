@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.73.13",
+    "date": "2026-11-26",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "install ready guest recovery snapshots on a recovery clock (#366)"
+      }
+    ]
+  },
+  {
     "version": "0.73.12",
     "date": "2026-11-26",
     "changes": [
