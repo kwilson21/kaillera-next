@@ -2,6 +2,7 @@ import { canCommitCheckpoint } from './checkpoint-commit.ts';
 import { createActor } from 'xstate';
 import { checkpointMachine } from './checkpoint-machine.ts';
 import { checkRelayed } from './relay.ts';
+import { startEvery } from './poll.ts';
 import type { WirePayload } from './wire.ts';
 import type { Input } from './owner-proof.ts';
 import { CheckpointJournal, digestBytes, digestRecord, neutral, sameInput } from './checkpoint-journal.ts';
@@ -15,6 +16,7 @@ import {
 
 const PERIOD = 128;
 const MAX_DELAY = 16;
+const RECOVERY_POLL_MS = 16;
 type Member = Readonly<{ slot: number; sid: string }>;
 type Snapshot = {
   frame: number;
@@ -97,12 +99,15 @@ export class CheckpointRecovery {
   private installedState: Snapshot | null = null;
   private installedSeal = '';
   private closed = false;
+  private readonly schedule: typeof startEvery;
+  private stopClock: (() => void) | null = null;
   private waitingForDecision = false;
   private readonly port: Port;
   private readonly scope: Scope;
   readonly self: number;
-  constructor(port: Port, scope: Scope, self: number) {
+  constructor(port: Port, scope: Scope, self: number, schedule = startEvery) {
     this.port = port;
+    this.schedule = schedule;
     this.scope = scope;
     this.self = self;
     this.slots = scope.members.map((m) => m.slot);
@@ -123,8 +128,33 @@ export class CheckpointRecovery {
   get busy() {
     return this.phase !== 'playing';
   }
+  get holdsFrame() {
+    if (!this.run || !this.busy) return false;
+    return (
+      this.phase !== 'approaching' || this.port.frame() >= this.run.r || !this.current() || !this.port.currentRoute()
+    );
+  }
+  private cancelClock() {
+    const stop = this.stopClock;
+    this.stopClock = null;
+    stop?.();
+  }
+  private armClock() {
+    if (this.stopClock) return;
+    const stop = this.schedule(() => {
+      if (this.stopClock !== stop) return;
+      try {
+        this.service();
+      } catch (error) {
+        this.port.log(`CHECKPOINT-WAKE-FAILED ${error}`);
+        this.fail('checkpoint wake failed');
+      }
+    }, RECOVERY_POLL_MS);
+    this.stopClock = stop;
+  }
   close() {
     this.closed = true;
+    this.cancelClock();
     this.actor.stop();
     this.candidates.clear();
     this.anchor = null;
@@ -254,6 +284,7 @@ export class CheckpointRecovery {
     this.minTag = Math.max(0, run.c - MAX_DELAY);
     this.cursor = run.c;
     this.actor.send({ type: 'FREEZE' });
+    this.armClock();
     this.port.recovering();
     this.port.log(`CHECKPOINT-FREEZE c=${run.c} r=${run.r} request=${run.request}`);
   }
@@ -266,6 +297,7 @@ export class CheckpointRecovery {
       return;
     }
     this.actor.send({ type: 'FAIL' });
+    this.cancelClock();
     this.send('abort', {}, this.run);
     this.port.log(`CHECKPOINT-UNRESOLVED ${reason}`);
     this.port.unresolved();
@@ -416,13 +448,13 @@ export class CheckpointRecovery {
     if (!values.every((v): v is Input => !!v)) return null;
     return { frame: f, delay: step.delay, inputs: values };
   }
-  tick() {
+  private service() {
     const run = this.run;
-    if (!run || this.phase === 'playing') return false;
-    if (this.phase === 'unresolved') return true;
+    if (!run || this.phase === 'playing') return;
+    if (this.phase === 'unresolved') return;
     if (!this.current() || !this.port.currentRoute()) {
       this.fail('membership or route changed');
-      return true;
+      return;
     }
     if (
       this.phase !== 'committed' &&
@@ -430,14 +462,14 @@ export class CheckpointRecovery {
       performance.now() >= this.expires
     ) {
       this.fail('deadline');
-      return true;
+      return;
     }
     if (this.phase === 'approaching') {
       const f = this.port.frame();
-      if (f < run.r) return false;
+      if (f < run.r) return;
       if (f !== run.r || !this.port.safe()) {
         this.fail('cannot freeze at planned native boundary');
-        return true;
+        return;
       }
       this.freeze(run);
     }
@@ -449,7 +481,7 @@ export class CheckpointRecovery {
       this.actor.send({ type: 'INSTALL' });
       if (!this.chosen || !this.port.install(this.chosen.snapshot)) {
         this.fail('native restore');
-        return true;
+        return;
       }
     }
     if (this.phase === 'replaying') {
@@ -458,7 +490,7 @@ export class CheckpointRecovery {
         const row = this.replayFrame(this.cursor);
         if (!row || !this.port.replay(row)) {
           this.fail('native replay at ' + this.cursor);
-          return true;
+          return;
         }
         this.cursor++;
       }
@@ -467,7 +499,7 @@ export class CheckpointRecovery {
         const state = prepared ? this.port.capture() : null;
         if (!state || state.frame !== run.r) {
           this.fail('native install');
-          return true;
+          return;
         }
         this.installedState = state;
         this.actor.send({ type: 'VERIFY' });
@@ -490,7 +522,7 @@ export class CheckpointRecovery {
       this.send('decision', {}, run);
     }
     if (this.phase === 'committed' && this.firstInputs.size === this.slots.length) {
-      if (!this.installedState || !this.installedSeal) return true;
+      if (!this.installedState || !this.installedSeal) return;
       this.port.resume(run.r, this.firstInputs, run);
       for (const [slot, v] of this.firstInputs) this.journal.witness(slot, run.r, v);
       this.epoch++;
@@ -505,9 +537,9 @@ export class CheckpointRecovery {
       this.ownerRows.clear();
       this.baselineFailures = this.port.failed();
       this.actor.send({ type: 'RUN' });
+      this.cancelClock();
       this.port.log(`CHECKPOINT-RELEASE r=${run.r} epoch=${this.epoch}`);
     }
-    return true;
   }
   private maybeCommit() {
     if (this.self !== 0 || this.phase !== 'installed' || this.receipts.size !== this.slots.length || !this.run) return;

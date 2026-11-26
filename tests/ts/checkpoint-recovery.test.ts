@@ -18,6 +18,7 @@ async function match(allow: Filter = () => true, size = 3) {
     steps: 0,
     resumed: 0,
     logged: Array<string>(),
+    wake: null as (() => void) | null,
   }));
   const queue: { from: number; msg: CheckpointWire }[] = [];
   const traffic: { from: number; msg: CheckpointWire }[] = [];
@@ -80,6 +81,12 @@ async function match(allow: Filter = () => true, size = 3) {
       },
       scope,
       slot,
+      (wake: () => void) => {
+        s.wake = wake;
+        return () => {
+          s.wake = null;
+        };
+      },
     );
   });
   function deliver(from: number, msg: CheckpointWire) {
@@ -94,7 +101,7 @@ async function match(allow: Filter = () => true, size = 3) {
         const next = queue.shift();
         if (next) deliver(next.from, next.msg);
       }
-      for (const peer of peers) peer.tick();
+      for (const s of state) s.wake?.();
       if (until()) return;
       await delay(2);
     }
@@ -124,7 +131,7 @@ test('three and four cores replay authored inputs and release once, with duplica
     const m = await match(undefined, size);
     await m.advance(() => m.state.every((s) => s.resumed === 1));
     for (const p of m.traffic.filter((p) => p.msg.op === 'installed')) m.deliver(p.from, p.msg);
-    for (const p of m.peers) p.tick();
+    for (const s of m.state) s.wake?.();
     assert.ok(m.state.every((s) => s.resumed === 1 && s.restores === 1 && s.steps === 60));
   }
 });
@@ -141,7 +148,7 @@ test('returning owner records need the stamped sender, same epoch and exact byst
       } else if (attempt === 'stale') m.deliver(1, { ...msg, epoch: 11 });
       else m.deliver(2, msg);
     }
-    m.peers.forEach((p) => p.tick());
+    m.state.forEach((s) => s.wake?.());
     assert.ok(m.state.every((s) => !s.resumed && !s.restores));
   }
 });
@@ -181,7 +188,7 @@ test('a replaced socket roster before the writes remains paused', async () => {
   const s = m.state[0];
   assert.ok(s);
   s.scope = false;
-  m.peers[0]?.tick();
+  s.wake?.();
   assert.equal(m.peers[0]?.phase, 'unresolved');
   assert.equal(s.restores, 0);
 });
@@ -196,4 +203,47 @@ test('the bounded journal refuses conflicting observations and old tags cannot e
   j.witness(2, 2048, neutral);
   j.witness(2, 2048, [8, 0, 0, 0, 0]);
   assert.equal(j.transcript(2048, 2049), null);
+});
+
+test('a stopped frame pump still aborts on a changed route', async () => {
+  const { peers, state } = await match();
+  const host = state[0]!;
+  host.frame = 20;
+  host.route = false;
+  host.wake?.();
+  assert.equal(peers[0]?.phase, 'unresolved');
+  assert.equal(host.restores, 0);
+  assert.equal(host.wake, null);
+});
+
+test('a planned freeze holds the boundary until the recovery clock can process it', async () => {
+  const { peers, state } = await match();
+  const host = state[0]!;
+  const recovery = peers[0]!;
+  host.frame = 59;
+  assert.equal(recovery.holdsFrame, false);
+  host.wake?.();
+  assert.equal(recovery.phase, 'approaching');
+  host.frame = 60;
+  assert.equal(recovery.holdsFrame, true);
+  assert.equal(recovery.phase, 'approaching');
+  host.wake?.();
+  assert.equal(recovery.phase, 'frozen');
+  assert.equal(recovery.holdsFrame, true);
+});
+
+test('a stopped frame pump expires before the planned checkpoint boundary', async (t) => {
+  const startedAt = performance.now();
+  const now = t.mock.method(performance, 'now', () => startedAt);
+  const { peers, state } = await match();
+  const host = state[0]!;
+  host.frame = 20;
+  now.mock.mockImplementation(() => startedAt + 19999);
+  host.wake?.();
+  assert.equal(peers[0]?.phase, 'approaching');
+  now.mock.mockImplementation(() => startedAt + 20000);
+  host.wake?.();
+  assert.equal(peers[0]?.phase, 'unresolved');
+  assert.equal(host.restores, 0);
+  assert.equal(host.wake, null);
 });

@@ -83,3 +83,52 @@ module checkpoint_recovery {
     .then(release(0, 1)).then(release(0, 1)).then(abort).then(release(1, 1)).then(release(2, 1))
     .expect(s.released == players and safe)
 }
+
+// Only the checkpoint protocol observes its deadline. Live execution
+// consults the held boundary before committing another frame.
+module checkpoint_clock {
+  const OWN_CLOCK: bool
+  pure val TARGET = 2
+  pure val DEADLINE = 3
+  var frame: int
+  var phase: str
+
+  action init = all { frame' = 0, phase' = "approaching" }
+  action wake(at: int, frameTick: bool, nativeSafe: bool): bool = {
+    val service = OWN_CLOCK or frameTick
+    val nextPhase = if (not(service) or phase != "approaching") phase
+      else if (at >= DEADLINE) "unresolved"
+      else if (frame == TARGET and nativeSafe) "frozen"
+      else if (frame == TARGET) "unresolved"
+      else phase
+    all {
+      phase' = nextPhase,
+      frame' = if (frameTick and nextPhase == "approaching" and frame < TARGET) frame + 1 else frame,
+    }
+  }
+  action step = {
+    nondet at = Set(1, 2, 3).oneOf()
+    nondet tick = Bool.oneOf()
+    nondet safe = Bool.oneOf()
+    wake(at, tick, safe)
+  }
+  val neverPassesFreeze = frame <= TARGET
+
+  run stoppedFramePumpStillExpiresTest =
+    init.then(wake(2, false, true)).then(wake(DEADLINE, false, true))
+      .expect(frame == 0 and phase == (if (OWN_CLOCK) "unresolved" else "approaching"))
+
+  run aDelayedWakeDoesNotOverrunTheBoundaryTest =
+    init.then(wake(1, true, true)).then(wake(1, true, true))
+      .expect(frame == TARGET and phase == "approaching")
+      .then(wake(2, false, true))
+      .expect(frame == TARGET and phase == (if (OWN_CLOCK) "frozen" else "approaching"))
+}
+
+module checkpoint_clock_before {
+  import checkpoint_clock(OWN_CLOCK = false).*
+}
+
+module checkpoint_clock_fixed {
+  import checkpoint_clock(OWN_CLOCK = true).*
+}
