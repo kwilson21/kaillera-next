@@ -20,6 +20,13 @@ def _run(scenario):
     import {makeReconnectSettleGuard} from './tests/fixtures/reconnect-settle-guard.mjs';
     const PHASE_RUNNING = 5, _phase = PHASE_RUNNING, _playerSlot = 1, _isSpectator = false;
     const outbound = [], RECONNECT_PROOF_REQUEST = 'reconnect-sync-request-v1';
+    const RESYNC_DEADLINE_POLL_MS = 250, _lastUsersUpdated = null;
+    let clockWake;
+    const window = {KNCore: {startEvery: (wake) => {
+      clockWake = wake;
+      return () => { clockWake = undefined; };
+    }}};
+
     const _peers = {H: {slot: 0, dc: {readyState: 'open', send: x => outbound.push(x)}}, M: {slot: 1}};
     const socket = {connected: true, id: 'M'};
     const _signalSocket = {emit: (_route, body) => outbound.push(body.type)};
@@ -53,7 +60,27 @@ def _run(scenario):
       await pending;
     };
     const observed = {};
-    if (scenario === 'old-socket') {
+    if (scenario === 'clock-without-ticks') {
+      now = 7999; clockWake?.();
+      observed.earlyRequests = outbound.length;
+      now = 8100; clockWake?.();
+      now = 16100; clockWake?.();
+      now = 34100; clockWake?.();
+      observed.clockStopped = clockWake === undefined;
+    } else if (scenario === 'clock-current-replacement') {
+      const oldWake = clockWake;
+      _syncQueueGen.H++;
+      _startsReconnectAnswerDebt('H', _peers.H, 10);
+      now = 8100;
+      oldWake?.();
+      observed.requestsAfterOldWake = outbound.length;
+      now = 34100;
+      clockWake?.();
+    } else if (scenario === 'clock-old-generation') {
+      _syncQueueGen.H++;
+      now = 8100; clockWake?.();
+      observed.clockStopped = clockWake === undefined;
+    } else if (scenario === 'old-socket') {
       const pending = send(9);
       _syncQueueGen.H++;
       _peers.H = {slot: 0, dc: {readyState: 'open', send: x => outbound.push(x)}};
@@ -197,6 +224,7 @@ def test_prototype_arms_only_on_actual_host_reopen_and_routes_proof_to_native_ap
     assert "handleSyncChunksComplete(ownsAssembly, proofScopeAssembly, proofForAssembly)" in source
     tick = _between(source, "  const tick = () => {", "    if (_coreFatalError) return; // sync application")
     assert "pending.answerFor, pending.answerScope, pending.proofFor," in " ".join(tick.split())
+    assert "_checkReconnectAnswerDebt()" not in tick
 
 
 def test_fallback_to_socket_keeps_dedicated_request_and_never_downgrades():
@@ -219,3 +247,26 @@ def test_failed_apply_retries_even_after_generic_timer_has_ended():
     }
     assert actual["outbound"] == ["reconnect-sync-request-v1:9", "reconnect-sync-request-v1:10"]
     assert actual["status"] is None
+
+
+def test_protected_reconnect_retries_and_expires_without_frame_ticks():
+    actual = _run("clock-without-ticks")
+    assert actual["observed"] == {"earlyRequests": 1, "clockStopped": True}
+    assert actual["outbound"] == [f"reconnect-sync-request-v1:{i}" for i in (9, 10, 11)]
+    assert (actual["status"], actual["id"]) == ("unresolved", 11)
+    assert len(actual["events"]) == 1
+
+
+def test_protected_reconnect_clock_cancels_when_its_generation_is_replaced():
+    actual = _run("clock-old-generation")
+    assert actual["observed"] == {"clockStopped": True}
+    assert actual["outbound"] == ["reconnect-sync-request-v1:9"]
+    assert actual["status"] is None
+
+
+def test_replaced_protected_clock_cannot_retry_or_extend_the_new_debt():
+    actual = _run("clock-current-replacement")
+    assert actual["observed"] == {"requestsAfterOldWake": 2}
+    assert actual["outbound"] == [f"reconnect-sync-request-v1:{i}" for i in (9, 10)]
+    assert (actual["status"], actual["id"]) == ("unresolved", 10)
+    assert len(actual["events"]) == 1

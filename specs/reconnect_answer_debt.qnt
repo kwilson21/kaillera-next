@@ -78,3 +78,38 @@ module reconnect_answer_debt {
     .then(receive(9, 2, 1)).then(apply(true))
     .expect(s.status == "unresolved" and s.notices == 1)
 }
+
+// Deadline service observes elapsed time even when the browser is responsive
+// and no emulator frames can run. These actions never install a snapshot.
+module protected_reconnect_clock {
+  const RECOVERY_CLOCK: bool
+  var attempts: int
+  var unresolved: bool
+
+  action init = all { attempts' = 1, unresolved' = false }
+
+  action service(at: int, frameTick: bool, proofBuffered: bool): bool = {
+    val active = (RECOVERY_CLOCK or frameTick) and not(unresolved)
+    all {
+      attempts' = if (active and not(proofBuffered) and at < 4 and attempts < at + 1) attempts + 1 else attempts,
+      unresolved' = (unresolved or (active and at >= 4)),
+    }
+  }
+
+  run stoppedFramesRetryAndExpireTest =
+    init.then(service(1, false, false)).then(service(2, false, false))
+      .then(service(4, false, false))
+      .expect(unresolved == RECOVERY_CLOCK and attempts == (if (RECOVERY_CLOCK) 3 else 1))
+
+  run bufferedProofDoesNotRetryButStillExpiresTest =
+    init.then(service(1, true, true)).then(service(4, true, true))
+      .expect(unresolved and attempts == 1)
+}
+
+module protected_reconnect_clock_before {
+  import protected_reconnect_clock(RECOVERY_CLOCK = false).*
+}
+
+module protected_reconnect_clock_fixed {
+  import protected_reconnect_clock(RECOVERY_CLOCK = true).*
+}
