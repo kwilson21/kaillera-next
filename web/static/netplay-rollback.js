@@ -17818,29 +17818,28 @@
   }
 
   // I1: a sync state waits for an in-flight replay at most this long; then
-  // the replay is dropped (the state being loaded supersedes it).
+  // an installed state can supersede it.
   const SYNC_APPLY_REPLAY_WAIT_MS = 1000;
   let _syncApplyDeferredAt = 0;
-  const _replayBlocksSyncApply = () => {
+  const _syncApplyReplayStep = () => {
     // A catch-up ends within MAX_CATCH_UP_FRAMES ticks (_startCatchUp): the
     // newer state is applied then, from the frame the guest is back on.
-    if (_catchUpTo >= 0) return true;
+    if (_catchUpTo >= 0) return 'wait';
     const mod = window.EJS_emulator?.gameManager?.Module;
     const busy = mod?._kn_get_replay_depth?.() > 0 || (mod?._kn_peek_pending_rollback?.() ?? -1) >= 0;
     if (!busy) {
       _syncApplyDeferredAt = 0;
-      return false;
+      return 'apply';
     }
     const now = performance.now();
     if (!_syncApplyDeferredAt) {
       _syncApplyDeferredAt = now;
       _syncLog(`SYNC-APPLY-DEFERRED f=${_frameNum} — rollback replay in flight`);
     }
-    if (now - _syncApplyDeferredAt < SYNC_APPLY_REPLAY_WAIT_MS) return true;
-    _syncLog(`SYNC-APPLY-DEFERRED timeout f=${_frameNum} — dropping replay to load state`);
-    mod?._kn_clear_replay_state?.();
+    if (now - _syncApplyDeferredAt < SYNC_APPLY_REPLAY_WAIT_MS) return 'wait';
+    _syncLog(`SYNC-APPLY-DEFERRED timeout f=${_frameNum} — attempting state install`);
     _syncApplyDeferredAt = 0;
-    return false;
+    return 'replace';
   };
 
   // Coordinated sync dispatch (host): when the host reaches a scheduled
@@ -18361,7 +18360,8 @@
       } else {
         // A rejected snapshot has no authority to discard local replay.
         const canInstall = _syncStateCanInstall(pending);
-        if (!canInstall || !_replayBlocksSyncApply()) {
+        const replayStep = canInstall ? _syncApplyReplayStep() : null;
+        if (replayStep !== 'wait') {
           _pendingResyncState = null;
           if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
           _syncTargetFrame = -1;
@@ -18376,6 +18376,7 @@
               pending.answerFor,
               pending.answerScope,
               pending.proofFor,
+              replayStep === 'replace',
             );
           } else {
             _syncApplyDeferredAt = 0;
@@ -22112,7 +22113,7 @@
   // in applySyncState), so the page keeps taking in messages and inputs
   // between them; each slice runs at least one frame or ends the catch-up,
   // so it ends within MAX_CATCH_UP_FRAMES ticks. A newer state waits for it
-  // (_replayBlocksSyncApply).
+  // (_syncApplyReplayStep).
   const CATCH_UP_SLICE_MS = 50;
   // A hole deeper than the rollback window is asked for and waited on, this
   // long at most (I1); then normal ticks play the rest.
@@ -22290,6 +22291,7 @@
     answerFor = 0,
     answerScope = null,
     proofFor = 0,
+    replaceReplay = false,
   ) => {
     // Guest: hot-swap emulator state at a clean frame boundary.
     // Called from tick() when _pendingResyncState is set — ensures loadState()
@@ -22311,6 +22313,9 @@
         _syncLog(`kn_sync_write failed: ${result} (bytes=${bytes.length} ptr=${_syncBufPtr})`);
         return;
       }
+      // Native rejection occurs before writing emulator state. An accepted
+      // state supersedes replay before kn_set_frame commits the timeline.
+      if (replaceReplay) mod._kn_clear_replay_state?.();
       // The rest of the host's state, in the same step, before any frame runs.
       _checkpoint?.invalidate();
       _applyResyncExtras(mod, extras, 'resync');
@@ -22385,8 +22390,8 @@
       // change, a state for a frame kn_pre_tick had saved and not run (a
       // pacing hold, a step that emulated nothing) left the page's own copy
       // in the ring (specs/ring_after_resync.qnt, savedFrameDidNotRunTest).
-      // A load waits out a pending rollback (_replayBlocksSyncApply), so the
-      // engine does not refuse it here.
+      // Pending replay either finished or was cleared after the native write,
+      // so it cannot block this frame commit.
       if (frame != null && mod._kn_set_frame) {
         const oldFrame = _frameNum;
         mod._kn_set_frame(frame);
@@ -22410,6 +22415,7 @@
       }
     } else {
       // Fallback: existing loadState path
+      if (replaceReplay) gm.Module?._kn_clear_replay_state?.();
       const lt0 = performance.now();
       gm.loadState(bytes);
       const lt1 = performance.now();

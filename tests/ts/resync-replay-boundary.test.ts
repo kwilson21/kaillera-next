@@ -11,14 +11,37 @@ const from = (start: string, end: string) => {
   return source.slice(i, j);
 };
 
-type Tick = (ms: number, frame: number) => { replaying: boolean; installed?: number; target: number };
+type Tick = (
+  ms: number,
+  frame: number,
+) => {
+  replaying: boolean;
+  installed?: number;
+  writeWhileReplaying?: boolean;
+  target: number;
+};
 
-const fixture = (target: number, stateFrame: number, { warnAt = Infinity, capacity = 8 } = {}): Tick =>
+const fixture = (
+  target: number,
+  stateFrame: number,
+  { warnAt = Infinity, capacity = 8, nativeResult = 0 } = {},
+): Tick =>
   runInNewContext(
     `
     let now = 100, _frameNum = 100, replaying = true;
     const performance = {now: () => now};
+    let installed, writeWhileReplaying;
     const mod = {
+      HEAPU8: new Uint8Array(16),
+      _kn_sync_write: () => {
+        writeWhileReplaying = replaying;
+        return nativeResult;
+      },
+      _kn_set_frame: (frame) => {
+        if (replaying) throw Error('replay still owns the native frame');
+        installed = frame;
+      },
+      _kn_get_frame: () => installed,
       _kn_get_replay_depth: () => 0,
       _kn_peek_pending_rollback: () => replaying ? 99 : -1,
       _kn_clear_replay_state: () => { replaying = false; },
@@ -29,29 +52,33 @@ const fixture = (target: number, stateFrame: number, { warnAt = Infinity, capaci
     let _runSubstate = RUN_NORMAL, _awaitingResyncAt = 0;
     let _syncTargetFrame = target, _syncTargetDeadlineAt = target > 0 ? 3100 : 0;
     const SYNC_HOLD_MAX_FRAMES = 2, SYNC_COORD_TIMEOUT_MS = 3000;
-    let _pendingResyncState = {frame: stateFrame, bytes: new Uint8Array(2)}, installed;
+    let _pendingResyncState = {frame: stateFrame, bytes: new Uint8Array(2)};
+    let _lastAppliedRecoveryId = 0, _resyncCount = 0, _consecutiveResyncs = 0;
+    const KNState = {};
+    const _applyResyncExtras = () => {}, recaptureManualRunner = () => {}, _setLastSyncState = () => {};
+    const _resetStrictMenuResends = () => {};
+    const _settleInputsAtResync = () => { throw Error('settled-test-boundary'); };
     const _hasKnSync = true, _syncBufSize = capacity;
     let _syncBufPtr = 0;
     const ensureSyncBuffer = () => { _syncBufPtr = capacity > 0 ? 1 : 0; };
     const _hostMatchUnverified = () => now >= warnAt;
-    const _checkpoint = null, _checkpointFloor = 0, _lastAppliedRecoveryId = 0;
+    const _checkpoint = null, _checkpointFloor = 0;
     const _guestAllowsReconnectState = () => true;
-    ${from('  const _syncStateCanInstall =', '  const applySyncState =')}
-    const applySyncState = (bytes, frame) => {
-      if (!_syncBufPtr || bytes.length > _syncBufSize) throw Error('snapshot was not staged for native install');
-      if (replaying) throw Error('replay still owns the native frame');
-      installed = frame;
-    };
+    ${from('  const _syncStateCanInstall =', '  // -- Init / Stop API')}
     ${from('  const SYNC_APPLY_REPLAY_WAIT_MS', '  // Coordinated sync dispatch')}
     const tick = (ms, frame) => {
       now = ms;
       _frameNum = frame;
-      ${from('    const pending = _pendingResyncState;\n    const atSyncBoundary =', '    if (_coreFatalError) return; // sync application')}
-      return { replaying, installed, target: _syncTargetFrame };
+      try {
+        ${from('    const pending = _pendingResyncState;\n    const atSyncBoundary =', '    if (_coreFatalError) return; // sync application')}
+      } catch (error) {
+        if (error.message !== 'settled-test-boundary') throw error;
+      }
+      return { replaying, installed, writeWhileReplaying, target: _syncTargetFrame };
     };
     tick;
     `,
-    { target, stateFrame, warnAt, capacity },
+    { target, stateFrame, warnAt, capacity, nativeResult },
   );
 
 test('a coordinated future snapshot keeps pending replay until its install boundary', () => {
@@ -96,3 +123,22 @@ for (const [label, capacity] of [
     assert.equal(dropped.installed, undefined);
     assert.equal(dropped.target, -1);
   });
+
+test('a refused native state cannot clear replay at the deadline', () => {
+  const tick = fixture(100, 100, { nativeResult: -1 });
+  assert.equal(tick(100, 100).replaying, true);
+  const rejected = tick(1100, 100);
+  assert.equal(rejected.replaying, true);
+  assert.equal(rejected.writeWhileReplaying, true);
+  assert.equal(rejected.installed, undefined);
+  assert.equal(rejected.target, -1);
+});
+
+test('an accepted native state clears replay after writing and before aligning the frame', () => {
+  const tick = fixture(100, 100);
+  assert.equal(tick(100, 100).installed, undefined);
+  const applied = tick(1100, 100);
+  assert.equal(applied.writeWhileReplaying, true);
+  assert.equal(applied.replaying, false);
+  assert.equal(applied.installed, 100);
+});

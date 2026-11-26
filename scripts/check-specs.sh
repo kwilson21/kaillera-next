@@ -457,7 +457,8 @@ FLOW=specs/resync_flow.qnt
 $QUINT typecheck "$FLOW"
 for variant in resync_flow_before resync_flow_any_answer resync_flow_frame_named resync_flow_drop_older \
   resync_flow_asked_from resync_flow_unnumbered resync_flow_rewinds resync_flow_current \
-  resync_replay_boundary_before resync_replay_boundary_revoked_before resync_replay_boundary_fixed; do
+  resync_replay_boundary_before resync_replay_boundary_revoked_before \
+  resync_replay_boundary_native_before resync_replay_boundary_fixed; do
   $QUINT test "$FLOW" --main="$variant" --backend="$BACKEND"
 done
 $QUINT run "$FLOW" --main=resync_replay_boundary_fixed --invariants futureStateHasNoReplayDeadline rejectedStateKeepsReplay \
