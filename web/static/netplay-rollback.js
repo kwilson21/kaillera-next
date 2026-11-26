@@ -17818,29 +17818,28 @@
   }
 
   // I1: a sync state waits for an in-flight replay at most this long; then
-  // the replay is dropped (the state being loaded supersedes it).
+  // an installed state can supersede it.
   const SYNC_APPLY_REPLAY_WAIT_MS = 1000;
   let _syncApplyDeferredAt = 0;
-  const _replayBlocksSyncApply = () => {
+  const _syncApplyReplayStep = () => {
     // A catch-up ends within MAX_CATCH_UP_FRAMES ticks (_startCatchUp): the
     // newer state is applied then, from the frame the guest is back on.
-    if (_catchUpTo >= 0) return true;
+    if (_catchUpTo >= 0) return 'wait';
     const mod = window.EJS_emulator?.gameManager?.Module;
     const busy = mod?._kn_get_replay_depth?.() > 0 || (mod?._kn_peek_pending_rollback?.() ?? -1) >= 0;
     if (!busy) {
       _syncApplyDeferredAt = 0;
-      return false;
+      return 'apply';
     }
     const now = performance.now();
     if (!_syncApplyDeferredAt) {
       _syncApplyDeferredAt = now;
       _syncLog(`SYNC-APPLY-DEFERRED f=${_frameNum} — rollback replay in flight`);
     }
-    if (now - _syncApplyDeferredAt < SYNC_APPLY_REPLAY_WAIT_MS) return true;
-    _syncLog(`SYNC-APPLY-DEFERRED timeout f=${_frameNum} — dropping replay to load state`);
-    mod?._kn_clear_replay_state?.();
+    if (now - _syncApplyDeferredAt < SYNC_APPLY_REPLAY_WAIT_MS) return 'wait';
+    _syncLog(`SYNC-APPLY-DEFERRED timeout f=${_frameNum} — attempting state install`);
     _syncApplyDeferredAt = 0;
-    return false;
+    return 'replace';
   };
 
   // Coordinated sync dispatch (host): when the host reaches a scheduled
@@ -18345,81 +18344,51 @@
       if (then === 'askAgain') _askAgainForOwedResync();
       else if (then === 'stopAsking') _stopAskingForOwedResync('its answers came too late to catch up from');
     }
-    const syncApplyBlocked = _pendingResyncState ? _replayBlocksSyncApply() : false;
-    if (_syncTargetFrame > 0) {
-      if (_frameNum >= _syncTargetFrame) {
-        if (_pendingResyncState && syncApplyBlocked) {
-          // Replay in flight: apply on a later tick (bounded, see above).
-        } else if (
-          _pendingResyncState &&
-          _pendingResyncState.frame > _frameNum &&
-          _pendingResyncState.frame - _frameNum <= SYNC_HOLD_MAX_FRAMES
-        ) {
-          // The state is from a later frame than the target (a newer push
-          // replaced a held one, or the capture ran late): move the target to
-          // it, as the non-coordinated branch below does. Same deadline.
-          _pendingResyncState.held = true;
-          _syncTargetFrame = _pendingResyncState.frame;
-          if (!_syncTargetDeadlineAt) _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
-          if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-          _syncLog(`sync held: state frame ${_syncTargetFrame} is past target, f=${_frameNum}`);
-        } else if (_pendingResyncState) {
-          // State arrived on time — apply at the agreed frame
-          const pending = _pendingResyncState;
+    const pending = _pendingResyncState;
+    const atSyncBoundary = _syncTargetFrame <= 0 || _frameNum >= _syncTargetFrame;
+    if (pending && atSyncBoundary) {
+      const ahead = pending.frame != null ? pending.frame - _frameNum : 0;
+      if (ahead > 0 && ahead <= SYNC_HOLD_MAX_FRAMES && (_syncTargetFrame > 0 || !pending.held)) {
+        // Wait for the snapshot's frame to avoid skipping local inputs. A
+        // replacement ahead of a coordinated target keeps the original deadline.
+        pending.held = true;
+        _syncTargetFrame = pending.frame;
+        if (!_syncTargetDeadlineAt) _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
+        if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
+        _syncApplyDeferredAt = 0;
+        _syncLog(`sync held: state frame ${pending.frame} is ${ahead} ahead of f=${_frameNum}, applying there`);
+      } else {
+        // A rejected snapshot has no authority to discard local replay.
+        const canInstall = _syncStateCanInstall(pending);
+        const replayStep = canInstall ? _syncApplyReplayStep() : null;
+        if (replayStep !== 'wait') {
           _pendingResyncState = null;
           if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
           _syncTargetFrame = -1;
           _syncTargetDeadlineAt = 0;
-          applySyncState(
-            pending.bytes,
-            pending.frame,
-            pending.fromProactive,
-            pending.recoveryId,
-            pending.extras,
-            pending.answerFor,
-            pending.answerScope,
-            pending.proofFor,
-          );
-        } else if (_runSubstate !== RUN_AWAITING_RESYNC) {
-          // Reached target frame but state not here yet — stall until it arrives
-          _runSubstate = RUN_AWAITING_RESYNC;
-          _awaitingResyncAt = performance.now();
-          _syncLog(`coord stall at frame ${_frameNum} (target=${_syncTargetFrame}) — waiting for state`);
+          if (canInstall) {
+            applySyncState(
+              pending.bytes,
+              pending.frame,
+              pending.fromProactive,
+              pending.recoveryId,
+              pending.extras,
+              pending.answerFor,
+              pending.answerScope,
+              pending.proofFor,
+              replayStep === 'replace',
+            );
+          } else {
+            _syncApplyDeferredAt = 0;
+          }
         }
-        // _awaitingResync already true: stall check below keeps loop paused;
-        // next tick that has _pendingResyncState will apply it above and resume.
       }
-      // _frameNum < _syncTargetFrame: keep running, hold buffered state until target
-    } else if (_pendingResyncState && !syncApplyBlocked) {
-      // Non-coordinated (proactive push, reconnect, visibility/network-change).
-      // A state from a frame this peer hasn't reached yet is held until it
-      // gets there, as a coordinated sync would be. Applied early, the loaded
-      // state was a frame ahead of the counter, which the counter never caught
-      // up with: `sync #N applied (frame X+1 -> X)` started a permanent desync
-      // in the two-player run on PR #37. Jumping the counter forward instead
-      // would skip this peer's input for the frames in between, which the
-      // other peers have predicted. The deadline is the coordinated one
-      // (COORD-SYNC-TIMEOUT above), after which the state applies here.
-      const pending = _pendingResyncState;
-      const ahead = pending.frame != null ? pending.frame - _frameNum : 0;
-      if (!pending.held && ahead > 0 && ahead <= SYNC_HOLD_MAX_FRAMES) {
-        pending.held = true;
-        _syncTargetFrame = pending.frame;
-        _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
-        _syncLog(`sync held: state frame ${pending.frame} is ${ahead} ahead of f=${_frameNum}, applying there`);
-      } else {
-        _pendingResyncState = null;
-        if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-        applySyncState(
-          pending.bytes,
-          pending.frame,
-          pending.fromProactive,
-          pending.recoveryId,
-          pending.extras,
-          pending.answerFor,
-          pending.answerScope,
-          pending.proofFor,
-        );
+    } else {
+      _syncApplyDeferredAt = 0;
+      if (_syncTargetFrame > 0 && atSyncBoundary && _runSubstate !== RUN_AWAITING_RESYNC) {
+        _runSubstate = RUN_AWAITING_RESYNC;
+        _awaitingResyncAt = performance.now();
+        _syncLog(`coord stall at frame ${_frameNum} (target=${_syncTargetFrame}) — waiting for state`);
       }
     }
 
@@ -22144,7 +22113,7 @@
   // in applySyncState), so the page keeps taking in messages and inputs
   // between them; each slice runs at least one frame or ends the catch-up,
   // so it ends within MAX_CATCH_UP_FRAMES ticks. A newer state waits for it
-  // (_replayBlocksSyncApply).
+  // (_syncApplyReplayStep).
   const CATCH_UP_SLICE_MS = 50;
   // A hole deeper than the rollback window is asked for and waited on, this
   // long at most (I1); then normal ticks play the rest.
@@ -22287,6 +22256,32 @@
     if (stoppedAt || _frameNum >= _catchUpTo) _endCatchUp(mod, stoppedAt);
   };
 
+  const _syncStateCanInstall = ({ bytes, frame, recoveryId, answerFor = 0, answerScope = null, proofFor = 0 }) => {
+    if (_checkpoint?.busy || frame < _checkpointFloor) return false;
+    // A same-match warning may arrive after a full state was buffered.
+    // Unverified is terminal for this match: do not change native state
+    // or settle inputs from even a previously valid protected answer.
+    if (_hostMatchUnverified()) {
+      _syncLog(`SYNC-STATE-HELD recovery unverified frame=${frame}`);
+      return false;
+    }
+    if (!_guestAllowsReconnectState(answerFor, answerScope, proofFor)) return false;
+    if (recoveryId && recoveryId <= _lastAppliedRecoveryId) return false;
+    if (!window.EJS_emulator?.gameManager) return false;
+    if (_hasKnSync) {
+      ensureSyncBuffer();
+      if (!_syncBufPtr) {
+        _syncLog(`FATAL: sync buffer allocation failed`);
+        return false;
+      }
+      if (bytes.length > _syncBufSize) {
+        _syncLog(`FATAL: state (${bytes.length}) exceeds buffer (${_syncBufSize})`);
+        return false;
+      }
+    }
+    return true;
+  };
+
   const applySyncState = (
     bytes,
     frame,
@@ -22296,38 +22291,19 @@
     answerFor = 0,
     answerScope = null,
     proofFor = 0,
+    replaceReplay = false,
   ) => {
-    if (_checkpoint?.busy || frame < _checkpointFloor) return;
-    // A same-match warning may arrive after a full state was buffered.
-    // Unverified is terminal for this match: do not change native state
-    // or settle inputs from even a previously valid protected answer.
-    if (_hostMatchUnverified()) {
-      _syncLog(`SYNC-STATE-HELD recovery unverified frame=${frame}`);
-      return;
-    }
-    if (!_guestAllowsReconnectState(answerFor, answerScope, proofFor)) return;
-    if (recoveryId && recoveryId <= _lastAppliedRecoveryId) return;
     // Guest: hot-swap emulator state at a clean frame boundary.
     // Called from tick() when _pendingResyncState is set — ensures loadState()
     // never fires mid-tick or mid-input-processing. The kn_sync path moves
     // _frameNum to the state's frame (see below); the loadState fallback
     // keeps it where it is.
-    const gm = window.EJS_emulator?.gameManager;
-    if (!gm) return;
+    const gm = window.EJS_emulator.gameManager;
     const frameBeforeApply = _frameNum;
 
     if (_hasKnSync) {
       // C-level write: copy into WASM buffer, call kn_sync_write
       const mod = gm.Module;
-      ensureSyncBuffer();
-      if (!_syncBufPtr) {
-        _syncLog(`FATAL: sync buffer allocation failed`);
-        return;
-      }
-      if (bytes.length > _syncBufSize) {
-        _syncLog(`FATAL: state (${bytes.length}) exceeds buffer (${_syncBufSize})`);
-        return;
-      }
       mod.HEAPU8.set(bytes, _syncBufPtr);
       const lt0 = performance.now();
       const result = mod._kn_sync_write(_syncBufPtr, bytes.length);
@@ -22337,6 +22313,9 @@
         _syncLog(`kn_sync_write failed: ${result} (bytes=${bytes.length} ptr=${_syncBufPtr})`);
         return;
       }
+      // Native rejection occurs before writing emulator state. An accepted
+      // state supersedes replay before kn_set_frame commits the timeline.
+      if (replaceReplay) mod._kn_clear_replay_state?.();
       // The rest of the host's state, in the same step, before any frame runs.
       _checkpoint?.invalidate();
       _applyResyncExtras(mod, extras, 'resync');
@@ -22411,8 +22390,8 @@
       // change, a state for a frame kn_pre_tick had saved and not run (a
       // pacing hold, a step that emulated nothing) left the page's own copy
       // in the ring (specs/ring_after_resync.qnt, savedFrameDidNotRunTest).
-      // A load waits out a pending rollback (_replayBlocksSyncApply), so the
-      // engine does not refuse it here.
+      // Pending replay either finished or was cleared after the native write,
+      // so it cannot block this frame commit.
       if (frame != null && mod._kn_set_frame) {
         const oldFrame = _frameNum;
         mod._kn_set_frame(frame);
@@ -22436,6 +22415,7 @@
       }
     } else {
       // Fallback: existing loadState path
+      if (replaceReplay) gm.Module?._kn_clear_replay_state?.();
       const lt0 = performance.now();
       gm.loadState(bytes);
       const lt1 = performance.now();

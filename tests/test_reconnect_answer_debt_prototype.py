@@ -189,13 +189,14 @@ def test_timeout_is_explicit_once_and_late_answer_cannot_clear_it():
     assert len(actual["events"]) == 1
 
 
-def test_prototype_arms_only_on_actual_host_reopen_and_routes_both_native_applies():
+def test_prototype_arms_only_on_actual_host_reopen_and_routes_proof_to_native_apply():
     source = RUNTIME.read_text()
     reconnect = _between(source, "        // Force resync", "          // Sync-state DC onopen handler")
     assert reconnect.count("_startsReconnectAnswerDebt(") == 1
     assert "peer.slot === 0 && _phase === PHASE_RUNNING && _useCRollback" in " ".join(reconnect.split())
     assert "handleSyncChunksComplete(ownsAssembly, proofScopeAssembly, proofForAssembly)" in source
-    assert " ".join(source.split()).count("pending.answerFor, pending.answerScope, pending.proofFor,") == 2
+    tick = _between(source, "  const tick = () => {", "    if (_coreFatalError) return; // sync application")
+    assert "pending.answerFor, pending.answerScope, pending.proofFor," in " ".join(tick.split())
 
 
 def test_fallback_to_socket_keeps_dedicated_request_and_never_downgrades():

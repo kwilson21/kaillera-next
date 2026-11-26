@@ -12,6 +12,22 @@ ROLLBACK_H = ROOT / "build/kn_rollback/kn_rollback.h"
 INVARIANTS_DOC = ROOT / "docs/netplay-invariants.md"
 
 
+def test_native_sync_write_can_only_reject_before_importing_state():
+    # The guest keeps its pending replay when the native write is refused.
+    for name in ("patch-sync-v3.py", "inject-ksw-probes.py"):
+        source = (ROOT / "build" / name).read_text()
+        writers = re.findall(
+            r"int kn_sync_write\(const uint8_t \*buf, uint32_t size\) \{\n(.*?)\n\}",
+            source,
+            re.S,
+        )
+        assert writers
+        for writer in writers:
+            header, state_import = writer.split("p += 16;", 1)
+            assert re.findall(r"return ([^;]+);", header) == ["-1", "-1"]
+            assert re.findall(r"return ([^;]+);", state_import) == ["0"]
+
+
 def test_c_output_exports_validate_pointers_and_sizes():
     c_src = ROLLBACK_C.read_text()
     h_src = ROLLBACK_H.read_text()
@@ -856,7 +872,7 @@ def test_a_state_behind_the_guest_is_caught_up_from_not_rewound_to():
     # The decision is the proved one, in both places it is taken.
     assert src.count("window.KNCore.catchUp.catchUpStep(") == 2
     tick_refuse = src[src.index("SYNC-LATE-ANSWER-DROPPED f=${_frameNum}") :]
-    tick_refuse = tick_refuse[: tick_refuse.index("const syncApplyBlocked = ")]
+    tick_refuse = tick_refuse[: tick_refuse.index("const atSyncBoundary =")]
     assert (
         "window.KNCore.catchUp.catchUpStep(_pendingResyncState.frame, _frameNum, MAX_CATCH_UP_FRAMES) === 'refuse'"
         in tick_refuse
@@ -966,8 +982,8 @@ def test_a_state_behind_the_guest_is_caught_up_from_not_rewound_to():
     assert "const recvBound = Math.max(_frameNum, _catchUpTo);" in packet
     assert "recvFrame > recvBound + DELAY_FRAMES + INPUT_FUTURE_MARGIN_FRAMES" in packet
     # A newer state waits for it; a stopped match ends it.
-    blocks = src[src.index("const _replayBlocksSyncApply = () => {") :]
-    assert blocks[: blocks.index("\n  };\n")].index("if (_catchUpTo >= 0) return true;") >= 0
+    blocks = src[src.index("const _syncApplyReplayStep = () => {") :]
+    assert blocks[: blocks.index("\n  };\n")].index("if (_catchUpTo >= 0) return 'wait';") >= 0
     stop = src[src.index("const stopSync = () => {") :]
     assert "_endCatchUp(" in stop[: stop.index("\n  };\n")]
 
@@ -1166,9 +1182,9 @@ def test_a_late_answer_that_would_take_the_guest_back_is_dropped():
     # After the target's deadline gives the target up, before either branch
     # holds or applies anything.
     assert tick.index("COORD-SYNC-TIMEOUT target=") < drop_at
-    assert drop_at < tick.index("const syncApplyBlocked = _pendingResyncState ? _replayBlocksSyncApply() : false;")
-    assert drop_at < tick.index("if (_frameNum >= _syncTargetFrame) {")
-    assert drop_at < tick.index("} else if (_pendingResyncState && !syncApplyBlocked) {")
+    hold_at = tick.index("if (pending && atSyncBoundary) {")
+    replay_at = tick.index("const replayStep = canInstall ? _syncApplyReplayStep() : null;")
+    assert drop_at < hold_at < replay_at
     # The stale-state check stays.
     assert "explicit sync discarded: stale frame=${frame} <= lastApplied=${_lastAppliedSyncHostFrame}" in src
 

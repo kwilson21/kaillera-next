@@ -870,3 +870,95 @@ module resync_flow_current {
     CATCH_UP = true,
   ).*
 }
+
+// A buffered snapshot cannot replace replay until its install boundary is
+// open. Waiting for a future frame does not spend the replay deadline.
+module resync_replay_boundary {
+  const START_BEFORE_TARGET: bool
+  const CHECK_ELIGIBILITY: bool
+  const CLEAR_AFTER_WRITE: bool
+  pure val LIMIT = 2
+  var ready: bool
+  var waited: int
+  var replaying: bool
+  var applied: bool
+  var eligible: bool
+  var rejectedDiscard: bool
+  var nativeAccepts: bool
+
+  action init = all {
+    ready' = false, waited' = 0, replaying' = true, applied' = false, eligible' = true, rejectedDiscard' = false, nativeAccepts' = true,
+  }
+  action reachBoundary = all {
+    ready' = true, waited' = waited, replaying' = replaying, applied' = applied, eligible' = eligible, rejectedDiscard' = rejectedDiscard, nativeAccepts' = nativeAccepts,
+  }
+  action completeReplay = all {
+    ready' = ready, waited' = waited, replaying' = false, applied' = applied, eligible' = eligible, rejectedDiscard' = rejectedDiscard, nativeAccepts' = nativeAccepts,
+  }
+  action invalidateSnapshot = all {
+    not(applied),
+    ready' = ready, waited' = waited, replaying' = replaying, applied' = applied,
+    eligible' = false, rejectedDiscard' = rejectedDiscard, nativeAccepts' = nativeAccepts,
+  }
+  action rejectNativeWrite = all {
+    not(applied),
+    ready' = ready, waited' = waited, replaying' = replaying, applied' = applied,
+    eligible' = eligible, rejectedDiscard' = rejectedDiscard, nativeAccepts' = false,
+  }
+  action tick = {
+    val service = (ready or START_BEFORE_TARGET) and (eligible or not(CHECK_ELIGIBILITY))
+    val expired = replaying and service and waited == LIMIT
+    val installed = ready and eligible and nativeAccepts and (not(replaying) or expired)
+    val preempted = expired and (not(CLEAR_AFTER_WRITE) or installed)
+    all {
+      ready' = ready,
+      waited' = if (replaying and service and waited < LIMIT) waited + 1 else waited,
+      replaying' = (replaying and not(preempted)),
+      applied' = (applied or installed),
+      eligible' = eligible,
+      rejectedDiscard' = (rejectedDiscard or (preempted and (not(eligible) or not(nativeAccepts)))),
+      nativeAccepts' = nativeAccepts,
+    }
+  }
+  action step = any { reachBoundary, completeReplay, invalidateSnapshot, rejectNativeWrite, tick }
+
+  val futureStateHasNoReplayDeadline = ready or waited == 0
+  val rejectedStateKeepsReplay = not(rejectedDiscard)
+
+  run nativeWriteRefusedAfterDeadlineTest =
+    init.then(reachBoundary).then(tick).then(tick).then(rejectNativeWrite).then(tick)
+      .expect(replaying == CLEAR_AFTER_WRITE and not(applied))
+
+  run unavailableInstallBufferTest =
+    init.then(reachBoundary).then(invalidateSnapshot).then(tick).then(tick).then(tick)
+      .expect(replaying == CHECK_ELIGIBILITY and not(applied))
+
+  run invalidatedWhileWaitingTest =
+    init.then(reachBoundary).then(tick).then(invalidateSnapshot).then(tick).then(tick)
+      .expect(replaying == CHECK_ELIGIBILITY and not(applied))
+
+  run futureStateKeepsReplayTest =
+    init.then(tick).then(tick).then(tick)
+      .expect(replaying == not(START_BEFORE_TARGET) and not(applied))
+      .then(reachBoundary)
+      .then(tick)
+      .expect(applied == START_BEFORE_TARGET)
+      .then(tick).then(tick)
+      .expect(applied and not(replaying))
+}
+
+module resync_replay_boundary_before {
+  import resync_replay_boundary(START_BEFORE_TARGET = true, CHECK_ELIGIBILITY = false, CLEAR_AFTER_WRITE = false).*
+}
+
+module resync_replay_boundary_fixed {
+  import resync_replay_boundary(START_BEFORE_TARGET = false, CHECK_ELIGIBILITY = true, CLEAR_AFTER_WRITE = true).*
+}
+
+module resync_replay_boundary_revoked_before {
+  import resync_replay_boundary(START_BEFORE_TARGET = false, CHECK_ELIGIBILITY = false, CLEAR_AFTER_WRITE = false).*
+}
+
+module resync_replay_boundary_native_before {
+  import resync_replay_boundary(START_BEFORE_TARGET = false, CHECK_ELIGIBILITY = true, CLEAR_AFTER_WRITE = false).*
+}
