@@ -10,12 +10,12 @@ Suh's Independence Axiom asks whether an FR can be maintained while adjusting an
 
 ## Independence Axiom
 
-| Metric | Baseline | With wait ownership fix |
+| Metric | Baseline | v0.73.4 |
 | --- | ---: | ---: |
 | FRs × DPs | 14 × 14 | 14 × 14 |
-| Nonzero entries | 50 | 49 |
-| Cross-dependencies | 36 | 35 |
-| Accidental entries | 2 | 1 |
+| Nonzero entries | 50 | 48 |
+| Cross-dependencies | 36 | 34 |
+| Declared accidental entries | 2 | 0 |
 | Strongly connected components | 6 | 7 |
 | Largest strongly connected component | 9 | 8 |
 | Classification | Coupled | Coupled |
@@ -39,7 +39,7 @@ flowchart LR
   Core --> Exec
   Core --> Output
   Core --> View
-  Core --> Diag
+  Core -. "baseline only" .-> Diag
   Boot --> Exec
   Exec --> Output
   Output --> View
@@ -60,9 +60,9 @@ flowchart LR
 
 ## Findings and direction
 
-1. **P2 · Optional input-channel close rewrote the simulation wait.** The close handler cleared the slot/frame rollback waiter and the lockstep frame waiter. It could reset a wait concerning a different player. The VM regression drives the production handler with P3's channel closing while waiting for P2. Both clocks were cleared on the baseline in dual and unreliable modes. They retain their values after the change. The old ordering also moves the wait deadline in Quint. See `optional_input_close` in [tick_deadlines.qnt](../../specs/tick_deadlines.qnt).
-2. **P2 · Session teardown can lose the tail of a diagnostic upload.** `pagehide` starts a sequence of byte-bounded requests. Only the first request is started before its acknowledgement is awaited. Destroying the document can prevent the later requests from starting, including the most recent buffered records. A delayed local collector received all three requests with a live page and only the first after document teardown. This is a diagnostics loss, with no demonstrated effect on match playback. Separate the at-most-one document-exit handoff from the acknowledged live drain when addressing this path.
-3. **P3 · Full peer reset still has broader wait ownership.** `resetPeerState` clears both wait clocks for a membership reset. The rollback clock carries slot and frame. The lockstep clock carries a frame and can cover several missing peers. Moving this decision requires a multi-peer wait model covering a blocker change and an unchanged surviving blocker. This is a source-level finding without a measured player-facing timeout.
+1. **P2 · Optional input-channel close rewrote the simulation wait.** The close handler could reset a wait for another player while their primary channels stayed open. The production-handler regression and `optional_input_close` in [tick_deadlines.qnt](../../specs/tick_deadlines.qnt) cover the fix. [PR #345](https://github.com/kwilson21/kaillera-next/pull/345)
+2. **P2 · Session teardown could lose the tail of a diagnostic upload.** Document exit now hands off the newest buffered tail in one bounded keepalive request. Acknowledgements still govern the live drain. The browser regression closes the document with a delayed collector. [PR #349](https://github.com/kwilson21/kaillera-next/pull/349)
+3. **P3 · Full peer reset could extend another slot's input wait.** A reset now clears only the affected slot's wait. The room's host-reservation policy can still gate frame progression, so this narrows the existing peer-to-pacing entry. The production-path regression and Quint's `otherWaitsStayArmed` cover the two-blocker case. [PR #350](https://github.com/kwilson21/kaillera-next/pull/350)
 
 Preserve the existing XState ownership for page, peer, boot, and per-recipient recovery lifecycles. Keep transport effects and retry schedules at that boundary. Route decoded input and attempt changes into simulation by slot, frame, and epoch. Keep hot frame execution synchronous, with C owning frame, state ring, and prediction history. The next useful recovery boundary is a single checked commit of state, frame, input floor, and replay disposition before publishing completion. Use an existing actor or Effect scope for asynchronous retries. Any change to roster cuts or late join must preserve host ordering and shared frame boundaries.
 
@@ -70,6 +70,7 @@ Preserve the existing XState ownership for page, peer, boot, and per-recipient r
 
 - The close-handler regression fails in both transport modes on the baseline. Both pass after the fix. Quint's corrected model holds through 12 steps in Apalache. The historical model produces a counterexample within three steps. The complete 491-command recorded simulation run exercises the repository's existing reconnect, replay, roster, late-join, and recovery models as well.
 - On local Chrome with SSB64 US and 50 ms latency plus 20 ms jitter, two, three, and four players matched all compared gameplay and game-state hashes across 1,263, 983 per guest, and 667 per guest finalized battle frames, respectively. Late-join and spectator lifecycle checks passed. The third-player admission test observed progression and one transient stranded-wait diagnostic. It does not measure hash agreement at admission.
+- Later real-ROM tests confirmed reconnect recovery, retained prediction, and finalized hash agreement for each guest in three- and four-player admission, including a signaling drop. The 55-second lockstep comparison for the per-slot fix measured 58.3 baseline and 58.2 candidate FPS per peer at the same effective delay, with zero gameplay or game-state hash mismatches. [PR #347](https://github.com/kwilson21/kaillera-next/pull/347) · [PR #348](https://github.com/kwilson21/kaillera-next/pull/348) · [PR #350](https://github.com/kwilson21/kaillera-next/pull/350)
 - In a separate baseline–fixed–fixed–baseline two-player run using the same 18-second battle window and light diagnostics, baseline rates were 47.1/46.7 and 47.8/48.0 frames/s (host/guest). Fixed rates were 51.0/50.9 and 50.0/50.5. All four runs passed their hash comparison. This small local sample did not show a throughput regression. Browser scheduling and randomized match inputs limit the comparison. It does not establish a speedup or cover Windows hardware.
 
 ## Information Axiom

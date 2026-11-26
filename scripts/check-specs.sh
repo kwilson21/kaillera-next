@@ -490,10 +490,12 @@ $QUINT run "$FLOW" --main=resync_flow_drop_older --invariant=allHold \
 # ── The tick loop's deadlines and a page that freezes ───────────────────────
 TICK=specs/tick_deadlines.qnt
 $QUINT typecheck "$TICK"
-for variant in tick_deadlines_before tick_deadlines_before_lockstep_mode tick_deadlines_current optional_input_close_before optional_input_close_current; do
+for variant in tick_deadlines_before tick_deadlines_before_lockstep_mode tick_deadlines_current optional_input_close_before optional_input_close_current peer_reset_wait_before peer_reset_wait_fixed; do
   $QUINT test "$TICK" --main="$variant" --backend="$BACKEND"
 done
 $QUINT run "$TICK" --main=optional_input_close_current --invariant=deadlineHasNotMoved \
+  --max-samples=2000 --max-steps=12 --backend="$BACKEND"
+$QUINT run "$TICK" --main=peer_reset_wait_fixed --invariant=otherWaitsStayArmed \
   --max-samples=2000 --max-steps=12 --backend="$BACKEND"
 # Today: a page's own freeze is never held against its peer. Violated before
 # the pacing-throttle deadline was credited (tick_deadlines_before).
@@ -1113,6 +1115,11 @@ done
 # (session_log_store_unrecorded; evictionIsRecordedTest). No flush adds more
 # than its bound of rows (rowsPerFlushBounded): VIOLATED with one row per run
 # and no bound (session_log_store_unbounded; alternatingLinesTest).
+for variant in session_log_page_exit_before session_log_page_exit_current; do
+  $QUINT test "$STORE" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$STORE" --main=session_log_page_exit_current --invariant=newestWasSubmitted \
+  --max-samples=1000 --max-steps=5 --backend="$BACKEND"
 $QUINT run "$STORE" --main=session_log_store_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 

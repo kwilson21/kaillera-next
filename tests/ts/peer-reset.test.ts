@@ -238,7 +238,9 @@ const keptRuntime = () => {
     const _config={matchId:"match"};
     const _syncLog=()=>{},_testRunPastEdgeFrame=()=>-1,_pushTickProfile=()=>{},_markTickReturn=()=>{};
     let _rbInputStallKey='',_rbInputStallStartTime=0,_rbStallLogged=0,_predictedKnownCount=0;
-    const clearPeerStallTimers=()=>{_rbInputStallKey='';_rbInputStallStartTime=0};
+    let _lockstepWaitFrame=-1,_lockstepWaitLastLogAt=0,_stallStart=0;
+    const _lockstepWaitAt=new Map();
+    ${part('  const clearPeerStallTimers =', '  const resetPeerRollbackTransport =')}
     const _lastRemoteFramePerSlot={},_inputDroppedAheadUpTo={},_rbInputStallThreshold=()=>8;
     const _frameNum=52,DELAY_FRAMES=2,KN_MAX_VISIBLE_ROLLBACK_DEPTH=7,RB_TRUE_ROLLBACK=true;
     const MAX_STALL_MS=3000,RESEND_TIMEOUT_MS=2000,_askForMissingInputs=()=>{};
@@ -257,6 +259,18 @@ const keptRuntime = () => {
       _drainPendingCInputs(mod);
       return true;
     };
+    let resentSlots='';
+    const _predictionsPaused=true,tickMod=mod;
+    const _requestStrictMenuResends=(_peers,slots)=>{resentSlots=slots.join(',')};
+    globalThis.resentSlots=()=>resentSlots;
+    globalThis.lockstepTick=()=>{
+      const getInputPeers=()=>[{slot:1},{slot:2}];
+      ${part('        // for ever. A replay already queued runs', '        // ── Pre-tick:')}
+      return true;
+    };
+    globalThis.armRollback=(slot)=>{_rbInputStallKey=slot+':50';_rbInputStallStartTime=now};
+    globalThis.rollbackStart=()=>_rbInputStallStartTime;
+    globalThis.isSlotPhantom=(slot)=>!!_peerPhantom[slot];
     globalThis.setNow=(ms)=>{now=ms};
     globalThis.setPresent=(v)=>{present=v};
     globalThis.legacy=()=>{_activeRoster=null};
@@ -273,6 +287,11 @@ const keptRuntime = () => {
   );
   const runtime: {
     tick: () => true | undefined;
+    lockstepTick: () => true | undefined;
+    armRollback: (slot: number) => void;
+    rollbackStart: () => number;
+    isSlotPhantom: (slot: number) => boolean;
+    resentSlots: () => string;
     setNow: (ms: number) => void;
     setPresent: (present: boolean) => void;
     legacy: () => void;
@@ -352,4 +371,30 @@ test('a pacing recovery does not clear native phantom history on the second outa
   r.reset('mesh-heal');
   assert.equal(r.nativeResets(), 1);
   assert.equal(r.waitStart(), null);
+});
+
+test('resetting a peer only clears its own rollback wait', () => {
+  const r = keptRuntime();
+  r.armRollback(2);
+  r.reset('reconnect');
+  assert.equal(r.rollbackStart(), 100);
+  r.armRollback(SLOT);
+  r.reset('reconnect');
+  assert.equal(r.rollbackStart(), 0);
+});
+
+test('lockstep releases the older blocker on time and gives the reset slot its own deadline', () => {
+  const r = keptRuntime();
+  assert.equal(r.lockstepTick(), undefined);
+  r.setNow(4900);
+  r.reset('reconnect');
+  assert.equal(r.lockstepTick(), undefined);
+  assert.equal(r.resentSlots(), '2');
+  r.setNow(5100);
+  assert.equal(r.lockstepTick(), undefined);
+  assert.equal(r.isSlotPhantom(2), true);
+  assert.equal(r.isSlotPhantom(SLOT), false);
+  r.setNow(9900);
+  assert.equal(r.lockstepTick(), true);
+  assert.equal(r.isSlotPhantom(SLOT), true);
 });

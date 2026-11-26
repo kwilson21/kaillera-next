@@ -651,10 +651,10 @@
   let _predictionsPaused = false;
   // The mode this page plays, as the logs and the info panel name it.
   const _modeName = () => (_predictionsPaused ? 'lockstep' : 'rollback');
-  // The apply frame a lockstep tick is waiting on, and since when (-1/0: not
-  // waiting). Ends at the deadline by dropping the player (lockstepStep).
+  // For the current apply frame, keep a separate wait start for each missing slot.
+  // A slot's deadline can expire while another slot is still blocking the frame.
   let _lockstepWaitFrame = -1;
-  let _lockstepWaitStart = 0;
+  const _lockstepWaitAt = new Map();
   let _lockstepWaitLastLogAt = 0;
   let _demoMode = false; // demo-only: disable C pacing-throttle so the engine runs full speed, predicts, and rolls back visibly under simulated lag (instead of pacing to match the slow peer, which feels identical to lockstep)
   let _rbReplayLogged = false; // prevents log spam during amortized replay
@@ -7205,21 +7205,21 @@
     }
   };
 
-  const _KEEPALIVE_BUDGET = 60 * 1024;
   const _logEncoder = new TextEncoder();
-  const _flushViaHttp = async (payload, { url, final }) => {
+  const _flushViaHttp = async (payload, { url, final, keepalive }) => {
     if (!url) return false;
     try {
-      const body = JSON.stringify(payload);
+      const body = keepalive ? window.KNCore.sessionLogKeepaliveBody(payload, keepalive) : JSON.stringify(payload);
+      if (body === null) return false;
       const options = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body,
-        keepalive: final && _logEncoder.encode(body).length <= _KEEPALIVE_BUDGET,
+        keepalive: !!keepalive,
       };
       let response = await fetch(url, options);
       // A concurrent socket append may hold this slot's DB writer briefly.
-      if (final && response.status === 429) {
+      if (final && !keepalive && response.status === 429) {
         await new Promise((resolve) => setTimeout(resolve, 500));
         response = await fetch(url, options);
       }
@@ -7250,7 +7250,7 @@
   const _flushFinalLog = async (payload, target) => {
     let logOffset = 0;
     let auditOffset = 0;
-    const budget = target.keepalive ? _KEEPALIVE_BUDGET : 2 * 1024 * 1024;
+    const budget = 2 * 1024 * 1024;
     // The envelope contains the same frozen summary and context on every batch.
     const empty = { ...payload, entries: [], audit: { ...payload.audit, entries: [] } };
     const available = budget - _logEncoder.encode(JSON.stringify(empty)).length;
@@ -7311,19 +7311,20 @@
       }
     } catch (_) {}
   };
-  const _flushSyncLog = ({ final = false, keepalive = false } = {}) => {
+  const _flushSyncLog = ({ final = false, keepalive = false, hidden = false } = {}) => {
     const matchId = _cachedMatchId || KNState.matchId;
     if (!matchId) return;
     const token = _cachedUploadToken || KNState.uploadToken;
     const room = _cachedRoom || KNState.room;
     const url =
       token && room ? `/api/session-log?token=${encodeURIComponent(token)}&room=${encodeURIComponent(room)}` : null;
-    const target = { url, keepalive, final: final || keepalive };
+    const target = { url, final, keepalive: keepalive ? 'exit' : hidden ? 'hidden' : null };
     // Drain the C debug log into JS sync log BEFORE building the flush
     // payload so the new entries are included.
     _drainCDebugLog();
     try {
-      const payload = _buildFlushPayload(target.final);
+      const payload = _buildFlushPayload(final || keepalive);
+      if (target.keepalive) return _flushViaHttp(payload, target);
       if (target.final) return _flushFinalLog(payload, target);
       if (socket?.connected) {
         let acked = false;
@@ -12421,14 +12422,12 @@
 
   // -- Per-peer state cleanup (Invariant I2) --------------------------------
 
-  const clearPeerStallTimers = () => {
-    if (_rbInputStallKey) {
+  const clearPeerStallTimers = (slot) => {
+    if (_rbInputStallKey.startsWith(`${slot}:`)) {
       _rbInputStallKey = '';
       _rbInputStallStartTime = 0;
     }
-    // A lockstep wait may be on the peer being reset.
-    _lockstepWaitFrame = -1;
-    _lockstepWaitStart = 0;
+    _lockstepWaitAt.delete(slot);
   };
 
   const resetPeerRollbackTransport = (peer, sid, reason) => {
@@ -12603,7 +12602,7 @@
     // Stall tracking — if we were stalled waiting on this slot's apply
     // frame, clear tracking so the stall clock restarts cleanly once a
     // new peer fills the slot.
-    clearPeerStallTimers();
+    clearPeerStallTimers(slot);
 
     const kept = _resetCoreSlot(slot, reason, !!opts.keepCoreSlot, unsafeHistory);
 
@@ -17182,7 +17181,7 @@
     // only signal an app switch with visibilitychange.
     if (!_unloadVisChangeHandler) {
       _unloadVisChangeHandler = () => {
-        if (document.visibilityState === 'hidden') void _flushSyncLog({ keepalive: true });
+        if (document.visibilityState === 'hidden') void _flushSyncLog({ hidden: true });
       };
       document.addEventListener('visibilitychange', _unloadVisChangeHandler);
     }
@@ -18168,7 +18167,9 @@
     }
     if (_rbInputStallStartTime > 0) _rbInputStallStartTime = Math.min(now, _rbInputStallStartTime + gap);
     // The lockstep wait drops a player at its deadline too (specs/tick_deadlines.qnt).
-    if (_lockstepWaitStart > 0) _lockstepWaitStart = Math.min(now, _lockstepWaitStart + gap);
+    for (const [slot, startedAt] of _lockstepWaitAt) {
+      _lockstepWaitAt.set(slot, Math.min(now, startedAt + gap));
+    }
     // The pacing throttle's deadline drops a peer too, and is checked on this
     // tick before the throttle can end (specs/tick_deadlines.qnt): a page
     // that froze while held back would drop a peer that never stopped sending.
@@ -19120,57 +19121,62 @@
               if (applyFrame < _inputFloor(p.slot)) continue;
               if (_remoteInputs[p.slot]?.[applyFrame] === undefined) missingSlots.push(p.slot);
             }
-            const nowLockstep = performance.now();
-            if (missingSlots.length && _lockstepWaitFrame !== applyFrame) {
-              _lockstepWaitFrame = applyFrame;
-              _lockstepWaitStart = nowLockstep;
-            }
-            const waitedMs = missingSlots.length ? nowLockstep - _lockstepWaitStart : 0;
-            const step = window.KNCore.lockstepStep(
-              missingSlots.length,
-              waitedMs,
-              MAX_STALL_MS,
-              MAX_STALL_MS + RESEND_TIMEOUT_MS,
-            );
-            if (step === 'drop') {
-              for (const slot of missingSlots) {
-                markPeerPhantomForStallTimeout(
-                  slot,
-                  'lockstep-wait-timeout',
-                  `waitedMs=${Math.round(waitedMs)} apply=${applyFrame}`,
-                );
-              }
-              _syncLog(
-                `LOCKSTEP-WAIT-TIMEOUT f=${_frameNum} apply=${applyFrame} slots=[${missingSlots.join(',')}] ` +
-                  `waitedMs=${Math.round(waitedMs)} — dropping, playing on without them`,
-              );
+            if (missingSlots.length === 0) {
               _lockstepWaitFrame = -1;
-              _lockstepWaitStart = 0;
-            } else if (step !== 'run') {
-              // A hole (the peer has made this frame's input: it sent or this
-              // page dropped a later one) is asked for at once, as the rollback
-              // input stall does (_askForMissingInputs; specs/resync_inputs.qnt
-              // ASK_FOR_MISSING). Any input still missing is asked for again at
-              // the first deadline.
-              for (const p of lockstepPeers) {
-                if (missingSlots.includes(p.slot)) _askForMissingInputs(p, applyFrame, applyFrame);
-              }
-              if (step === 'askAgain') {
-                _requestStrictMenuResends(lockstepPeers, missingSlots, applyFrame, nowLockstep, 'lockstep');
-              }
-              if (nowLockstep - _lockstepWaitLastLogAt >= 1000) {
-                _lockstepWaitLastLogAt = nowLockstep;
-                _syncLog(
-                  `LOCKSTEP-WAIT f=${_frameNum} apply=${applyFrame} slots=[${missingSlots.join(',')}] ` +
-                    `waitedMs=${Math.round(waitedMs)}${step === 'askAgain' ? ' (asked again)' : ''}`,
-                );
-              }
-              if (_stallStart === 0) _stallStart = nowLockstep;
-              _markTickReturn('skip:lockstep-wait');
-              return;
+              if (_lockstepWaitAt.size) _lockstepWaitAt.clear();
             } else {
-              _lockstepWaitFrame = -1;
-              _lockstepWaitStart = 0;
+              if (_lockstepWaitFrame !== applyFrame) {
+                _lockstepWaitFrame = applyFrame;
+                if (_lockstepWaitAt.size) _lockstepWaitAt.clear();
+              } else {
+                for (const slot of _lockstepWaitAt.keys()) {
+                  if (!missingSlots.includes(slot)) _lockstepWaitAt.delete(slot);
+                }
+              }
+              const nowLockstep = performance.now();
+              const waitingSlots = [];
+              const resendSlots = [];
+              let longestWait = 0;
+              for (const slot of missingSlots) {
+                const startedAt = _lockstepWaitAt.get(slot) ?? nowLockstep;
+                const waitedMs = nowLockstep - startedAt;
+                const step = window.KNCore.lockstepStep(1, waitedMs, MAX_STALL_MS, MAX_STALL_MS + RESEND_TIMEOUT_MS);
+                if (step === 'drop') {
+                  _lockstepWaitAt.delete(slot);
+                  markPeerPhantomForStallTimeout(
+                    slot,
+                    'lockstep-wait-timeout',
+                    `waitedMs=${Math.round(waitedMs)} apply=${applyFrame}`,
+                  );
+                  _syncLog(
+                    `LOCKSTEP-WAIT-TIMEOUT f=${_frameNum} apply=${applyFrame} slot=${slot} waitedMs=${Math.round(waitedMs)}`,
+                  );
+                  continue;
+                }
+                _lockstepWaitAt.set(slot, startedAt);
+                waitingSlots.push(slot);
+                if (step === 'askAgain') resendSlots.push(slot);
+                longestWait = Math.max(longestWait, waitedMs);
+              }
+              // Ask for holes immediately. Retry any input still missing at its first deadline.
+              for (const p of lockstepPeers) {
+                if (waitingSlots.includes(p.slot)) _askForMissingInputs(p, applyFrame, applyFrame);
+              }
+              if (resendSlots.length) {
+                _requestStrictMenuResends(lockstepPeers, resendSlots, applyFrame, nowLockstep, 'lockstep');
+              }
+              if (waitingSlots.length) {
+                if (nowLockstep - _lockstepWaitLastLogAt >= 1000) {
+                  _lockstepWaitLastLogAt = nowLockstep;
+                  _syncLog(
+                    `LOCKSTEP-WAIT f=${_frameNum} apply=${applyFrame} slots=[${waitingSlots.join(',')}] ` +
+                      `waitedMs=${Math.round(longestWait)}${resendSlots.length ? ' (asked again)' : ''}`,
+                  );
+                }
+                if (_stallStart === 0) _stallStart = nowLockstep;
+                _markTickReturn('skip:lockstep-wait');
+                return;
+              }
             }
           }
           _stallStart = 0;
@@ -22662,7 +22668,7 @@
     _ranBeforeDelayChange = -1;
     _predictionsPaused = false;
     _lockstepWaitFrame = -1;
-    _lockstepWaitStart = 0;
+    _lockstepWaitAt.clear();
     _hudRollbackEvents = 0;
     _predictedKnownCount = 0;
     _hudRollbackDepthSamples = [];

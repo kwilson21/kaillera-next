@@ -262,6 +262,8 @@ tick_deadlines() {
   expect_violation "$TICK" tick_deadlines_before_lockstep_mode everyWaitHasADeadline
   verify "$TICK" optional_input_close_current deadlineHasNotMoved init 12
   expect_violation "$TICK" optional_input_close_before deadlineHasNotMoved 3
+  verify "$TICK" peer_reset_wait_fixed otherWaitsStayArmed init 8
+  expect_violation "$TICK" peer_reset_wait_before otherWaitsStayArmed 3
   verify "$TICK" peer_staleness_current allHold init 14
   # A live peer catching up below its highest frame: five ticks, the clock
   # never restarted (catchingUpTest).
@@ -699,6 +701,8 @@ session_log_store() {
   # The counterexamples below are 5 steps or fewer; the change is checked
   # past them.
   verify "$STORE" session_log_store_current allHold
+  verify "$STORE" session_log_page_exit_current newestWasSubmitted init 4
+  expect_violation "$STORE" session_log_page_exit_before newestWasSubmitted 2
   # The shortest in one store: four lines in one flush, one row over the
   # store's cap, taking the other kind's line with it (5 steps). Over two
   # flushes it is 6 (jsLinesPushACLineOutTest, cLinesPushAJsLineOutTest).

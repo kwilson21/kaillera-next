@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { appliedForTag, joinInputAgreement, joinStateFrame } from './join-input-check.mjs';
+import { appliedForTag, joinHashAgreement, joinInputAgreement, joinStateFrame } from './join-input-check.mjs';
 
 let seq = 0;
 const line = (frame, text) => `${seq++}\t0\tf=${frame}\t${text}`;
@@ -86,4 +86,14 @@ test('pages that ran different inputs differ; a run a host state replaced is rep
   });
   assert.equal(s.differingCount, 0);
   assert.equal(s.supersededCount, 1);
+});
+
+test('join hash coverage requires both hashes for each guest and reports differences', () => {
+  const host = { 9: [9, 9], 10: [1, 2], 11: [3, 4], 12: [5, 6] };
+  const first = { 9: [1, 2], 10: [1, 2], 11: [3, 0], 12: [5, 7] };
+  const second = { 10: [2, 2] };
+  assert.deepEqual(joinHashAgreement([host, first, second], 10, 3), [
+    { compared: 2, differing: [12] },
+    { compared: 1, differing: [10] },
+  ]);
 });

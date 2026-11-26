@@ -481,6 +481,15 @@
         "tests/ts/rollback-session-log.test.ts",
         "tests/test_session_log_flush_e2e.py"
       ]
+    },
+    "peer-wait-reset": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const clearPeerStallTimers = (slot) => {",
+      "line": 12425,
+      "coverage": [
+        "tests/ts/peer-reset.test.ts",
+        "specs/tick_deadlines.qnt"
+      ]
     }
   },
   "baseline": {
@@ -1012,11 +1021,31 @@
     ]
   },
   "changes": {
-    "add": [],
+    "add": [
+      {
+        "fr": "FR-pacing",
+        "dp": "DP-peers",
+        "kind": "necessary",
+        "mechanism": "The primary host connection gates frame progression during the host reservation. A full peer reset invalidates only the input wait for the affected slot.",
+        "evidence": [
+          "tick",
+          "peer-reset",
+          "peer-wait-reset"
+        ]
+      }
+    ],
     "remove": [
       {
         "fr": "FR-pacing",
         "dp": "DP-delivery"
+      },
+      {
+        "fr": "FR-diagnostics",
+        "dp": "DP-session"
+      },
+      {
+        "fr": "FR-pacing",
+        "dp": "DP-peers"
       }
     ]
   }

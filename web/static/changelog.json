@@ -1,5 +1,25 @@
 [
   {
+    "version": "0.73.4",
+    "date": "2026-11-26",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "keep input deadlines scoped to the peer being reset (#350)"
+      }
+    ]
+  },
+  {
+    "version": "0.73.3",
+    "date": "2026-11-26",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "preserve the newest diagnostic logs on page exit (#349)"
+      }
+    ]
+  },
+  {
     "version": "0.73.2",
     "date": "2026-11-25",
     "changes": [

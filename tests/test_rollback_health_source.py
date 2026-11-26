@@ -94,7 +94,7 @@ def test_strict_menu_resend_cadence_is_per_slot():
     assert "const resendKey = `${source}:${slot}:${applyFrame}`;" in src
     assert "prev?.key === resendKey && nowMs - prev.lastAt < RESEND_TIMEOUT_MS" in src
     assert "_strictMenuResendState[slot] = { key: resendKey, lastAt: nowMs };" in src
-    assert "_requestStrictMenuResends(lockstepPeers, missingSlots, applyFrame, nowLockstep, 'lockstep')" in src
+    assert "_requestStrictMenuResends(lockstepPeers, resendSlots, applyFrame, nowLockstep, 'lockstep')" in src
 
 
 def test_retroarch_deterministic_patch_is_enforced_by_build():
