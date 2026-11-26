@@ -7092,25 +7092,28 @@
   const _buildRollbackStats = () => {
     const m = window.EJS_emulator?.gameManager?.Module;
     if (!_useCRollback || !m?._kn_get_rollback_count) return null;
-    const base = {
-      rollbacks: m._kn_get_rollback_count(),
-      predictions: m._kn_get_prediction_count(),
-      correctPredictions: m._kn_get_correct_predictions(),
-      maxDepth: m._kn_get_max_depth?.() ?? 0,
-      failedRollbacks: m._kn_get_failed_rollbacks?.() ?? 0,
-      // Predictions whose ring slot was reused before the real input arrived.
-      // Books balance: predictions = correct + rollbacks + failed + clobbered.
-      // Spikes here flag a peer-freeze cascade rather than a counter bug.
-      clobberedPredictions: m._kn_get_clobbered_predictions?.() ?? 0,
-      // Experiment A: rollbacks absorbed by stick-tolerance window.
-      // Rollback count reduction == toleranceHits (approximately).
-      toleranceHits: m._kn_get_tolerance_hits?.() ?? 0,
-    };
-    // T2: misprediction breakdown — button-only, stick-only, both-differ.
-    // Allocate a 3-int scratch buffer once and reuse it.
-    if (m._kn_get_mispred_breakdown && m._malloc) {
-      if (!window._rbMispredBuf) window._rbMispredBuf = m._malloc(12);
-      try {
+    // A trapped core can leave buffered evidence even when its counters are unreadable.
+    let base = null;
+    try {
+      base = {
+        rollbacks: m._kn_get_rollback_count(),
+        predictions: m._kn_get_prediction_count(),
+        correctPredictions: m._kn_get_correct_predictions(),
+        maxDepth: m._kn_get_max_depth?.() ?? 0,
+        failedRollbacks: m._kn_get_failed_rollbacks?.() ?? 0,
+        // Predictions whose ring slot was reused before the real input arrived.
+        // Books balance: predictions = correct + rollbacks + failed + clobbered.
+        // Spikes here flag a peer-freeze cascade rather than a counter bug.
+        clobberedPredictions: m._kn_get_clobbered_predictions?.() ?? 0,
+        // Experiment A: rollbacks absorbed by stick-tolerance window.
+        // Rollback count reduction == toleranceHits (approximately).
+        toleranceHits: m._kn_get_tolerance_hits?.() ?? 0,
+      };
+      // T2: misprediction breakdown — button-only, stick-only, both-differ.
+      // Allocate a 3-int scratch buffer once and reuse it.
+      if (m._kn_get_mispred_breakdown && m._malloc) {
+        if (!window._rbMispredBuf) window._rbMispredBuf = m._malloc(12);
+        if (!window._rbMispredBuf) return base;
         m._kn_get_mispred_breakdown(window._rbMispredBuf, 3);
         const view = new Int32Array(m.HEAP32.buffer, window._rbMispredBuf, 3);
         base.mispredBreakdown = {
@@ -7118,8 +7121,8 @@
           stick: view[1],
           both: view[2],
         };
-      } catch (_) {}
-    }
+      }
+    } catch (_) {}
     return base;
   };
 

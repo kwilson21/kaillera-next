@@ -389,3 +389,50 @@ module session_log_page_exit_before {
 module session_log_page_exit_current {
   import session_log_page_exit(NEWEST = true).*
 }
+
+// A native counter sample contributes optional context to a flush. A core
+// failure can make counters unreadable while the diagnostic rings still hold
+// the evidence needed to diagnose the failure.
+module session_log_native_sample {
+  const PRESERVE_RECORDS: bool
+  type Flush = { logs: Set[int], audit: Set[int], hasNativeStats: bool }
+  pure val LOGS = Set(0, 1)
+  pure val AUDIT = Set(0)
+  var upload: Flush
+  var submitted: bool
+
+  action init = all {
+    upload' = { logs: Set(), audit: Set(), hasNativeStats: false },
+    submitted' = false,
+  }
+
+  action flush(nativeStatsAvailable: bool): bool = all {
+    val keepsRecords = nativeStatsAvailable or PRESERVE_RECORDS
+    upload' = {
+      logs: if (keepsRecords) LOGS else Set(),
+      audit: if (keepsRecords) AUDIT else Set(),
+      hasNativeStats: nativeStatsAvailable,
+    },
+    submitted' = true,
+  }
+
+  action step = {
+    nondet nativeStatsAvailable = Set(false, true).oneOf()
+    flush(nativeStatsAvailable)
+  }
+
+  val submissionPreservesBufferedRecords =
+    submitted implies (upload.logs == LOGS and upload.audit == AUDIT)
+
+  run unreadableNativeCountersTest =
+    init.then(flush(false))
+      .expect(not(upload.hasNativeStats) and submissionPreservesBufferedRecords == PRESERVE_RECORDS)
+}
+
+module session_log_native_sample_before {
+  import session_log_native_sample(PRESERVE_RECORDS = false).*
+}
+
+module session_log_native_sample_fixed {
+  import session_log_native_sample(PRESERVE_RECORDS = true).*
+}

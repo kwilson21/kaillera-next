@@ -708,6 +708,8 @@ session_log_store() {
   verify "$STORE" session_log_store_current allHold
   verify "$STORE" session_log_page_exit_current newestWasSubmitted init 4
   expect_violation "$STORE" session_log_page_exit_before newestWasSubmitted 2
+  verify "$STORE" session_log_native_sample_fixed submissionPreservesBufferedRecords init 3
+  expect_violation "$STORE" session_log_native_sample_before submissionPreservesBufferedRecords 2
   # The shortest in one store: four lines in one flush, one row over the
   # store's cap, taking the other kind's line with it (5 steps). Over two
   # flushes it is 6 (jsLinesPushACLineOutTest, cLinesPushAJsLineOutTest).
