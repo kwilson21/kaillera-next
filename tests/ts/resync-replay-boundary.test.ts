@@ -269,7 +269,7 @@ test('repeated refused captures exhaust the host follow-up budget on a reachable
     const _playerSlot = 0, _pushingSyncState = false, _frameNum = 2189, _syncQueueEpoch = 1;
     const SYNC_COORD_TIMEOUT_MS = 3000;
     const _syncQueueGen = {}, _peerPhantom = {}, _followUpWatches = new Map(), _directAnswerNewest = new Map();
-    const socket = null, _syncLog = () => {};
+    const socket = null, _syncLog = () => {}, _armScheduledSyncClock = () => {};
     const _peers = {guest: {slot: 1, syncDc: {readyState: 'open'}}};
     const window = {KNCore: {syncFollowUp: {followUpIsUnneeded: () => false}}};
     let now = 1, _scheduledSyncRequests = [{targetSid: 'guest', targetFrame: 2189, requestId: 3, deadlineAt: 1}];
@@ -283,7 +283,7 @@ test('repeated refused captures exhaust the host follow-up budget on a reachable
     async () => {
       for (let i = 0; i < 6; ++i) {
         now += 3001;
-        _dispatchScheduledSyncs(() => false);
+        _dispatchScheduledSyncs();
         await Promise.resolve();
       }
       return JSON.stringify({attempts, remaining: _scheduledSyncRequests.length});
@@ -291,4 +291,63 @@ test('repeated refused captures exhaust the host follow-up budget on a reachable
     `,
   );
   assert.deepEqual(JSON.parse(await run()), { attempts: [3, 3, 3, 3], remaining: 0 });
+});
+
+test('the host deadline dispatches without frame ticks and fences a stopped match', async () => {
+  const run: () => Promise<string> = runInNewContext(
+    `
+    const PHASE_RUNNING = 1, PHASE_STOPPED = 2, SYNC_COORD_TIMEOUT_MS = 3000;
+    const _playerSlot = 0, _pushingSyncState = false, _frameNum = 2189;
+    const _config = {matchReturn: {playing: true}}, _checkpoint = {busy: false};
+    const _syncQueueGen = {}, _peerPhantom = {}, _followUpWatches = new Map(), _directAnswerNewest = new Map();
+    const socket = null, _syncLog = () => {};
+    const _peers = {guest: {slot: 1, syncDc: {readyState: 'open'}}};
+    let now = 0, _phase = PHASE_RUNNING, _scheduledSyncRequests = [], _syncQueueEpoch = 1;
+    let pulse, cancelled = 0, replay = 0;
+    const window = {EJS_emulator: {gameManager: {Module: {_kn_get_replay_depth: () => replay}}},
+      KNCore: {syncFollowUp: {followUpIsUnneeded: () => false}, startEvery: (run) => {
+        pulse = run;
+        return () => { cancelled++; };
+      }}};
+    const performance = { now: () => now };
+    const attempts = [];
+    const pushSyncState = (sid, _proactive, options) => {
+      attempts.push(options.requestIds[sid]);
+      return Promise.resolve([sid]);
+    };
+    ${source.includes('  let _stopScheduledSyncClock') ? from('  let _stopScheduledSyncClock', '  // Coordinated sync dispatch') : ''}
+    ${from('  const _dispatchScheduledSyncs =', '  // A direct request')}
+    async () => {
+      const put = (requestId) => {
+        _scheduledSyncRequests.push({targetSid: 'guest', targetFrame: 2190, requestId, deadlineAt: now + 3000});
+        if (typeof _armScheduledSyncClock !== 'undefined') _armScheduledSyncClock();
+      };
+      put(3);
+      now = 2900;
+      pulse?.();
+      now = 3000;
+      replay = 2;
+      pulse?.();
+      if (attempts.length) throw Error('capture before deadline or during replay');
+      replay = 0;
+      _checkpoint.busy = true;
+      pulse?.();
+      _checkpoint.busy = false;
+      _config.matchReturn.playing = false;
+      pulse?.();
+      if (attempts.length) throw Error('capture during checkpoint or saved-match restore');
+      _config.matchReturn.playing = true;
+      pulse?.();
+      await Promise.resolve();
+
+      put(4);
+      _phase = PHASE_STOPPED;
+      now = 7000;
+      pulse?.();
+      await Promise.resolve();
+      return JSON.stringify({attempts, cancelled});
+    }
+    `,
+  );
+  assert.deepEqual(JSON.parse(await run()), { attempts: [3], cancelled: 2 });
 });

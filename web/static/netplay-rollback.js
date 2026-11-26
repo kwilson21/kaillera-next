@@ -8028,6 +8028,7 @@
     _syncTargetFrame = -1;
     _syncTargetDeadlineAt = 0;
     _scheduledSyncRequests = [];
+    _cancelScheduledSyncClock();
     _followUpWatches.clear();
     _directAnswerNewest.clear();
     _lastAppliedSyncHostFrame = Math.max(_lastAppliedSyncHostFrame, r);
@@ -8544,6 +8545,7 @@
       (sid, i, all) => all.indexOf(sid) === i && !_scheduledSyncRequests.some((r) => r.targetSid === sid),
     );
     for (const sid of targets) _scheduledSyncRequests.push({ targetFrame: _frameNum, targetSid: sid, deadlineAt });
+    _armScheduledSyncClock();
     // That state will be for this frame or a later one, so the
     // guest's inputs from before this frame minus the delay are
     // settled by it already. (Only the host can say so here: a guest
@@ -12219,6 +12221,7 @@
               requestId,
               deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
             });
+            _armScheduledSyncClock();
             _syncLog(`coord sync scheduled for ${remoteSid} at frame ${targetFrame}`);
           } else {
             _answerDirectSyncRequest(remoteSid, requestId);
@@ -17556,6 +17559,7 @@
   const stopSync = () => {
     _phase = PHASE_STOPPED;
     _cancelResyncDeadline();
+    _cancelScheduledSyncClock();
     _endCatchUp(window.EJS_emulator?.gameManager?.Module ?? {}, 'the match stopped');
     // Every connection is about to close; each machine is told, and its per-match state goes.
     _peerDriver()?.sessionEnded();
@@ -17888,6 +17892,32 @@
     return 'replace';
   };
 
+  let _stopScheduledSyncClock = null;
+  const _cancelScheduledSyncClock = () => {
+    const stop = _stopScheduledSyncClock;
+    _stopScheduledSyncClock = null;
+    stop?.();
+  };
+  const _armScheduledSyncClock = () => {
+    if (_stopScheduledSyncClock) return;
+    const epoch = _syncQueueEpoch;
+    const stop = window.KNCore.startEvery(() => {
+      if (_stopScheduledSyncClock !== stop) return;
+      if (epoch !== _syncQueueEpoch || _phase === PHASE_STOPPED || !_scheduledSyncRequests.length) {
+        _cancelScheduledSyncClock();
+        return;
+      }
+      if (_phase !== PHASE_RUNNING || _checkpoint?.busy || (_config?.matchReturn && !_config.matchReturn.playing))
+        return;
+      // A live browser may be able to answer while frame ticks are stalled.
+      // Replay retains exclusive access until its current slice sequence ends.
+      if (window.EJS_emulator?.gameManager?.Module?._kn_get_replay_depth?.() > 0) return;
+      _dispatchScheduledSyncs();
+      if (!_scheduledSyncRequests.length) _cancelScheduledSyncClock();
+    }, 100);
+    _stopScheduledSyncClock = stop;
+  };
+
   // Coordinated sync dispatch (host): when the host reaches a scheduled
   // target frame, capture and send state. Coalesces multiple guests (4P)
   // into a single broadcast push. Runs at the end of both the C rollback
@@ -17912,9 +17942,9 @@
       (typeof _recovery !== 'undefined' && _recovery.publication?.holding())
     )
       return;
-    const confirmed = isConfirmed();
+    const confirmed = isConfirmed?.() ?? false;
     const _coordNow = performance.now();
-    const pastDeadline = (r) => r.deadlineAt && _coordNow > r.deadlineAt;
+    const pastDeadline = (r) => r.deadlineAt && _coordNow >= r.deadlineAt;
     // A request whose target has no open channel stays queued: sending now
     // would be skipped and the request lost. It goes out once the channel
     // opens, or resetPeerState drops it when that peer disconnects (I2).
@@ -17935,7 +17965,7 @@
     // nothing while the follow-up's own target is a phantom.
     const confirmedFor = (r) => confirmed && !(r.followUp && _peerPhantom[_peers[r.targetSid]?.slot]);
     const ready = _scheduledSyncRequests.filter(
-      (r) => ((confirmedFor(r) && r.targetFrame <= _frameNum) || pastDeadline(r)) && reachable(r),
+      (r) => ((confirmedFor(r) && r.targetFrame <= _frameNum) || (!isConfirmed && pastDeadline(r))) && reachable(r),
     );
     // A follow-up whose frame is now confirmed goes out only if an input at
     // or before the frame of the state already sent differed from its
@@ -17983,7 +18013,7 @@
       `coord sync dispatch: ${due.length} guest(s) at frame ${_frameNum}` +
         `${viaChannel.length > 1 ? ' (broadcast)' : ''}${viaSocket.length > 0 ? ` (${viaSocket.length} over the socket)` : ''}`,
     );
-    const requeue = (r, followUp, watch) =>
+    const requeue = (r, followUp, watch) => {
       _scheduledSyncRequests.push({
         targetFrame: _frameNum,
         targetSid: r.targetSid,
@@ -17996,6 +18026,8 @@
         // The way the request came (the signaling socket, or the data channel).
         ...(r.transport ? { transport: r.transport } : {}),
       });
+      _armScheduledSyncClock();
+    };
     // Confirmation skips phantom peers, so a state sent while a target is a
     // phantom is not confirmed for that target.
     const unconfirmedFor = new Set(
@@ -18145,6 +18177,7 @@
         watch: _followUpWatches.get(sid) ?? null,
         ...(transport ? { transport } : {}),
       });
+      _armScheduledSyncClock();
     });
   };
 
@@ -18254,10 +18287,6 @@
     _serviceReconnectHostAnswers();
     _checkOverduePushes();
     _flushResendLogs();
-    // Deadline-only pass: a tick that stalls returns before the per-frame
-    // dispatch below, and a stall can outlast SYNC_COORD_TIMEOUT_MS. Never
-    // mid-replay, where the live state isn't at a frame boundary.
-    if (!(window.EJS_emulator?.gameManager?.Module?._kn_get_replay_depth?.() > 0)) _dispatchScheduledSyncs(() => false);
     _checkStateTransition();
     _chk('post-state-transition');
 
@@ -22864,6 +22893,7 @@
     _syncTargetFrame = -1;
     _syncTargetDeadlineAt = 0;
     _scheduledSyncRequests = [];
+    _cancelScheduledSyncClock();
     _followUpWatches.clear();
     _directAnswerNewest.clear();
     _syncQueueEpoch++;

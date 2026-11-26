@@ -85,6 +85,7 @@ def _race(*, transport, order, tag):
           : _hostInputAuthor('M', _peers.M)});
     };
     // Stub physical I/O; run the application's actual native-admission guard.
+    const _armScheduledSyncClock = () => {};
     const pushSyncState = async (sid, _proactive, options) => {
       await Promise.resolve();
       if (!_admitReconnectNativeCapture(options, tickMod)) return null;

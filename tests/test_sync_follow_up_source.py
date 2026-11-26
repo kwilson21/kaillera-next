@@ -228,6 +228,7 @@ def _answer_direct(
         const _peerPhantom = {{ 1: {json.dumps(phantom)} }};
         let _syncQueueEpoch = 1;
         const _syncQueueGen = {{}};
+        const _armScheduledSyncClock = () => {{}};
         let _scheduledSyncRequests = {json.dumps(queued or [])};
         const _followUpWatches = new Map();
         const _directAnswerNewest = new Map();
@@ -419,6 +420,7 @@ def _socket_request(src_text):
         const _peerPhantom = {{}};
         let _syncQueueEpoch = 1;
         const _syncQueueGen = {{}};
+        const _armScheduledSyncClock = () => {{}};
         let _scheduledSyncRequests = [];
         const _followUpWatches = new Map();
         const _directAnswerNewest = new Map();
@@ -480,6 +482,7 @@ def test_only_the_newest_direct_answer_schedules_the_follow_up():
         const _peerPhantom = {{}};
         let _syncQueueEpoch = 1;
         const _syncQueueGen = {{}};
+        const _armScheduledSyncClock = () => {{}};
         let _scheduledSyncRequests = [];
         const _followUpWatches = new Map();
         const _directAnswerNewest = new Map();

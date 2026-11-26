@@ -40,6 +40,7 @@ def _run_guard(transport, scenario):
     const _primeLateJoinInactiveInput = () => {};
     const _recordHostReconnectReceipt = () => {};
     const _holdReconnectHostAnswer = () => false;
+    const _armScheduledSyncClock = () => {};
     const _feedWatched = (mod, slot, frame, feed) => feed();
     const scope = {epoch: _syncQueueEpoch, sid: 'M', generation: _syncQueueGen.M};
     const guard = makeReconnectSettleGuard({
