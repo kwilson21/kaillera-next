@@ -172,3 +172,49 @@ module host_reconnect_clock_before {
 module host_reconnect_clock_fixed {
   import host_reconnect_clock(RECOVERY_CLOCK = true).*
 }
+
+// A pacing decision is not evidence about a consumed input. The returning
+// owner already has a nonce- and route-scoped native receipt ledger.
+module host_reconnect_pacing_proof {
+  const TRUST_LEDGER: bool
+  var missing: int
+  var returnedPhantom: bool
+  var bystanderUnproved: bool
+  var captured: bool
+
+  action init = all { missing' = 0, returnedPhantom' = false, bystanderUnproved' = false, captured' = false }
+  action observe(missingInputs: int, returning: bool, bystander: bool): bool = all {
+    missing' = missingInputs,
+    returnedPhantom' = returning,
+    bystanderUnproved' = bystander,
+    captured' = false,
+  }
+  action tryCapture = all {
+    missing' = missing,
+    returnedPhantom' = returnedPhantom,
+    bystanderUnproved' = bystanderUnproved,
+    captured' = (missing == 0 and not(bystanderUnproved) and (TRUST_LEDGER or not(returnedPhantom))),
+  }
+  action step = {
+    nondet missingInputs = Set(0, 1, 2).oneOf()
+    nondet returning = Bool.oneOf()
+    nondet bystander = Bool.oneOf()
+    any { observe(missingInputs, returning, bystander), tryCapture }
+  }
+  val captureNeedsEachOwnersInputs = not(captured) or (missing == 0 and not(bystanderUnproved))
+
+  run unchangedHistoryCanStillCaptureTest =
+    init.then(observe(0, true, false)).then(tryCapture).expect(captured == TRUST_LEDGER)
+
+  run unprovedInputsStillBlockCaptureTest =
+    init.then(observe(1, true, false)).then(tryCapture).expect(not(captured))
+      .then(observe(0, true, true)).then(tryCapture).expect(not(captured))
+}
+
+module host_reconnect_pacing_proof_before {
+  import host_reconnect_pacing_proof(TRUST_LEDGER = false).*
+}
+
+module host_reconnect_pacing_proof_fixed {
+  import host_reconnect_pacing_proof(TRUST_LEDGER = true).*
+}
