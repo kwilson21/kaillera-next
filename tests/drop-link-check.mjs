@@ -12,3 +12,27 @@ export const heldPredictionAfterReset = (corrections, slot, heldFrom, hostWalkTh
     }) ?? null
   );
 };
+
+export const reconnectSyncWindow = (lines, from) => {
+  let route = null;
+  let proofFrame = null;
+  let to = null;
+  for (const line of lines) {
+    if (to === null) {
+      // The engine logs this only after validating the request and its scope.
+      const proof = line.match(/\tRECONNECT-ANSWER-APPLIED f=(\d+) request=[1-9]\d*$/);
+      if (proof) {
+        route = 'proof';
+        proofFrame = Number(proof[1]);
+        continue;
+      }
+      if (route === null && /\treconnect resync: sent sync-request-full request=\d+$/.test(line)) route = 'legacy';
+    }
+    const apply = line.match(/\tsync #\d+ applied \(frame (\d+) -> (\d+), next in \d+f\)$/);
+    if (!route || !apply) continue;
+    const end = Number(apply[2]);
+    if (to === null && (route === 'legacy' || Number(apply[1]) === proofFrame)) to = end;
+    else if (route === 'legacy' && to !== null && end > to && end <= to + 12) to = end;
+  }
+  return { from, to, route };
+};

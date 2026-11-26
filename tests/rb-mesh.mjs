@@ -216,7 +216,7 @@ import { observeCheckpoint } from './checkpoint-observer.mjs';
 import { installNativeInputObserver } from './native-input-observer.mjs';
 import { appliedForTag, joinInputAgreement, joinStateFrame } from './join-input-check.mjs';
 import { trackHashLag, unrecordedIn } from './hash-lag.mjs';
-import { heldPredictionAfterReset } from './drop-link-check.mjs';
+import { heldPredictionAfterReset, reconnectSyncWindow } from './drop-link-check.mjs';
 
 const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
@@ -1461,11 +1461,13 @@ if (DROP_LINK) {
     const entry = Object.values(window.KNState?.peers ?? {}).find((peer) => peer.slot === 0);
     if (!entry?.pc) return { closed: false, frame, why: 'no peer entry for slot 0' };
     const was = { pc: entry.pc.connectionState, dc: entry.dc?.readyState ?? null };
+    const afterSeq = Number(window.NetplayRollback.exportSyncLog().trimEnd().split('\n').at(-1)?.split('\t')[0] ?? -1);
     entry.pc.close();
-    return { closed: true, frame, was, walkPacketsDropped: window.__meshWalkDropped };
+    return { closed: true, frame, was, afterSeq, walkPacketsDropped: window.__meshWalkDropped };
   });
   console.log(`DROP_LINK: P${DROP_LINK_SLOT + 1} closed its connection to the host`, JSON.stringify(dropLink.closed));
-  dropLink.resynced = await waitForLine(guest, dropLink.pageAt[DROP_LINK_SLOT], /sync #\d+ applied/, 90000);
+  if (dropLink.closed.closed)
+    dropLink.resynced = await waitForLine(guest, dropLink.closed.afterSeq, /sync #\d+ applied/, 90000);
   console.log(`DROP_LINK: P${DROP_LINK_SLOT + 1} resynced after the reconnect: ${dropLink.resynced}`);
 }
 await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - (Date.now() - tBattle)));
@@ -1544,15 +1546,8 @@ const H = P[0];
 const linesAfterSeq = (x, seq) => x.sync.split('\n').filter((line) => seqOf(line) > seq);
 const dropLinkWindow = (() => {
   if (!DROP_LINK || !dropLink.closed?.closed) return null;
-  const guestLines = linesAfterSeq(P[DROP_LINK_SLOT], dropLink.pageAt[DROP_LINK_SLOT]);
-  const sent = guestLines.findIndex((line) => /reconnect resync: sent/.test(line));
-  const applied = (sent < 0 ? [] : guestLines.slice(sent))
-    .map((line) => line.match(/sync #\d+ applied \(frame \d+ -> (\d+)/))
-    .filter(Boolean)
-    .map((m) => Number(m[1]));
-  let to = applied.length ? applied[0] : null;
-  for (const at of applied) if (to !== null && at > to && at <= to + 12) to = at;
-  return { from: dropLink.heldFrom - 30, to, resyncSent: sent >= 0 };
+  const guestLines = linesAfterSeq(P[DROP_LINK_SLOT], dropLink.closed.afterSeq);
+  return reconnectSyncWindow(guestLines, dropLink.heldFrom - 30);
 })();
 const pairs = P.slice(1).map((G, gi) => {
   const slot = gi + 1;
@@ -2357,8 +2352,8 @@ const dropLinkProblems = !dropLinkReport
       ...(!(dropLinkReport.closed?.walkPacketsDropped > 0) ? ['no walk packets were held from the host'] : []),
       ...(!dropLinkReport.keptCore ? ["the host's reconnect reset did not keep the guest's C slot"] : []),
       ...(!dropLinkReport.heldPrediction ? ['no held pre-reset walk prediction was corrected on the host'] : []),
-      ...(!dropLinkReport.resynced || !dropLinkWindow?.resyncSent || dropLinkWindow?.to == null
-        ? ['the guest applied no resync after the reconnect']
+      ...(!dropLinkReport.resynced || dropLinkWindow?.to == null
+        ? ['the guest had no confirmed reconnect resync']
         : []),
       ...(dropLinkReport.applied.compared < 200
         ? [`only ${dropLinkReport.applied.compared} tags of the guest's input compared`]
