@@ -869,3 +869,35 @@ module late_join_pause_current {
     RESYNC_AFTER_LOST_HOST = true, KEEP_MARKER_UNTIL_APPLIED = true
   ).*
 }
+
+// A compression failure belongs to the route that started the serve. A
+// replacement can take the same controller slot while the old worker runs.
+module late_join_serve_failure {
+  const FENCE_FAILURE: bool
+  var owner: int
+  var pending: bool
+
+  action init = all { owner' = 1, pending' = true }
+  action replace = all { owner == 1, owner' = 2, pending' = true }
+  action oldFailure = all {
+    owner' = owner,
+    pending' = (pending and (FENCE_FAILURE and owner != 1)),
+  }
+  action step = any { replace, oldFailure }
+
+  val obsoleteFailurePreservesReplacement = owner != 2 or pending
+
+  run replacementKeepsItsSlotTest =
+    init.then(replace).then(oldFailure).expect(pending == FENCE_FAILURE)
+
+  run currentFailureStillClearsItsSlotTest =
+    init.then(oldFailure).expect(not(pending))
+}
+
+module late_join_serve_failure_before {
+  import late_join_serve_failure(FENCE_FAILURE = false).*
+}
+
+module late_join_serve_failure_fixed {
+  import late_join_serve_failure(FENCE_FAILURE = true).*
+}

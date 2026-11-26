@@ -426,9 +426,12 @@ $QUINT run specs/emulator_boot.qnt --main=emulator_boot_fixed --invariant=oneCur
 PAUSE=specs/late_join_pause.qnt
 $QUINT typecheck "$PAUSE"
 for variant in late_join_pause_before late_join_pause_host_side late_join_pause_before_resync \
-  late_join_pause_marker_at_send late_join_pause_current; do
+  late_join_pause_marker_at_send late_join_pause_current \
+  late_join_serve_failure_before late_join_serve_failure_fixed; do
   $QUINT test "$PAUSE" --main="$variant" --backend="$BACKEND"
 done
+$QUINT run "$PAUSE" --main=late_join_serve_failure_fixed --invariant=obsoleteFailurePreservesReplacement \
+  --max-samples=2000 --max-steps=8 --backend="$BACKEND"
 # Today: the game stays paused while a joiner has yet to load, a joiner who
 # is playing is never disconnected, the host's pause has a deadline that a
 # repeated request does not push back, a paused guest resumes on the host's
