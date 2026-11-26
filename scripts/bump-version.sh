@@ -1,194 +1,63 @@
 #!/usr/bin/env bash
-#
-# bump-version.sh — invoked by `just deploy` locally, or by
-# .github/workflows/version-bump.yml after a PR squash-merge.
-#
-# Scans a range of commits on main, infers a version bump from
-# conventional commit prefixes, writes one chore(version) commit + tag
-# containing one changelog bullet per feat/fix commit, and exits. The
-# caller pushes (`just deploy` and the Action both run
-# `git push --follow-tags` after).
-#
-# Range selection:
-#   --from <sha>   Action mode (post-squash-merge): RANGE = <sha>..HEAD
-#                  where <sha> is `github.event.before` (main's tip
-#                  before the push that triggered the workflow).
-#   (no flag)      Local mode (just deploy): RANGE = origin/main..HEAD,
-#                  i.e. all unpushed commits on main.
-#
-# Bump rule (identical in both modes):
-#   any feat:  → minor
-#   any fix:   → patch
-#   neither    → no bump (exit 0, no commit)
-#
-# Idempotent: re-running when there's nothing new to bump is a no-op.
-#
+# Create one local version commit and tag for the changes since the last one.
+# The release workflow supplies PLAYER_NOTES and publishes the commit and tag.
 set -euo pipefail
 
-ACTION_FROM=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --from)
-      ACTION_FROM="${2:-}"
-      if [ -z "$ACTION_FROM" ]; then
-        echo "bump-version: --from requires a SHA argument" >&2
-        exit 1
-      fi
-      shift 2
-      ;;
-    *)
-      echo "bump-version: unknown argument '$1'" >&2
-      exit 1
-      ;;
-  esac
-done
-
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-VERSION_FILE="$REPO_ROOT/web/static/version.json"
-CHANGELOG_FILE="$REPO_ROOT/web/static/changelog.json"
-
-cd "$REPO_ROOT"
-
-# ── Safety checks ────────────────────────────────────────────────────────
-BRANCH=$(git rev-parse --abbrev-ref HEAD)
-if [ "$BRANCH" != "main" ]; then
-  echo "bump-version: refusing to bump on branch '$BRANCH' (must be main)"
+cd "$(git rev-parse --show-toplevel)"
+if [[ "$(git branch --show-current)" != main ]]; then
+  echo "bump-version: release must be prepared on main" >&2
   exit 1
 fi
-
 if ! git diff --quiet || ! git diff --cached --quiet; then
-  echo "bump-version: working tree is dirty — commit or stash first"
+  echo "bump-version: working tree is dirty" >&2
   exit 1
 fi
 
-if [ -n "$ACTION_FROM" ]; then
-  # Action mode. Reject the all-zero SHA that GitHub sends for branch creation
-  # — version-bump.yml only fires on push to main, but be defensive.
-  if [ "$ACTION_FROM" = "0000000000000000000000000000000000000000" ]; then
-    echo "bump-version: --from is the all-zero SHA (new-branch event); nothing to bump"
-    exit 0
-  fi
-  if ! git cat-file -e "${ACTION_FROM}^{commit}" 2>/dev/null; then
-    echo "bump-version: --from SHA $ACTION_FROM not in this checkout (need fetch-depth: 0)" >&2
-    exit 1
-  fi
-  UNPUSHED_RANGE="${ACTION_FROM}..HEAD"
-  TOTAL_UNPUSHED=$(git rev-list --count "$UNPUSHED_RANGE")
-  if [ "$TOTAL_UNPUSHED" -eq 0 ]; then
-    echo "bump-version: --from range is empty ($ACTION_FROM == HEAD)"
-    exit 0
-  fi
-else
-  # Local mode (just deploy). Need an up-to-date view of origin/main.
-  git fetch --quiet origin main
-  UNPUSHED_RANGE="origin/main..HEAD"
-  TOTAL_UNPUSHED=$(git rev-list --count "$UNPUSHED_RANGE")
-  if [ "$TOTAL_UNPUSHED" -eq 0 ]; then
-    echo "bump-version: nothing to bump (HEAD is at origin/main)"
-    exit 0
-  fi
+previous=$(git log --first-parent --format=%H --grep='^chore(version):' -1)
+if [[ -z "$previous" || "$previous" == "$(git rev-parse HEAD)" ]]; then
+  echo "bump-version: expected unreleased commits after the previous version" >&2
+  exit 1
 fi
 
-# Idempotency: if there's already an unpushed chore(version) commit, the
-# user has already bumped this release. Only count feat/fix commits ADDED
-# after that point — if there are none, no new bump is needed.
-LAST_VERSION_COMMIT=$(git log --format=%H --grep='^chore(version):' "$UNPUSHED_RANGE" -1 || true)
-if [ -n "$LAST_VERSION_COMMIT" ]; then
-  RANGE="${LAST_VERSION_COMMIT}..HEAD"
-else
-  RANGE="$UNPUSHED_RANGE"
-fi
-
-# ── Detect bump level ────────────────────────────────────────────────────
-MSGS=$(git log --format=%s "$RANGE")
-BUMP=""
-while IFS= read -r line; do
-  case "$line" in
-    feat:*|feat\(*) BUMP="minor"; break ;;  # minor wins, stop scanning
-    fix:*|fix\(*)   BUMP="patch" ;;
+release_type=fix
+subjects=$(git log --first-parent --format=%s "$previous..HEAD")
+while IFS= read -r subject; do
+  case "$subject" in
+    feat:*|feat\(*) release_type=feat; break ;;
   esac
-done <<< "$MSGS"
+done <<< "$subjects"
 
-if [ -z "$BUMP" ]; then
-  echo "bump-version: no feat/fix commits in $RANGE — nothing to bump"
-  exit 0
-fi
+new_version=$(node --input-type=module - "$release_type" "$(git rev-parse --short HEAD)" <<'JS'
+import { execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
 
-# ── Compute new version ──────────────────────────────────────────────────
-CURRENT=$(grep -o '"version": *"[^"]*"' "$VERSION_FILE" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+')
-IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+const [, , type, commit] = process.argv;
+const versionPath = 'web/static/version.json';
+const changelogPath = 'web/static/changelog.json';
+const notes = (process.env.PLAYER_NOTES ?? '')
+  .split(/\r?\n/)
+  .map((line) => line.trim().replace(/^[-*]\s+/, '').trim())
+  .filter(Boolean);
+if (notes.length === 0) throw new Error('Supply at least one player-facing release note.');
 
-if [ "$BUMP" = "minor" ]; then
-  MINOR=$((MINOR + 1))
-  PATCH=0
-else
-  PATCH=$((PATCH + 1))
-fi
-NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
-
-if git tag -l "v${NEW_VERSION}" | grep -q .; then
-  echo "bump-version: tag v${NEW_VERSION} already exists — refusing to overwrite"
-  exit 1
-fi
-
-# ── Write version.json ───────────────────────────────────────────────────
-# `commit` records the SHA of the last release-content commit (HEAD before
-# the bump). A commit cannot contain its own hash (self-reference), so we
-# record the parent — i.e. "this version was built on top of <SHA>".
-RELEASE_COMMIT=$(git rev-parse --short HEAD)
-cat > "$VERSION_FILE" << EOF
-{
-  "version": "${NEW_VERSION}",
-  "commit": "${RELEASE_COMMIT}"
+const current = JSON.parse(readFileSync(versionPath, 'utf8'));
+const changelog = JSON.parse(readFileSync(changelogPath, 'utf8'));
+if (!/^\d+\.\d+\.\d+$/.test(current.version)) throw new Error('Invalid current release version.');
+const [major, minor, patch] = current.version.split('.').map(Number);
+const version = type === 'feat' ? `${major}.${minor + 1}.0` : `${major}.${minor}.${patch + 1}`;
+if (execFileSync('git', ['tag', '--list', `v${version}`], { encoding: 'utf8' }).trim()) {
+  throw new Error(`Tag v${version} already exists.`);
 }
-EOF
-
-# ── Build changelog entry ────────────────────────────────────────────────
-node -e "
-const fs = require('fs');
-const { execSync } = require('child_process');
-
-const changelogPath = '${CHANGELOG_FILE}';
-const newVersion = '${NEW_VERSION}';
-const range = '${RANGE}';
-
-const changelog = JSON.parse(fs.readFileSync(changelogPath, 'utf8'));
-const log = execSync('git log --format=%s ' + range).toString().trim();
-
-const changes = [];
-for (const msg of log.split('\n').reverse()) {
-  if (!msg) continue;
-  if (msg.startsWith('feat:') || msg.startsWith('feat(')) {
-    changes.push({ type: 'feat', message: msg.replace(/^feat(\([^)]*\))?: /, '') });
-  } else if (msg.startsWith('fix:') || msg.startsWith('fix(')) {
-    changes.push({ type: 'fix', message: msg.replace(/^fix(\([^)]*\))?: /, '') });
-  }
-  // chore/docs/test/build/refactor are intentionally excluded from the
-  // user-facing changelog.
-}
-
-if (changes.length === 0) {
-  console.error('bump-version: no feat/fix bullets found in range — aborting');
-  process.exit(1);
-}
-
-const entry = {
-  version: newVersion,
-  date: new Date().toISOString().split('T')[0],
-  changes,
-};
-changelog.unshift(entry);
-fs.writeFileSync(changelogPath, JSON.stringify(changelog, null, 2) + '\n');
-console.log('bump-version: wrote ' + changes.length + ' changelog bullets for v' + newVersion);
-"
-
-# ── Commit + tag ─────────────────────────────────────────────────────────
-git add "$VERSION_FILE" "$CHANGELOG_FILE"
-git commit --no-verify -m "chore(version): v${NEW_VERSION}"
-
-# Annotated tag (not lightweight) so `git push --follow-tags` will pick it up.
-git tag -a "v${NEW_VERSION}" -m "v${NEW_VERSION}"
-
-echo ""
-echo "✓ bumped to v${NEW_VERSION} (${TOTAL_UNPUSHED} commits in unpushed range)"
-echo "  next: git push origin main --follow-tags"
+changelog.unshift({
+  version,
+  date: new Date().toISOString().slice(0, 10),
+  changes: notes.map((message) => ({ type, message })),
+});
+writeFileSync(versionPath, JSON.stringify({ version, commit }, null, 2) + '\n');
+writeFileSync(changelogPath, JSON.stringify(changelog, null, 2) + '\n');
+process.stdout.write(version);
+JS
+)
+git add web/static/version.json web/static/changelog.json
+git commit --no-verify -m "chore(version): v${new_version}"
+git tag -a "v${new_version}" -m "v${new_version}"

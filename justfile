@@ -128,62 +128,25 @@ design:
     open "http://localhost:18888/tests/design-mode.html"
     python3 -m http.server 18888 --bind 127.0.0.1
 
-# Deploy: bump version (one chore commit summarising all unpushed feat/fix
-# commits since origin/main), then push main with the new tag. Idempotent
-# — running it twice in a row is a no-op the second time. Refuses to run
-# on dirty trees or off main.
-deploy:
+# Release the current verified main tip with a file of player-facing notes.
+[positional-arguments]
+deploy commit notes:
     #!/usr/bin/env bash
     set -euo pipefail
-    scripts/bump-version.sh
-    echo ""
-    echo "Pushing main + tags to origin..."
-    git push origin main --follow-tags
+    gh workflow run version-bump.yml --ref main -f "commit=$1" -F "player_notes=@$2"
 
-# Dry-run of deploy: shows what would be bumped + pushed without doing it.
+# Preview the commits that an explicit release of main would include.
 deploy-dry:
     #!/usr/bin/env bash
     set -euo pipefail
     git fetch --quiet origin main
-    range="origin/main..HEAD"
-    count=$(git rev-list --count "$range")
-    if [ "$count" -eq 0 ]; then
-        echo "Nothing to deploy — HEAD is at origin/main."
-        exit 0
+    last_version=$(git log --first-parent --format=%H --grep='^chore(version):' -1 origin/main)
+    if [ -z "$last_version" ]; then
+      echo "Could not find the previous version commit." >&2
+      exit 1
     fi
-    echo "Unpushed commits ($count):"
-    git log --oneline "$range"
-    echo ""
-    # Mirror bump-version.sh: only count feat/fix commits since the most
-    # recent unpushed chore(version) commit (if any).
-    last_version=$(git log --format=%H --grep='^chore(version):' "$range" -1 || true)
-    if [ -n "$last_version" ]; then
-        scan_range="${last_version}..HEAD"
-        echo "(skipping commits at or before $(git log -1 --format=%h "$last_version") — already version-bumped)"
-    else
-        scan_range="$range"
-    fi
-    echo "Would bump:"
-    msgs=$(git log --format=%s "$scan_range")
-    bump=""
-    while IFS= read -r line; do
-        case "$line" in
-            feat:*|feat\(*) bump="minor"; break ;;
-            fix:*|fix\(*)   bump="patch" ;;
-        esac
-    done <<< "$msgs"
-    if [ -z "$bump" ]; then
-        echo "  (no feat/fix commits — no version bump, plain push only)"
-    else
-        current=$(grep -o '"version": *"[^"]*"' web/static/version.json | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+')
-        IFS='.' read -r major minor patch <<< "$current"
-        if [ "$bump" = "minor" ]; then
-            minor=$((minor + 1)); patch=0
-        else
-            patch=$((patch + 1))
-        fi
-        echo "  $current → $major.$minor.$patch ($bump)"
-    fi
+    echo "Main commit: $(git rev-parse origin/main)"
+    git log --first-parent --oneline "$last_version..origin/main"
 
 # Two-player rollback match in two local browsers against a running server
 # (`just serve`). Needs the SSB64 US ROM; see tests/rb-two-player.mjs.

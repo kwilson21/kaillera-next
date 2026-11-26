@@ -23,7 +23,7 @@
  * doesn't fully cover.
  *
  * Build: python scripts/build_landing.py   Deploy: npx wrangler deploy -c wrangler.landing.jsonc
- * (.github/workflows/version-bump.yml runs both once per merge to main).
+ * (.github/workflows/version-bump.yml runs both once per release batch).
  */
 
 // Every file the static pages load. Serving all of them here matters: the
