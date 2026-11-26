@@ -199,3 +199,96 @@ test('a host answer admitted after native replay starts cannot read the intermed
     stable: { reads: 1, changed: true, locked: false },
   });
 });
+
+for (const transport of ['channel', 'socket']) {
+  test(`a predicted input that changes before ${transport} handoff invalidates the captured answer`, async () => {
+    const run: (transport: string, invalidate: boolean) => Promise<string> = runInNewContext(
+      `
+      const _checkpoint = null, _coreFatalError = false, _playerSlot = 0, _syncEnabled = true;
+      const _hasKnSync = true, _recovery = {}, _frameNum = 2189, DELAY_FRAMES = 2;
+      const _hostReconnectFenceVersion = 0, _workerCoprocPending = null, _syncQueueEpoch = 1;
+      const _syncQueueGen = {}, _followUpWatches = new Map(), _syncSendChains = {}, _syncChainMovedAt = {};
+      const _ranBeforeDelayChange = null, _queuedSyncPushes = new Map();
+      const socket = { id: 'host', connected: true }, SOCKET_SYNC_B64_SOFT_LIMIT = 100;
+      const SYNC_SEND_LOW_WATER = 1, SYNC_SEND_POLL_MS = 1, SYNC_SEND_STALL_MS = 1000;
+      let _pushingSyncState = false, _proactivePushInFlight = false, mispredictions = 0;
+      const sent = [];
+      const guest = {slot: 1, syncDc: {readyState: 'open', send: (message) => sent.push(message)}};
+      const _peers = {guest};
+      const _signalSocket = { emit: (event) => sent.push(event) };
+      const _runQueuedSyncPush = () => {}, _syncLog = () => {}, _settleInputsBefore = () => {};
+      const _isPeerPendingLateJoin = () => false, _onEscalationTransfer = () => {};
+      const performance = { now: () => 0 }, _mispredTotal = () => mispredictions;
+      const _admitReconnectNativeCapture = () => true, ensureSyncBuffer = () => {};
+      const _captureResyncExtras = () => ({}), _resyncExtrasText = () => '', _resyncExtrasFields = () => ({});
+      const _syncBufPtr = 0, _syncBufSize = 16;
+      let finishCompression, releaseChain;
+      const encode = () => new Promise((resolve) => { finishCompression = resolve; });
+      const compressState = encode, compressAndEncode = encode;
+      const mod = { _kn_get_replay_depth: () => 0, _kn_peek_pending_rollback: () => -1,
+        _kn_sync_read: () => 1, HEAPU8: new Uint8Array(16) };
+      const window = {
+        EJS_emulator: {gameManager: {Module: mod}},
+        KNCore: {
+          syncFollowUp: { delayOfStateAt: () => 2, correctionOwed: () => false,
+            changesWatchedFrame: (f, frame, delay, before, after) => f < frame - delay && before < after },
+          syncSend: { transferStillFor: () => true, sendPaced: async () => 'sent' },
+        },
+      };
+      const _recoveryTransfers = { run: (attempts, body) => body(attempts), release: () => {} };
+      ${from('  const _feedWatchedFrame =', '  const _feedCInput =')}
+      ${from('  const pushSyncState = async (', '  const _syncTargetsFor =')}
+      ${from('  const _syncTargetsFor =', '  const _sendSyncChunksTo =')}
+      ${from('  const _sendSyncChunksTo =', '  // The answer to the newest request')}
+      async (transport, invalidate) => {
+        sent.length = 0;
+        _syncSendChains.guest = new Promise((resolve) => { releaseChain = resolve; });
+        const push = pushSyncState('guest', false, {transport, watchFor: ['guest'], requestIds: {guest: 3}});
+        if (transport === 'channel') {
+          finishCompression(new Uint8Array(1));
+          await Promise.resolve();
+        }
+        if (invalidate) _feedWatchedFrame(mod, 1, 2186, () => mispredictions++);
+        if (transport === 'socket') finishCompression({data:'x', compressedSize:1});
+        releaseChain();
+        const skipped = await push;
+        return JSON.stringify({ skipped, sent, delivered: _followUpWatches.get('guest')?.delivered });
+      }
+      `,
+    );
+    const valid = JSON.parse(await run(transport, false));
+    assert.equal(valid.delivered, true);
+    assert.ok(valid.sent.length > 0);
+    assert.deepEqual(JSON.parse(await run(transport, true)), { skipped: ['guest'], sent: [], delivered: false });
+  });
+}
+
+test('repeated refused captures exhaust the host follow-up budget on a reachable channel', async () => {
+  const run: () => Promise<string> = runInNewContext(
+    `
+    const _playerSlot = 0, _pushingSyncState = false, _frameNum = 2189, _syncQueueEpoch = 1;
+    const SYNC_COORD_TIMEOUT_MS = 3000;
+    const _syncQueueGen = {}, _peerPhantom = {}, _followUpWatches = new Map(), _directAnswerNewest = new Map();
+    const socket = null, _syncLog = () => {};
+    const _peers = {guest: {slot: 1, syncDc: {readyState: 'open'}}};
+    const window = {KNCore: {syncFollowUp: {followUpIsUnneeded: () => false}}};
+    let now = 1, _scheduledSyncRequests = [{targetSid: 'guest', targetFrame: 2189, requestId: 3, deadlineAt: 1}];
+    const performance = { now: () => now };
+    const attempts = [];
+    const pushSyncState = (sid, _proactive, options) => {
+      attempts.push(options.requestIds[sid]);
+      return Promise.resolve([sid]);
+    };
+    ${from('  const _dispatchScheduledSyncs =', '  // A direct request')}
+    async () => {
+      for (let i = 0; i < 6; ++i) {
+        now += 3001;
+        _dispatchScheduledSyncs(() => false);
+        await Promise.resolve();
+      }
+      return JSON.stringify({attempts, remaining: _scheduledSyncRequests.length});
+    }
+    `,
+  );
+  assert.deepEqual(JSON.parse(await run()), { attempts: [3, 3, 3, 3], remaining: 0 });
+});

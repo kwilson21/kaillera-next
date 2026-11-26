@@ -84,7 +84,7 @@ def test_a_queued_transfer_never_reaches_a_new_connection():
     assert "_syncQueueGen[targetSid] || 0" in push[capture:copy]
     # The hidden words and HLE state taken with the state go with it.
     assert (
-        "sendSyncChunks( compressed, frame, targets, isProactive, requestIds, attempts, mayDeliver, extras, !!options.reconnectDebt, reconnectFenceCurrent, proofFor, )"
+        "sendSyncChunks( compressed, frame, targets, isProactive, requestIds, attempts, mayPublish, extras, !!options.reconnectDebt, reconnectFenceCurrent, proofFor, )"
         in " ".join(push.split())
     )
     assert "if (!_syncTargetCurrent(socketTarget) || !mayDeliver(socketTarget)) {" in push

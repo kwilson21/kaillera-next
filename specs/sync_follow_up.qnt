@@ -613,3 +613,70 @@ module sync_capture_boundary_before {
 module sync_capture_boundary_fixed {
   import sync_capture_boundary(FENCE = true).*
 }
+
+// Compression and per-recipient queueing happen before the first wire byte.
+// An invalidated payload is refused at handoff. An already-started channel
+// transfer finishes its framing and can still be corrected by a follow-up.
+module sync_publication_boundary {
+  const FENCE: bool
+  var phase: str
+  var invalidated: bool
+  var publishedInvalid: bool
+
+  action init = all {
+    phase' = "captured",
+    invalidated' = false,
+    publishedInvalid' = false,
+  }
+
+  action invalidate = all {
+    phase != "done",
+    phase' = phase,
+    invalidated' = true,
+    publishedInvalid' = publishedInvalid,
+  }
+
+  action move(from: str, nextPhase: str): bool = all {
+    phase == from,
+    phase' = nextPhase,
+    invalidated' = invalidated,
+    publishedInvalid' = publishedInvalid,
+  }
+
+  action start = all {
+    phase == "queued",
+    phase' = if (FENCE and invalidated) "done" else "sending",
+    invalidated' = invalidated,
+    publishedInvalid' = (invalidated and not(FENCE)),
+  }
+
+  action step = any {
+    invalidate,
+    move("captured", "queued"),
+    start,
+    move("sending", "done"),
+    move("done", "done"),
+  }
+
+  val onlyCurrentSnapshotsStart = not(publishedInvalid)
+
+  run invalidationBeforeHandoffTest =
+    init.then(invalidate).then(move("captured", "queued")).then(start)
+      .expect(onlyCurrentSnapshotsStart == FENCE)
+
+  run invalidationOnChainTest =
+    init.then(move("captured", "queued")).then(invalidate).then(start)
+      .expect(onlyCurrentSnapshotsStart == FENCE)
+
+  run startedTransferDrainsTest =
+    init.then(move("captured", "queued")).then(start).then(invalidate)
+      .then(move("sending", "done")).expect(onlyCurrentSnapshotsStart and phase == "done")
+}
+
+module sync_publication_boundary_before {
+  import sync_publication_boundary(FENCE = false).*
+}
+
+module sync_publication_boundary_fixed {
+  import sync_publication_boundary(FENCE = true).*
+}

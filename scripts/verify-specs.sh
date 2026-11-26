@@ -378,6 +378,8 @@ sync_follow_up() {
   expect_violation "$FOLLOW" sync_follow_up_delay_unaware theGuestEndsOnTheHostsState 6
   verify "$FOLLOW" sync_capture_boundary_fixed onlyStableSnapshots init 8
   expect_violation "$FOLLOW" sync_capture_boundary_before onlyStableSnapshots 4
+  verify "$FOLLOW" sync_publication_boundary_fixed onlyCurrentSnapshotsStart init 8
+  expect_violation "$FOLLOW" sync_publication_boundary_before onlyCurrentSnapshotsStart 4
 }
 
 rom_at_start() {

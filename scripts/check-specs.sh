@@ -698,6 +698,12 @@ done
 $QUINT run "$FOLLOW" --main=sync_capture_boundary_fixed --invariant=onlyStableSnapshots \
   --max-samples=10000 --max-steps=20 --backend="$BACKEND"
 
+for variant in sync_publication_boundary_before sync_publication_boundary_fixed; do
+  $QUINT test "$FOLLOW" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$FOLLOW" --main=sync_publication_boundary_fixed --invariant=onlyCurrentSnapshotsStart \
+  --max-samples=10000 --max-steps=15 --backend="$BACKEND"
+
 # ── A catch-up waiting on a hole after a reconnect ────────────────────────
 WAIT=specs/catch_up_wait.qnt
 $QUINT typecheck "$WAIT"

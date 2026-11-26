@@ -18024,16 +18024,15 @@
           _syncLog(`coord sync to ${r.targetSid}: superseded by a newer direct answer, not re-queued`);
           return;
         }
-        if (r.transport === 'socket' && (skipped == null || skipped.includes(r.targetSid))) {
-          // Not sent over the socket (a state too large for it falls back to
-          // a channel that is down). The socket stays reachable, so put back
-          // unchanged it would be taken again every tick: count it against
-          // SYNC_FOLLOW_UP_MAX instead (I1; from #307).
+        // An unsent capture on a reachable route could be taken again every
+        // tick. Count it against the follow-up limit; a closed route waits
+        // for reachability instead.
+        if ((skipped == null || skipped.includes(r.targetSid)) && reachable(r)) {
           const n = (r.followUp || 0) + 1;
           if (n <= SYNC_FOLLOW_UP_MAX) {
-            _syncLog(`coord sync over the socket to ${r.targetSid} did not go out; re-queued (${n})`);
+            _syncLog(`coord sync to ${r.targetSid} did not go out; re-queued (${n})`);
             requeue(r, n, null);
-          } else _syncLog(`coord sync over the socket to ${r.targetSid} did not go out; follow-ups exhausted`);
+          } else _syncLog(`coord sync to ${r.targetSid} did not go out; follow-ups exhausted`);
         } else if (skipped === null || skipped?.includes(r.targetSid)) {
           // A channel can close while the state is being compressed; the
           // send then skips that target. Put its request back unchanged so
@@ -21520,8 +21519,11 @@
               owedMod?._kn_peek_pending_rollback?.() ?? -1,
               !!_workerCoprocPending?.deferred,
             );
+          const captureWatches = new Map();
           for (const sid of watchFor) {
-            _followUpWatches.set(sid, { frame, delay, changed: owed, delivered: false });
+            const watch = { frame, delay, changed: owed, delivered: false };
+            _followUpWatches.set(sid, watch);
+            captureWatches.set(sid, watch);
             _syncLog(
               `SYNC-FOLLOW-UP-WATCH target=${sid} frame=${frame} delay=${delay} owed=${owed ? 1 : 0}: sent unconfirmed`,
             );
@@ -21533,6 +21535,14 @@
           const socketTarget = targetSid
             ? { sid: targetSid, peer: _peers[targetSid], epoch: _syncQueueEpoch, gen: _syncQueueGen[targetSid] || 0 }
             : null;
+          const mayPublish = (target) => {
+            if (!mayDeliver(target)) return false;
+            // Older cores without rollback observability conservatively start
+            // watches as changed. They retain their existing follow-up path.
+            if (!owedMod?._kn_get_replay_depth || !captureWatches.get(target.sid)?.changed) return true;
+            _syncLog(`SYNC-CAPTURE-INVALIDATED target=${target.sid} frame=${frame} before handoff`);
+            return false;
+          };
 
           if (capturedPublication) {
             const target = targets[0];
@@ -21643,6 +21653,7 @@
             const b64KB = Math.round(encoded.data.length / 1024);
             const wireKB = Math.round(encoded.compressedSize / 1024);
             if (encoded.data.length <= SOCKET_SYNC_B64_SOFT_LIMIT) {
+              if (!mayPublish(socketTarget)) return [targetSid];
               _signalSocket.emit('data-message', {
                 type: 'sync-state-socket',
                 targetSid,
@@ -21681,7 +21692,7 @@
                 isProactive,
                 requestIds,
                 attempts,
-                mayDeliver,
+                mayPublish,
                 extras,
                 !!options.reconnectDebt,
                 reconnectFenceCurrent,
@@ -21699,7 +21710,7 @@
               isProactive,
               requestIds,
               attempts,
-              mayDeliver,
+              mayPublish,
               extras,
               !!options.reconnectDebt,
               reconnectFenceCurrent,
