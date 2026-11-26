@@ -12,7 +12,7 @@
  *     2  lstick     left stick: x in the low 16 bits, y in the high 16 bits
  *     3  cstick     C stick, packed the same way
  *     4  ackFrame   the highest frame received from the peer, -1 for none
- *     5  redCount   how many redundancy records follow
+ *     5  redCount   how many full-width redundancy records follow, or -1 for compact history
  *   then redCount records of 4 words (16 bytes) each
  *     0  delta      header frame minus this record's frame
  *     1  buttons
@@ -22,6 +22,11 @@
  * A stick axis is a 16-bit two's-complement integer (gameplay uses -83..83).
  * The redundancy records repeat the sender's last few frames so one lost
  * packet does not cost an input; receivers dedupe them by frame.
+ * Compact history uses two words per record: a frame delta in the high
+ * byte and the 24-bit button mask in the low bits of the first word,
+ * then four signed stick bytes in lx, ly, cx, cy order from low to high.
+ * Receivers that only know the full-width format still read the header
+ * because a negative count carries no records in that format.
  *
  * Decoders also accept the two older packet shapes: 4 words (no ackFrame, read
  * as -1) and 5 words (no redundancy). A redCount larger than the packet holds
@@ -291,6 +296,40 @@ export interface ShortPacket {
 const toInt32 = (v: number): number => v | 0;
 //@ skip
 const toInt16 = (v: number): number => (v << 16) >> 16;
+//@ skip
+const toInt8 = (v: number): number => (v << 24) >> 24;
+//@ skip
+const COMPACT_HISTORY = -1;
+
+//@ skip
+function encodeCompactHistory(
+  frame: number,
+  input: WireInput,
+  ackFrame: number,
+  history: readonly FrameInput[],
+): Int32Array<ArrayBuffer> | null {
+  const words = encodeWords(frame, input, ackFrame, []);
+  words[5] = COMPACT_HISTORY;
+  for (const r of history) {
+    const delta = frame - r.frame;
+    if (
+      !Number.isInteger(delta) ||
+      delta <= 0 ||
+      delta > 255 ||
+      r.frame < 0 ||
+      r.buttons !== (r.buttons & 0xffffff) ||
+      r.lx !== toInt8(r.lx) ||
+      r.ly !== toInt8(r.ly) ||
+      r.cx !== toInt8(r.cx) ||
+      r.cy !== toInt8(r.cy)
+    ) {
+      return null;
+    }
+    const sticks = (r.lx & 0xff) | ((r.ly & 0xff) << 8) | ((r.cx & 0xff) << 16) | (r.cy << 24);
+    words.push((delta << 24) | r.buttons, sticks);
+  }
+  return new Int32Array(words);
+}
 
 /**
  * Encode one input packet. `redundantFrames` are earlier frames of the same
@@ -302,8 +341,21 @@ export function encodeInput(
   input: WireInput,
   ackFrame: number = -1,
   redundantFrames: readonly FrameInput[] | null = null,
+  compactHistory = false,
 ): Int32Array<ArrayBuffer> {
   const headerFrame = toInt32(frame);
+  const wireInput = {
+    buttons: toInt32(input.buttons),
+    lx: toInt16(input.lx),
+    ly: toInt16(input.ly),
+    cx: toInt16(input.cx),
+    cy: toInt16(input.cy),
+  };
+  const wireAck = toInt32(ackFrame);
+  if (compactHistory && frame === headerFrame && redundantFrames?.length) {
+    const compact = encodeCompactHistory(headerFrame, wireInput, wireAck, redundantFrames);
+    if (compact) return compact;
+  }
   const redundant: FrameInput[] = [];
   if (redundantFrames) {
     for (const r of redundantFrames) {
@@ -319,18 +371,7 @@ export function encodeInput(
       });
     }
   }
-  const words = encodeWords(
-    headerFrame,
-    {
-      buttons: toInt32(input.buttons),
-      lx: toInt16(input.lx),
-      ly: toInt16(input.ly),
-      cx: toInt16(input.cx),
-      cy: toInt16(input.cy),
-    },
-    toInt32(ackFrame),
-    redundant,
-  );
+  const words = encodeWords(headerFrame, wireInput, wireAck, redundant);
   return new Int32Array(words);
 }
 
@@ -341,31 +382,37 @@ export function encodeInput(
 //@ skip
 export function decodeInput(buf: ArrayBuffer): DecodedInput | ShortPacket {
   const arr = new Int32Array(buf);
-  if (arr.length < 6) {
-    // The older 4- and 5-word packets, and anything shorter.
-    const lstick = arr[2] ?? 0;
-    const cstick = arr[3] ?? 0;
-    return {
-      frame: arr[0],
-      buttons: arr[1],
-      lx: unpackX(lstick),
-      ly: unpackY(lstick),
-      cx: unpackX(cstick),
-      cy: unpackY(cstick),
-      ackFrame: arr[4] ?? -1,
-    };
-  }
-  const words = decodeWords(Array.from(arr));
-  const out: DecodedInput = {
-    frame: words.frame,
-    buttons: words.buttons,
-    lx: words.lx,
-    ly: words.ly,
-    cx: words.cx,
-    cy: words.cy,
-    ackFrame: words.ackFrame,
-  };
   const count = arr[5];
-  if (count !== undefined && count > 0) out.redundant = words.redundant;
-  return out;
+  if (count !== undefined && count > 0) return decodeWords(Array.from(arr));
+
+  const frame = arr[0];
+  const buttons = arr[1];
+  const lstick = arr[2] ?? 0;
+  const cstick = arr[3] ?? 0;
+  const lx = unpackX(lstick);
+  const ly = unpackY(lstick);
+  const cx = unpackX(cstick);
+  const cy = unpackY(cstick);
+  const ackFrame = arr[4] ?? -1;
+  if (count !== COMPACT_HISTORY || frame === undefined || buttons === undefined) {
+    return { frame, buttons, lx, ly, cx, cy, ackFrame };
+  }
+
+  const redundant: FrameInput[] = [];
+  for (let base = 6; base < arr.length; base += 2) {
+    const deltaAndButtons = arr[base];
+    const sticks = arr[base + 1];
+    if (deltaAndButtons === undefined || sticks === undefined) break;
+    const delta = deltaAndButtons >>> 24;
+    if (delta === 0 || delta > frame) continue;
+    redundant.push({
+      frame: frame - delta,
+      buttons: deltaAndButtons & 0xffffff,
+      lx: toInt8(sticks),
+      ly: toInt8(sticks >>> 8),
+      cx: toInt8(sticks >>> 16),
+      cy: sticks >> 24,
+    });
+  }
+  return { frame, buttons, lx, ly, cx, cy, ackFrame, redundant };
 }

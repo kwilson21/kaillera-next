@@ -16693,6 +16693,17 @@
     _syncLog(`MATCH-INPUT-CLEAR reason=${reason} local=${localBuffered} remote=${remoteBuffered}`);
   };
 
+  const _buildInputHistoryTail = (ack, max) => {
+    const tail = [];
+    // A resync can rewind into a previously authored range. Repeat only
+    // retained inputs strictly before the packet's own frame.
+    for (const frame of window.KNCore.framesToSendAgain(ack, _frameNum - 1, max)) {
+      const input = _localInputs[frame];
+      if (input !== undefined) tail.push({ ...input, frame });
+    }
+    return tail;
+  };
+
   const _sendFrameInput = (peer, inputDc, localInput, ackFrame, redundantTail, nowSend) => {
     if (inputDc?.readyState !== 'open') return false;
     const reliable = inputDc === peer.dc;
@@ -16707,7 +16718,8 @@
     )
       return false;
     try {
-      inputDc.send(KNShared.encodeInput(_frameNum, localInput, ackFrame, redundantTail).buffer);
+      const compactHistory = _rbTransport === 'dual';
+      inputDc.send(KNShared.encodeInput(_frameNum, localInput, ackFrame, redundantTail, compactHistory).buffer);
     } catch (_) {
       if (reliable && _rbTransport === 'dual') {
         _keepReliableInputs(peer, _frameNum, _frameNum, peer.lastAckFromPeer ?? -1);
@@ -18920,7 +18932,7 @@
           ),
         );
     const localInput = !hadLocalInputForFrame && joinHoldsOwnInput ? _cloneInput(KNShared.ZERO_INPUT) : madeInput;
-    let recordAuthorOnSend =
+    const recordAuthorOnSend =
       !hadLocalInputForFrame &&
       !joinHoldsOwnInput &&
       _playerSlot !== 0 &&
@@ -18935,17 +18947,39 @@
       _checkpoint?.journal.witness(_playerSlot, _frameNum, _ownerTuple(localInput));
     }
     const shouldSendRedundancy = _useCRollback && _rbTransport !== 'reliable';
+    const nowSend = performance.now();
+    let sentLocalInput = false;
+    if (_rbTransport === 'dual') {
+      let fastTail = null;
+      // Queue the newest input for every fast peer before any ordered
+      // resend burst. The two channels still deliver independently.
+      for (const peer of activePeers) {
+        const fastDc = peer.rbDc;
+        if (
+          peer.synthetic === true ||
+          !peer.rbDcUnreliable ||
+          fastDc?.readyState !== 'open' ||
+          fastDc.bufferedAmount > DC_BUFFER_THRESHOLD
+        )
+          continue;
+        // A highest-frame ack can pass a hole. Repeat the recent rollback
+        // window so the fast channel can repair it on its own.
+        fastTail ??= _buildInputHistoryTail(-1, Math.min(KN_MAX_VISIBLE_ROLLBACK_DEPTH, RB_INPUT_HISTORY_MAX));
+        if (_sendFrameInput(peer, fastDc, localInput, peer.lastFrameFromPeer ?? -1, fastTail, nowSend)) {
+          sentLocalInput = true;
+        }
+      }
+    }
     let minPeerAck = _frameNum;
     if (shouldSendRedundancy) {
       for (const peer of activePeers) minPeerAck = Math.min(minPeerAck, peer.lastAckFromPeer ?? -1);
     }
     let redundantTail = null;
-    const nowSend = performance.now();
     for (const peer of activePeers) {
       if (peer.synthetic === true) continue;
       if (_resendAtSwitch[peer.slot]) _sendResendAtSwitch(peer);
-      const fastDc = peer.rbDcUnreliable && peer.rbDc?.readyState === 'open' ? peer.rbDc : null;
-      const inputDc = _rbTransport === 'unreliable' && fastDc ? fastDc : peer.dc;
+      const inputDc =
+        _rbTransport === 'unreliable' && peer.rbDcUnreliable && peer.rbDc?.readyState === 'open' ? peer.rbDc : peer.dc;
       if (inputDc && peer._knInputDc !== inputDc) {
         _syncLog(
           `INPUT-CHANNEL f=${_frameNum} slot=${peer.slot} label=${inputDc.label} id=${inputDc.id ?? -1} ` +
@@ -18956,13 +18990,7 @@
       const ackFrame = peer.lastFrameFromPeer ?? -1;
       const needsRedundancy = shouldSendRedundancy && (peer.lastAckFromPeer ?? -1) < _frameNum - 1;
       if (needsRedundancy && redundantTail === null) {
-        // Resync can rewind into a previously authored range. Only this match's
-        // inputs strictly before the packet header belong in its history.
-        redundantTail = [];
-        for (const frame of window.KNCore.framesToSendAgain(minPeerAck, _frameNum - 1, RB_INPUT_HISTORY_MAX)) {
-          const input = _localInputs[frame];
-          if (input !== undefined) redundantTail.push({ ...input, frame });
-        }
+        redundantTail = _buildInputHistoryTail(minPeerAck, RB_INPUT_HISTORY_MAX);
       }
       const sentPrimary = _sendFrameInput(
         peer,
@@ -18972,17 +19000,9 @@
         needsRedundancy ? redundantTail : null,
         nowSend,
       );
-      // The optional copy must never wait behind a congested unordered stream.
-      const sentFast =
-        _rbTransport === 'dual' &&
-        fastDc &&
-        fastDc.bufferedAmount <= DC_BUFFER_THRESHOLD &&
-        _sendFrameInput(peer, fastDc, localInput, ackFrame, null, nowSend);
-      if (recordAuthorOnSend && (sentPrimary || sentFast)) {
-        _recordAuthoredOwnerInput(_frameNum, localInput);
-        recordAuthorOnSend = false;
-      }
+      if (sentPrimary) sentLocalInput = true;
     }
+    if (recordAuthorOnSend && sentLocalInput) _recordAuthoredOwnerInput(_frameNum, localInput);
 
     // ── DC health monitor: detect stuck unreliable DC, fall back immediately ──
     // iOS Safari's SCTP bug affects ALL unordered streams on the association,

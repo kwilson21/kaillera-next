@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
-import { decodeInput, encodeInput } from '../../web/src/input-wire.ts';
+import { decodeInput, decodeWords, encodeInput } from '../../web/src/input-wire.ts';
 import { framesToSendAgain } from '../../web/src/input-resend.ts';
 
 const source = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
@@ -52,7 +52,7 @@ for (const mode of ['dual', 'unreliable']) {
 
 const pad = { buttons: 8, lx: -48, ly: 29, cx: -12, cy: 24 };
 const frame = 140;
-function sender(mode: 'dual' | 'reliable' | 'unreliable' = 'dual') {
+function sender(mode: 'dual' | 'reliable' | 'unreliable' = 'dual', mesh = false) {
   const writes: { channel: string; data: ArrayBuffer }[] = [];
   const channel = (label: string) => ({
     label,
@@ -72,12 +72,18 @@ function sender(mode: 'dual' | 'reliable' | 'unreliable' = 'dual') {
     dc: channel('lockstep'),
     rbDc: channel('rollback-input'),
   };
+  const activePeers = [peer];
+  if (mesh) {
+    activePeers.push({ ...peer, slot: 2, dc: channel('lockstep-2'), rbDc: channel('rollback-input-2') });
+  }
+  const resendAtSwitch: Record<number, { from: number; upTo: number; ack: number }> = {};
   let now = 1000;
   const context = vm.createContext({
     performance: { now: () => now },
-    activePeers: [peer],
+    activePeers,
     _rbTransport: mode,
     _frameNum: frame,
+    _resendAtSwitch: resendAtSwitch,
     // A resync can rewind the guest into an already authored range.
     _localInputs: Object.fromEntries(
       Array.from({ length: 40 }, (_, i) => [frame - 30 + i, i === 30 ? pad : { ...pad, buttons: i + 1 }]),
@@ -88,10 +94,11 @@ function sender(mode: 'dual' | 'reliable' | 'unreliable' = 'dual') {
   });
   const tick = vm.runInContext(
     `
-    const _useCRollback = true, _catchUpTo = -1, _resendAtSwitch = {}, _syncLog = () => {};
-    ${['RB_RESEND_AT_SWITCH_MAX', 'RB_INPUT_HISTORY_MAX', 'DC_BUFFER_THRESHOLD', 'INPUT_RESEND_EVERY_MS', 'INPUT_RESEND_RELIABLE_MS'].map((k) => between('  const ' + k + ' =', ';') + ';').join('\n')}
+    const _useCRollback = true, _catchUpTo = -1, _syncLog = () => {};
+    ${['KN_MAX_VISIBLE_ROLLBACK_DEPTH', 'RB_RESEND_AT_SWITCH_MAX', 'RB_INPUT_HISTORY_MAX', 'DC_BUFFER_THRESHOLD', 'INPUT_RESEND_EVERY_MS', 'INPUT_RESEND_RELIABLE_MS'].map((k) => between('  const ' + k + ' =', ';') + ';').join('\n')}
     let _rbTransportPacketsSent = 0, _catchUpSendsReliable = 0, _catchUpSendsUnreliable = 0, authored = 0;
     const _recordAuthoredOwnerInput = () => { authored++; };
+    ${engineFunction('_buildInputHistoryTail')}
     ${engineFunction('_sendFrameInput')}
     ${engineFunction('_keepReliableInputs')}
     ${engineFunction('_sendResendAtSwitch')}
@@ -115,6 +122,7 @@ function sender(mode: 'dual' | 'reliable' | 'unreliable' = 'dual') {
     });
   return {
     peer,
+    resendAtSwitch,
     tick,
     writes,
     channels: () => writes.map((w) => w.channel),
@@ -126,21 +134,59 @@ function sender(mode: 'dual' | 'reliable' | 'unreliable' = 'dual') {
   };
 }
 
-test('dual sends recoverable reliable history first and the same bare current input on the unordered channel', () => {
+test('dual compacts both histories and keeps the current frame readable by legacy peers', () => {
   const f = sender();
   f.tick();
-  assert.deepEqual(f.channels(), ['lockstep', 'rollback-input']);
-  const [reliable, fast] = f.decoded();
+  assert.deepEqual(f.channels(), ['rollback-input', 'lockstep']);
+  const [fast, reliable] = f.decoded();
   assert.ok(reliable!.history.length > 0);
-  assert.ok(
-    f.writes[0]!.data.byteLength <= 256,
-    'legacy peers must admit the reliable frame even if the fast copy is lost',
-  );
+  assert.equal(f.writes[1]!.data.byteLength, 136);
   assert.deepEqual(
     reliable!.history,
     Array.from({ length: 14 }, (_, i) => frame - 14 + i),
   );
-  assert.deepEqual(fast!.history, []);
+  assert.equal(f.writes[0]!.data.byteLength, 80);
+  assert.deepEqual(
+    fast!.history,
+    Array.from({ length: 7 }, (_, i) => frame - 7 + i),
+  );
+  for (const { data } of f.writes) {
+    assert.deepEqual(decodeWords(Array.from(new Int32Array(data))), {
+      frame,
+      ...pad,
+      ackFrame: 118,
+      redundant: [],
+    });
+  }
+  assert.equal(f.authored(), 1);
+});
+
+test('a fast packet repairs a recent hole below the highest ack while ordered delivery is blocked', () => {
+  const f = sender();
+  f.peer.lastAckFromPeer = frame - 1;
+  f.tick();
+  // Only the fast packet gets through. The receiver already acknowledged a
+  // later input, but is still missing the oldest one in its rollback window.
+  const [fast, reliable] = f.decoded();
+  assert.deepEqual(reliable!.history, []);
+  assert.ok(fast!.history.includes(frame - 7));
+});
+
+test('dual queues fast packets for every peer before an ordered retry backlog', () => {
+  const f = sender('dual', true);
+  f.resendAtSwitch[1] = { from: frame - 2, upTo: frame - 1, ack: 0 };
+  f.tick();
+  assert.deepEqual(
+    f.writes.map(({ channel, data }) => [channel, decodeInput(data).frame]),
+    [
+      ['rollback-input', frame],
+      ['rollback-input-2', frame],
+      ['lockstep', frame - 2],
+      ['lockstep', frame - 1],
+      ['lockstep', frame],
+      ['lockstep-2', frame],
+    ],
+  );
   assert.equal(f.authored(), 1);
 });
 
@@ -163,12 +209,13 @@ test('a throwing reliable send still races the current input, and the next tick 
   f.peer.dc.fail = true;
   f.tick();
   assert.deepEqual(f.channels(), ['rollback-input']);
-  assert.deepEqual(f.decoded()[0]!.history, []);
+  assert.ok(f.decoded()[0]!.history.includes(frame - 1));
   f.peer.lastAckFromPeer = frame; // The fast copy advanced the acknowledgment.
   f.peer.dc.fail = false;
   f.advance(1);
   f.tick();
   assert.deepEqual(f.channels(), ['rollback-input', 'lockstep']);
+  assert.equal(f.writes[1]!.data.byteLength, 24);
 });
 
 for (const mode of ['reliable', 'unreliable'] as const) {
@@ -185,13 +232,13 @@ test('a stuck simulation frame preserves the independent rate limit on each carr
   f.tick();
   f.advance(15);
   f.tick();
-  assert.deepEqual(f.channels(), ['lockstep', 'rollback-input']);
+  assert.deepEqual(f.channels(), ['rollback-input', 'lockstep']);
   f.advance(1);
   f.tick();
-  assert.deepEqual(f.channels(), ['lockstep', 'rollback-input', 'rollback-input']);
+  assert.deepEqual(f.channels(), ['rollback-input', 'lockstep', 'rollback-input']);
   f.advance(84);
   f.tick();
-  assert.deepEqual(f.channels().slice(-2), ['lockstep', 'rollback-input']);
+  assert.deepEqual(f.channels().slice(-2), ['rollback-input', 'lockstep']);
 });
 
 test('the host negotiates the lobby choice unless diagnostics override it', () => {
