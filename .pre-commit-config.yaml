@@ -32,6 +32,12 @@ repos:
         language: system
         files: ^(web/static|deploy/static|tests)/.*\.m?js$
         exclude: ^web/static/ejs/
+      - id: design-matrix-image
+        name: Generate README design matrix image
+        entry: node scripts/design-matrix-diagram.mjs
+        language: system
+        files: '^(docs/architecture/design-matrix[.](json|svg)|scripts/(check-design-matrix[.]ts|design-matrix-diagram[.]mjs))$'
+        pass_filenames: false
       - id: quint-specs
         name: Quint specs
         entry: bash scripts/check-specs.sh

@@ -14,6 +14,7 @@ on:
       - 'tests/**'
       - 'specs/**'
       - 'docs/architecture/design-matrix.json'
+      - 'docs/architecture/design-matrix.svg'
       - 'tools/oxlint/**'
       - 'scripts/check-specs.sh'
       - 'scripts/browser_shard.py'
@@ -92,7 +93,7 @@ jobs:
         run: node --test tests/ssb64-menu-autopilot.test.mjs
       - name: Bundles build from web/src
         run: npm run build
-      - name: Machine diagram matches web/src/session.ts
+      - name: Generated diagrams match the source
         run: npm run diagram:check
       - name: Spec scenario diagrams match the specs
         run: npm run traces:check
