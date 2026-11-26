@@ -1183,7 +1183,7 @@
         "fr": "FR-recovery",
         "dp": "DP-pacing",
         "kind": "necessary",
-        "mechanism": "Verified checkpoints service their protocol on a recovery clock. Live execution observes their declared freeze frame. Host protected reconnect proof retries, expiry, and dispatch use the recovery clock. A pacing timeout can mark a peer phantom and end its recovery attempt. Coordinated installation observes frame progression. Host escalation delivery, guest hold expiry, and guest protected reconnect deadlines run on recovery-owned timers.",
+        "mechanism": "Verified checkpoints service their protocol on a recovery clock. Live execution observes their declared freeze frame. Host protected reconnect proof retries, expiry, and dispatch use the recovery clock. A pacing timeout can mark a peer phantom and end its recovery attempt. Coordinated capture uses the recovery clock for an aligned target or a deadline; coordinated installation still observes frame progression in the tick loop. Host escalation delivery, guest hold expiry, and guest protected reconnect deadlines run on recovery-owned timers.",
         "evidence": [
           "tick",
           "recovery-apply",

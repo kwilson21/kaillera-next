@@ -309,14 +309,16 @@ test('the host deadline dispatches without frame ticks and fences a stopped matc
   const run: () => Promise<string> = runInNewContext(
     `
     const PHASE_RUNNING = 1, PHASE_STOPPED = 2, SYNC_COORD_TIMEOUT_MS = 3000;
-    const _playerSlot = 0, _pushingSyncState = false, _frameNum = 2189;
+    const _playerSlot = 0, _pushingSyncState = false, _useCRollback = true;
+    let _frameNum = 2189, nativeFrame = 2189, confirmed = false;
+    const _liveStateConfirmed = () => confirmed;
     const _config = {matchReturn: {playing: true}}, _checkpoint = {busy: false};
     const _syncQueueGen = {}, _peerPhantom = {}, _followUpWatches = new Map(), _directAnswerNewest = new Map();
     const socket = null, _syncLog = () => {};
     const _peers = {guest: {slot: 1, syncDc: {readyState: 'open'}}};
     let now = 0, _phase = PHASE_RUNNING, _scheduledSyncRequests = [], _syncQueueEpoch = 1;
     let pulse, cancelled = 0, replay = 0;
-    const window = {EJS_emulator: {gameManager: {Module: {_kn_get_replay_depth: () => replay}}},
+    const window = {EJS_emulator: {gameManager: {Module: {_kn_get_replay_depth: () => replay, _kn_get_frame: () => nativeFrame}}},
       KNCore: {syncFollowUp: {followUpIsUnneeded: () => false}, startEvery: (run) => {
         pulse = run;
         return () => { cancelled++; };
@@ -324,10 +326,10 @@ test('the host deadline dispatches without frame ticks and fences a stopped matc
     const performance = { now: () => now };
     const attempts = [];
     const pushSyncState = (sid, _proactive, options) => {
-      attempts.push(options.requestIds[sid]);
+      attempts.push(options.requestIds[sid ?? 'guest']);
       return Promise.resolve([sid]);
     };
-    ${source.includes('  let _stopScheduledSyncClock') ? from('  let _stopScheduledSyncClock', '  // Coordinated sync dispatch') : ''}
+    ${from('  const COORDINATED_CAPTURE_POLL_MS', '  // Coordinated sync dispatch')}
     ${from('  const _dispatchScheduledSyncs =', '  // A direct request')}
     async () => {
       const put = (requestId) => {
@@ -353,6 +355,15 @@ test('the host deadline dispatches without frame ticks and fences a stopped matc
       await Promise.resolve();
 
       put(4);
+      _frameNum = 2190;
+      confirmed = true;
+      pulse?.();
+      if (attempts.includes(4)) throw Error('capture between a JS frame change and its native commit');
+      nativeFrame = 2190;
+      pulse?.();
+      await Promise.resolve();
+
+      put(5);
       _phase = PHASE_STOPPED;
       now = 7000;
       pulse?.();
@@ -361,7 +372,7 @@ test('the host deadline dispatches without frame ticks and fences a stopped matc
     }
     `,
   );
-  assert.deepEqual(JSON.parse(await run()), { attempts: [3], cancelled: 2 });
+  assert.deepEqual(JSON.parse(await run()), { attempts: [3, 4], cancelled: 3 });
 });
 
 const guestHoldClock = () => {

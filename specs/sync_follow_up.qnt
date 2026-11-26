@@ -685,40 +685,62 @@ module sync_publication_boundary_fixed {
 // scheduler has stopped. Replay can still withhold the native capture.
 module coordinated_capture_clock {
   const RECOVERY_CLOCK: bool
+  const CONFIRM_ON_CLOCK: bool
   var elapsed: bool
   var replaying: bool
+  var confirmed: bool
   var sent: bool
   var stopped: bool
   action init = all {
     elapsed' = false,
     replaying' = false,
+    confirmed' = false,
     sent' = false,
     stopped' = false,
   }
   action advance(active: bool, ended: bool): bool = all {
     elapsed' = true,
     replaying' = active,
+    confirmed' = confirmed,
     stopped' = (stopped or ended),
+    sent' = sent,
+  }
+  action confirm(aligned: bool): bool = all {
+    elapsed' = elapsed,
+    replaying' = replaying,
+    confirmed' = aligned,
+    stopped' = stopped,
     sent' = sent,
   }
   action service(frameTick: bool): bool = all {
     elapsed' = elapsed,
     replaying' = replaying,
+    confirmed' = confirmed,
     stopped' = stopped,
-    sent' = (sent or (not(stopped) and elapsed and not(replaying) and (RECOVERY_CLOCK or frameTick))),
+    sent' = (sent or (not(stopped) and not(replaying) and (
+      (elapsed and (RECOVERY_CLOCK or frameTick)) or (confirmed and (CONFIRM_ON_CLOCK or frameTick))
+    ))),
   }
-  action step = any { advance(true, false), advance(false, false), advance(false, true), service(false), service(true) }
+  action step = any { advance(true, false), advance(false, false), advance(false, true), confirm(false), confirm(true), service(false), service(true) }
   run deadlineWithoutFrameTickTest =
     init.then(advance(false, false)).then(service(false)).expect(sent == RECOVERY_CLOCK)
+  run confirmedTargetDoesNotNeedAFrameTickTest =
+    init.then(confirm(false)).then(service(false)).expect(not(sent))
+      .then(confirm(true)).then(service(false)).expect(sent == CONFIRM_ON_CLOCK)
   run waitsForReplayAndHonorsStopTest =
     init.then(advance(true, false)).then(service(false)).expect(not(sent))
       .then(advance(false, true)).then(service(true)).expect(not(sent))
 }
 
 module coordinated_capture_clock_before {
-  import coordinated_capture_clock(RECOVERY_CLOCK = false).*
+  import coordinated_capture_clock(RECOVERY_CLOCK = false, CONFIRM_ON_CLOCK = false).*
 }
 
 module coordinated_capture_clock_fixed {
-  import coordinated_capture_clock(RECOVERY_CLOCK = true).*
+  import coordinated_capture_clock(RECOVERY_CLOCK = true, CONFIRM_ON_CLOCK = false).*
+}
+
+
+module coordinated_capture_clock_confirmed {
+  import coordinated_capture_clock(RECOVERY_CLOCK = true, CONFIRM_ON_CLOCK = true).*
 }

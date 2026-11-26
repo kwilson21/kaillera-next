@@ -18025,6 +18025,7 @@
     return 'replace';
   };
 
+  const COORDINATED_CAPTURE_POLL_MS = 16;
   let _stopScheduledSyncClock = null;
   const _cancelScheduledSyncClock = () => {
     const stop = _stopScheduledSyncClock;
@@ -18044,19 +18045,26 @@
         return;
       // A live browser may be able to answer while frame ticks are stalled.
       // Replay retains exclusive access until its current slice sequence ends.
-      if (window.EJS_emulator?.gameManager?.Module?._kn_get_replay_depth?.() > 0) return;
-      _dispatchScheduledSyncs();
-      if (!_scheduledSyncRequests.length) _cancelScheduledSyncClock();
-    }, 100);
+      const mod = window.EJS_emulator?.gameManager?.Module;
+      try {
+        if (mod?._kn_get_replay_depth?.() > 0) return;
+        const atTarget = _scheduledSyncRequests.some((r) => r.targetFrame <= _frameNum);
+        const isConfirmed =
+          atTarget && _useCRollback && mod?._kn_get_frame?.() === _frameNum
+            ? () => _liveStateConfirmed(mod)
+            : undefined;
+        _dispatchScheduledSyncs(isConfirmed);
+        if (!_scheduledSyncRequests.length) _cancelScheduledSyncClock();
+      } catch (error) {
+        _syncLog(`coordinated capture wake failed: ${error}`);
+      }
+    }, COORDINATED_CAPTURE_POLL_MS);
     _stopScheduledSyncClock = stop;
   };
 
   // Coordinated sync dispatch (host): when the host reaches a scheduled
-  // target frame, capture and send state. Coalesces multiple guests (4P)
-  // into a single broadcast push. Runs at the end of both the C rollback
-  // tick and the fallback tick; it used to run only in the fallback path, so
-  // in rollback mode `sync-request(-full)-at:` requests (peer-recovery
-  // resync) were scheduled and never sent.
+  // target frame and confirms its inputs, or the request's deadline passes.
+  // Requests to multiple guests on the data channel can share one broadcast.
   //
   // `isConfirmed()`: the host's state at this frame is final, not built on
   // predicted inputs that a later rollback would change. A guest that
@@ -18098,7 +18106,7 @@
     // nothing while the follow-up's own target is a phantom.
     const confirmedFor = (r) => confirmed && !(r.followUp && _peerPhantom[_peers[r.targetSid]?.slot]);
     const ready = _scheduledSyncRequests.filter(
-      (r) => ((confirmedFor(r) && r.targetFrame <= _frameNum) || (!isConfirmed && pastDeadline(r))) && reachable(r),
+      (r) => ((confirmedFor(r) && r.targetFrame <= _frameNum) || pastDeadline(r)) && reachable(r),
     );
     // A follow-up whose frame is now confirmed goes out only if an input at
     // or before the frame of the state already sent differed from its
@@ -20085,7 +20093,6 @@
         _frameNum = newFrame;
         KNState.frameNum = _frameNum;
         if (window.KNDesync) KNDesync.tick(_frameNum);
-        _dispatchScheduledSyncs(() => _liveStateConfirmed(tickMod));
         const _tTotal = performance.now();
         _pushTickProfile({
           f: _frameNum,
