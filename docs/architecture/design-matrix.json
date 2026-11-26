@@ -598,6 +598,15 @@
         "tests/test_reconnect_answer_debt_prototype.py",
         "specs/reconnect_answer_debt.qnt"
       ]
+    },
+    "admission-hold": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _holdGuestFramesForLateJoin =",
+      "line": 9415,
+      "coverage": [
+        "tests/ts/late-join-admission-clock.test.ts",
+        "specs/late_join_pause.qnt"
+      ]
     }
   },
   "baseline": {
@@ -1214,6 +1223,18 @@
           "guest-restore-clock",
           "host-reconnect-native-receipts"
         ]
+      },
+      {
+        "fr": "FR-pacing",
+        "dp": "DP-admission",
+        "kind": "necessary",
+        "mechanism": "Admission freezes normal frame progression until its hold is released. Completion or expiry reanchors pacing and the native frame boundary still aligns the snapshot.",
+        "evidence": [
+          "admission-send",
+          "admission-release",
+          "admission-hold",
+          "tick"
+        ]
       }
     ],
     "remove": [
@@ -1251,6 +1272,14 @@
       },
       {
         "fr": "FR-recovery",
+        "dp": "DP-pacing"
+      },
+      {
+        "fr": "FR-pacing",
+        "dp": "DP-admission"
+      },
+      {
+        "fr": "FR-admission",
         "dp": "DP-pacing"
       }
     ]

@@ -208,6 +208,8 @@ streaming_connection() {
 
 late_join_pause() {
   local PAUSE=specs/late_join_pause.qnt
+  verify "$PAUSE" late_join_admission_clock_fixed servicedAdmissionDeadlineReleasesHold init 8
+  expect_violation "$PAUSE" late_join_admission_clock_before servicedAdmissionDeadlineReleasesHold 4
   verify "$PAUSE" late_join_serve_failure_fixed obsoleteFailurePreservesReplacement init 6
   expect_violation "$PAUSE" late_join_serve_failure_before obsoleteFailurePreservesReplacement 3
   verify "$PAUSE" late_join_pause_current allHold

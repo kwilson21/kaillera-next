@@ -68,8 +68,8 @@ test('failed late-join preparation retains a dropped guest gate', async () => {
       `
       const _peers={a:{slot:1}}, _knownPlayers={}, _droppedThisMatch=new Set(['a']);
       const _lateJoinServing=new Map(), _syncQueueEpoch=1, _syncQueueGen={};
-      let _lateJoinServeSeq=0, _lateJoinPausedAt=0, _runSubstate=0;
-      const RUN_LATE_JOIN_PAUSE=1,LATE_JOIN_TIMEOUT_MS=5000,_frameNum=100;
+      let _lateJoinServeSeq=0, _lateJoinPausedAt=null;
+      const LATE_JOIN_TIMEOUT_MS=5000,_frameNum=100;
       const performance={now:()=>1},setTimeout=()=>{};
       const _markPendingLateJoinPeer=()=>{},_clearPendingLateJoinPeer=()=>{},_syncLog=()=>{};
       const _endLateJoinPauseIfNoneServed=()=>{};

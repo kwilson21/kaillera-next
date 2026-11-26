@@ -10,19 +10,19 @@ Suh's Independence Axiom asks whether an FR can be maintained while adjusting an
 
 ## Independence Axiom
 
-| Metric | Baseline | v0.73.5 |
-| --- | ---: | ---: |
-| FRs × DPs | 14 × 14 | 14 × 14 |
-| Nonzero entries | 50 | 48 |
-| Cross-dependencies | 36 | 34 |
-| Declared accidental entries | 2 | 0 |
-| Strongly connected components | 6 | 7 |
-| Largest strongly connected component | 9 | 8 |
-| Classification | Coupled | Coupled |
+| Metric | Baseline | Before admission hold change | Current |
+| --- | ---: | ---: | ---: |
+| FRs × DPs | 14 × 14 | 14 × 14 | 14 × 14 |
+| Nonzero entries | 50 | 48 | 47 |
+| Cross-dependencies | 36 | 34 | 33 |
+| Declared accidental entries | 2 | 0 | 0 |
+| Strongly connected components | 6 | 7 | 7 |
+| Largest strongly connected component | 9 | 8 | 8 |
+| Classification | Coupled | Coupled | Coupled |
 
-The checker first attempts a perfect bipartite FR/DP matching. The declared counterparts form a perfect match here. After contracting each matched pair, an edge points from the matched DP's FR to the FR it also affects. A topological order gives a lower triangular form. A nonsingleton strongly connected component gives an alternating cycle in the original matching, so multiple perfect matchings exist. A triangular matrix with a nonzero diagonal has a unique perfect matching. Therefore changing the row/column assignment cannot triangularize either snapshot.
+The checker first attempts a perfect bipartite FR/DP matching. The declared counterparts form a perfect match here. After contracting each matched pair, an edge points from the matched DP's FR to the FR it also affects. A topological order gives a lower triangular form. A nonsingleton strongly connected component gives an alternating cycle in the original matching, so multiple perfect matchings exist. A triangular matrix with a nonzero diagonal has a unique perfect matching. Therefore changing the row/column assignment cannot triangularize these snapshots.
 
-The final component contains admission, pacing, peers, recovery, replay, room, roster, and session. Delivery leaves that component when its close handler stops resetting the simulation clocks. The other singleton components are boot, execution, presentation, spectators, and diagnostics. This condensation graph uses one node per component. The full directed graph and both binary matrices are available from the checker.
+The largest current component contains admission, pacing, peers, recovery, replay, room, roster, and session. Delivery leaves that component when its close handler stops resetting the simulation clocks. The other singleton components are boot, execution, presentation, spectators, and diagnostics. This condensation graph uses one node per component. The full directed graph and both binary matrices are available from the checker.
 
 ```mermaid
 flowchart LR
@@ -51,7 +51,7 @@ flowchart LR
 | --- | --- |
 | Rollback and resynchronization | C owns pending rollback and replay. JavaScript stages and validates host snapshots. A successful native write can supersede replay after the bounded wait and before frame alignment and input settlement. |
 | Reconnect and prediction | Identity and primary attempt changes reach `resetPeerState`. JavaScript clears its live frontier, while C can keep a safe same-owner slot and its predictions. A replacement owner or unsafe phantom history requires a reset. |
-| Late join and frame progression | The host publishes one pause and serves per-joiner leases. It resumes once each applicable serve ends. The joiner attaches a state, input bridge, and roster to the same host frame. Guest-side expiry gives a missing host pause a bounded release. |
+| Late join and frame progression | The host publishes one pause and serves per-joiner leases. It resumes once each applicable serve ends. The joiner attaches a state, input bridge, and roster to the same host frame. Admission owns the hold. A guest releases a missing host pause on its own Effect deadline, including while frame execution is blocked. Frame progression still respects the hold. |
 | Transport failure and recovery | A primary outage affects identity and answer debt. The recovery actor tracks delivery by recipient. The optional channel can disappear while reliable delivery continues. Letting that event mutate the simulation wait gave it an unrelated release decision. |
 | Roster and history | Server seat reservations authorize a player. The host's frame-tagged cut defines when the simulation changes ownership. A late cut triggers local rerun where the ring can supply the history, or resync where it cannot. |
 | Restoration and pending replay | `kn_set_frame` refuses a frame change during pending replay. The state apply path checks the resulting frame, blocks normal execution on a refusal, then aligns the JavaScript mirror and publishes settlement. `KNState.frameNum` is a page projection. It must never become a competing simulation clock. |
@@ -65,6 +65,10 @@ flowchart LR
 3. **P3 · Full peer reset could extend another slot's input wait.** A reset now clears only the affected slot's wait. The room's host-reservation policy can still gate frame progression, so this narrows the existing peer-to-pacing entry. The production-path regression and Quint's `otherWaitsStayArmed` cover the two-blocker case. [PR #350](https://github.com/kwilson21/kaillera-next/pull/350)
 
 The follow-ups on v0.73.5 preserve pending replay through a refused native write, preserve buffered diagnostics when optional native counters fail, and fence obsolete admission and roster messages by serve and channel. The diagnostics failure was outside the declared 48 current cells. The roster and recovery relationships still carry necessary authority. [PR #351](https://github.com/kwilson21/kaillera-next/pull/351) · [PR #352](https://github.com/kwilson21/kaillera-next/pull/352) · [PR #353](https://github.com/kwilson21/kaillera-next/pull/353) · [PR #354](https://github.com/kwilson21/kaillera-next/pull/354)
+
+### Late-join admission and pacing
+
+Admission now owns its frame hold independently of pacing state. The host retains its per-serve timeout. A guest arms a 20-second Effect deadline when the host asks it to pause, and a fresh pause supersedes the previous deadline. A host resume, state load, or match stop cancels the active guest timer. The frame loop still honors the admission hold so snapshot capture and roster activation share a valid frame boundary. This removes `FR-admission / DP-pacing` and retains `FR-pacing / DP-admission`. The [admission clock model](../../specs/late_join_pause.qnt) and [runtime tests](../../tests/ts/late-join-admission-clock.test.ts) cover expiry without ticks and stale deadlines.
 
 ### Recovery and pacing independence
 

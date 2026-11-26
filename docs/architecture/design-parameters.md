@@ -21,7 +21,7 @@ The leaf IDs below are the columns of the [design matrix](design-matrix.json). T
 | `DP-replay` | Input and prediction tables, state ring, and pending replay in `build/kn_rollback/kn_rollback.c`. The JavaScript runner and optional replay worker execute or commit work against the current timeline. |
 | `DP-pacing` | Native engine tick gates, input wait identity, freeze credit, and paced dispatch, plus typed start and lockstep rules. It owns when an otherwise valid step may run. |
 | `DP-recovery` | Digests, numbered requests, per-recipient delivery actors, and snapshot apply and input settlement in the native engine. Host is the corrective source. The recipient validates attempt, request, match, and frame before acknowledging. |
-| `DP-admission` | Host serve ID and pause per joiner, Effect-based waiting in `web/src/late-join-wait.ts`, and the typed late-join input bridge. The host publishes admission after readiness. |
+| `DP-admission` | Host serve ID and frame hold, the guest frame hold and its Effect deadline, the Effect-based joiner wait in `web/src/late-join-wait.ts`, and the typed late-join input bridge. The host publishes admission after readiness. |
 
 ## Presentation and evidence
 

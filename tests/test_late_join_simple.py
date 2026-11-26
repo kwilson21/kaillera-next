@@ -93,7 +93,7 @@ def test_late_join_pause_is_not_sent_to_joiner():
     assert state_idx != -1
     load_window = source[state_idx : state_idx + 12000]
     assert "late-join: clearing self pause after state load" in load_window
-    assert "_runSubstate = RUN_NORMAL" in load_window
+    assert "_clearLateJoinGuestPause()" in load_window
 
 
 def test_late_join_toasts_are_present():
@@ -131,7 +131,7 @@ def test_the_pause_belongs_to_the_joiners_being_served():
     # It acts only on its own serve, and ends the pause only if none is left.
     assert "if (_lateJoinServing.get(remoteSid) !== serveId) return;" in serve
     assert "_endLateJoinPauseIfNoneServed(`timeout for ${remoteSid}`);" in serve
-    assert "if (_runSubstate === RUN_LATE_JOIN_PAUSE) {\n          const elapsed" not in serve
+    assert "_runSubstate" not in serve
     # A serve ended while compressing cannot publish or release a slot.
     assert serve.index("await compressAndEncode(bytes)") < serve.index("if (!ownsServe()) {")
     assert serve.index("if (!ownsServe()) return;") < serve.index("'state transfer failed'")
@@ -141,7 +141,7 @@ def test_the_pause_belongs_to_the_joiners_being_served():
     assert "_lateJoinServing.delete(senderSid);" in ready
     # Deferred readiness retains a serve deadline, but only a joiner that has
     # not loaded yet holds the room pause (runtime tests cover both orderings).
-    assert "_runSubstate === RUN_LATE_JOIN_PAUSE &&" in ready
+    assert "_lateJoinPausedAt !== null &&" in ready
     assert "[..._lateJoinServing.keys()].some((sid) => !_pendingLateJoinReadySids.has(sid))" in ready
 
     helper = src[src.index("const _endLateJoinPauseIfNoneServed = (source) => {") :]
@@ -188,10 +188,11 @@ def test_only_the_host_pauses_and_resumes_a_page():
     assert "const LATE_JOIN_GUEST_PAUSE_TIMEOUT_MS = 20000;" in src
     assert "const LATE_JOIN_TIMEOUT_MS = 15000;" in src
     tick = src[src.index("const tick = () => {") :]
-    pause = tick[tick.index("if (_runSubstate === RUN_LATE_JOIN_PAUSE) {") :][:1200]
-    assert "if (guestPausedMs <= LATE_JOIN_GUEST_PAUSE_TIMEOUT_MS) {" in pause
-    assert "LATE-JOIN-GUEST-PAUSE-TIMEOUT f=${_frameNum}" in pause
-    assert "_runSubstate = RUN_NORMAL;" in pause
+    hold = tick[tick.index("if (_lateJoinHoldsFrame()) {") :][:180]
+    assert "_markTickReturn('skip:late-join-pause');" in hold
+    assert "return;" in hold
+    assert "LATE-JOIN-GUEST-PAUSE-TIMEOUT" not in tick
+
 
 
 def test_the_resume_for_a_joiner_that_left_waits_for_the_peer_to_be_dropped():

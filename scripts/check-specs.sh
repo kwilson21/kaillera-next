@@ -427,9 +427,12 @@ PAUSE=specs/late_join_pause.qnt
 $QUINT typecheck "$PAUSE"
 for variant in late_join_pause_before late_join_pause_host_side late_join_pause_before_resync \
   late_join_pause_marker_at_send late_join_pause_current \
-  late_join_serve_failure_before late_join_serve_failure_fixed; do
+  late_join_serve_failure_before late_join_serve_failure_fixed \
+  late_join_admission_clock_before late_join_admission_clock_fixed; do
   $QUINT test "$PAUSE" --main="$variant" --backend="$BACKEND"
 done
+$QUINT run "$PAUSE" --main=late_join_admission_clock_fixed --invariant=servicedAdmissionDeadlineReleasesHold \
+  --max-samples=2000 --max-steps=12 --backend="$BACKEND"
 $QUINT run "$PAUSE" --main=late_join_serve_failure_fixed --invariant=obsoleteFailurePreservesReplacement \
   --max-samples=2000 --max-steps=8 --backend="$BACKEND"
 # Today: the game stays paused while a joiner has yet to load, a joiner who
