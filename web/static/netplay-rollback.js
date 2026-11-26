@@ -8655,7 +8655,7 @@
         _cancelHostReconnectClock();
         return;
       }
-      if (_checkpoint?.blocksInput || (_config?.matchReturn && !_config.matchReturn.playing)) return;
+      if (_checkpoint?.busy || (_config?.matchReturn && !_config.matchReturn.playing)) return;
       // A timer runs between native steps. The proof and capture gates
       // still check the current frame, authored inputs and pending replay.
       try {
