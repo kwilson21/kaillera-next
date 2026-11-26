@@ -915,6 +915,10 @@ module resync_replay_boundary {
   val futureStateHasNoReplayDeadline = ready or waited == 0
   val rejectedStateKeepsReplay = not(rejectedDiscard)
 
+  run unavailableInstallBufferTest =
+    init.then(reachBoundary).then(invalidateSnapshot).then(tick).then(tick).then(tick)
+      .expect(replaying == CHECK_ELIGIBILITY and not(applied))
+
   run invalidatedWhileWaitingTest =
     init.then(reachBoundary).then(tick).then(invalidateSnapshot).then(tick).then(tick)
       .expect(replaying == CHECK_ELIGIBILITY and not(applied))

@@ -13,7 +13,7 @@ const from = (start: string, end: string) => {
 
 type Tick = (ms: number, frame: number) => { replaying: boolean; installed?: number; target: number };
 
-const fixture = (target: number, stateFrame: number, warnAt = Infinity): Tick =>
+const fixture = (target: number, stateFrame: number, { warnAt = Infinity, capacity = 8 } = {}): Tick =>
   runInNewContext(
     `
     let now = 100, _frameNum = 100, replaying = true;
@@ -29,12 +29,16 @@ const fixture = (target: number, stateFrame: number, warnAt = Infinity): Tick =>
     let _runSubstate = RUN_NORMAL, _awaitingResyncAt = 0;
     let _syncTargetFrame = target, _syncTargetDeadlineAt = target > 0 ? 3100 : 0;
     const SYNC_HOLD_MAX_FRAMES = 2, SYNC_COORD_TIMEOUT_MS = 3000;
-    let _pendingResyncState = {frame: stateFrame}, installed;
+    let _pendingResyncState = {frame: stateFrame, bytes: new Uint8Array(2)}, installed;
+    const _hasKnSync = true, _syncBufSize = capacity;
+    let _syncBufPtr = 0;
+    const ensureSyncBuffer = () => { _syncBufPtr = capacity > 0 ? 1 : 0; };
     const _hostMatchUnverified = () => now >= warnAt;
     const _checkpoint = null, _checkpointFloor = 0, _lastAppliedRecoveryId = 0;
     const _guestAllowsReconnectState = () => true;
     ${from('  const _syncStateCanInstall =', '  const applySyncState =')}
-    const applySyncState = (_, frame) => {
+    const applySyncState = (bytes, frame) => {
+      if (!_syncBufPtr || bytes.length > _syncBufSize) throw Error('snapshot was not staged for native install');
       if (replaying) throw Error('replay still owns the native frame');
       installed = frame;
     };
@@ -47,7 +51,7 @@ const fixture = (target: number, stateFrame: number, warnAt = Infinity): Tick =>
     };
     tick;
     `,
-    { target, stateFrame, warnAt },
+    { target, stateFrame, warnAt, capacity },
   );
 
 test('a coordinated future snapshot keeps pending replay until its install boundary', () => {
@@ -72,10 +76,23 @@ test('a newly buffered ahead-of-frame snapshot establishes its hold while replay
 });
 
 test('a room warning that invalidates the buffered state preserves pending replay', () => {
-  const tick = fixture(100, 100, 1100);
+  const tick = fixture(100, 100, { warnAt: 1100 });
   assert.equal(tick(100, 100).replaying, true);
   const rejected = tick(1100, 100);
   assert.equal(rejected.replaying, true);
   assert.equal(rejected.installed, undefined);
   assert.equal(rejected.target, -1);
 });
+
+for (const [label, capacity] of [
+  ['allocation fails', 0],
+  ['snapshot exceeds the buffer', 1],
+] as const)
+  test(`pending replay is preserved when ${label}`, () => {
+    const tick = fixture(100, 100, { capacity });
+    assert.equal(tick(100, 100).replaying, true);
+    const dropped = tick(1100, 100);
+    assert.equal(dropped.replaying, true);
+    assert.equal(dropped.installed, undefined);
+    assert.equal(dropped.target, -1);
+  });

@@ -22255,7 +22255,7 @@
     if (stoppedAt || _frameNum >= _catchUpTo) _endCatchUp(mod, stoppedAt);
   };
 
-  const _syncStateCanInstall = ({ frame, recoveryId, answerFor = 0, answerScope = null, proofFor = 0 }) => {
+  const _syncStateCanInstall = ({ bytes, frame, recoveryId, answerFor = 0, answerScope = null, proofFor = 0 }) => {
     if (_checkpoint?.busy || frame < _checkpointFloor) return false;
     // A same-match warning may arrive after a full state was buffered.
     // Unverified is terminal for this match: do not change native state
@@ -22266,7 +22266,19 @@
     }
     if (!_guestAllowsReconnectState(answerFor, answerScope, proofFor)) return false;
     if (recoveryId && recoveryId <= _lastAppliedRecoveryId) return false;
-    return !!window.EJS_emulator?.gameManager;
+    if (!window.EJS_emulator?.gameManager) return false;
+    if (_hasKnSync) {
+      ensureSyncBuffer();
+      if (!_syncBufPtr) {
+        _syncLog(`FATAL: sync buffer allocation failed`);
+        return false;
+      }
+      if (bytes.length > _syncBufSize) {
+        _syncLog(`FATAL: state (${bytes.length}) exceeds buffer (${_syncBufSize})`);
+        return false;
+      }
+    }
+    return true;
   };
 
   const applySyncState = (
@@ -22290,15 +22302,6 @@
     if (_hasKnSync) {
       // C-level write: copy into WASM buffer, call kn_sync_write
       const mod = gm.Module;
-      ensureSyncBuffer();
-      if (!_syncBufPtr) {
-        _syncLog(`FATAL: sync buffer allocation failed`);
-        return;
-      }
-      if (bytes.length > _syncBufSize) {
-        _syncLog(`FATAL: state (${bytes.length}) exceeds buffer (${_syncBufSize})`);
-        return;
-      }
       mod.HEAPU8.set(bytes, _syncBufPtr);
       const lt0 = performance.now();
       const result = mod._kn_sync_write(_syncBufPtr, bytes.length);

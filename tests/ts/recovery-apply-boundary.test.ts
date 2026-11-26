@@ -80,7 +80,7 @@ for (const [label, refuses, warning, guarded] of [
  const recoveryId=(!guarded && warning==='none')?8:0;
  const proof=guarded?9:0;
  try {
-   if (_syncStateCanInstall({frame:100,recoveryId,answerFor:proof,answerScope:scope,proofFor:proof}))
+   if (_syncStateCanInstall({bytes:queuedState,frame:100,recoveryId,answerFor:proof,answerScope:scope,proofFor:proof}))
      applySyncState(queuedState,100,false,recoveryId,'extras',proof,scope,proof)
  }
  catch(e){if(e.message!=='settled-test-boundary')throw e}
