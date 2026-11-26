@@ -51,8 +51,8 @@ async function send(
     const peer={slot:1}, joining={slot:2};
     const _peers={guest:peer,join:joining},_knownPlayers={join:{socketId:'join-current'}},_activeRoster=new Set([0,1,2]);
     const _lateJoinServing=new Map(),_lateJoinStateSent=new Map(),_pendingLateJoinReadySids=new Set();
-    let _lateJoinServeSeq=0,_lateJoinPausedAt=0,_runSubstate=0,_syncQueueEpoch=1;
-    const _syncQueueGen={},RUN_LATE_JOIN_PAUSE=1,LATE_JOIN_TIMEOUT_MS=15000,_frameNum=H,_playerSlot=0,DELAY_FRAMES=3,_rbTransport='reliable';
+    let _lateJoinServeSeq=0,_lateJoinPausedAt=null,_syncQueueEpoch=1;
+    const _syncQueueGen={},LATE_JOIN_TIMEOUT_MS=15000,_frameNum=H,_playerSlot=0,DELAY_FRAMES=3,_rbTransport='reliable';
     const _useCRollback=true,RB_WORKER_COPROC=mode==='worker',_isSmashRemix=()=>mode==='remix';
     const _localInputs={[H-1]:real},_remoteInputs={1:{[H-1]:real,[H-2]:zero},2:{[H]:real}};
     const _isValidPlayerSlot=(n)=>Number.isInteger(n)&&n>=0&&n<4,_isPeerPendingLateJoin=()=>false;

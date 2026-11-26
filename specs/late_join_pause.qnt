@@ -901,3 +901,55 @@ module late_join_serve_failure_before {
 module late_join_serve_failure_fixed {
   import late_join_serve_failure(FENCE_FAILURE = true).*
 }
+
+// A paused guest has its own deadline even when the frame dispatcher cannot
+// reach its admission gate, such as while the host connection is reserved.
+module late_join_admission_clock {
+  const OWN_CLOCK: bool
+  var h: { time: int, at: int, token: int, frame: int, pacingAllows: bool, expired: bool }
+
+  action init = h' = { time: 0, at: 2, token: 1, frame: 0, pacingAllows: false, expired: false }
+  action elapse = h' = { ...h, time: h.time + 1 }
+  action pause = h' = { ...h, at: h.time + 2, token: h.token + 1, expired: false }
+  action resume = h' = { ...h, at: -1, token: h.token + 1, expired: false }
+  action allowPacing = h' = { ...h, pacingAllows: true }
+  action pulse(token: int): bool =
+    if (token == h.token and h.at >= 0 and h.time >= h.at) {
+      h' = { ...h, at: if (OWN_CLOCK) -1 else h.at, expired: true }
+    } else h' = h
+
+  action tick =
+    if (not(h.pacingAllows)) h' = h
+    else if (h.at < 0) h' = { ...h, frame: h.frame + 1 }
+    else if (not(OWN_CLOCK) and h.time >= h.at) {
+      h' = { ...h, at: -1, frame: h.frame + 1 }
+    } else h' = h
+
+  action step = any { elapse, pause, resume, allowPacing, pulse(h.token), pulse(h.token - 1), tick }
+
+  val servicedAdmissionDeadlineReleasesHold = h.expired implies h.at < 0
+
+  run duePauseReleasesWhilePacingPreventsFrameTicksTest =
+    init.then(elapse).then(elapse).then(pulse(1))
+      .expect((h.at == -1) == OWN_CLOCK and h.frame == 0)
+      .then(tick).expect(h.frame == 0)
+      .then(allowPacing).then(tick).expect(h.frame == 1 and h.at == -1)
+
+  run replacedDeadlineCannotReleaseHoldTest =
+    init.then(elapse).then(pause).then(elapse).then(elapse)
+      .then(pulse(1)).expect(h.at == 3 and not(h.expired) and h.frame == 0)
+      .then(resume).then(pause).then(elapse).then(elapse)
+      .then(pulse(2)).expect(h.at == 5 and not(h.expired) and h.frame == 0)
+
+  run livePacingCannotAdvanceHeldFrameTest =
+    init.then(allowPacing).then(tick).expect(h.at == 2 and h.frame == 0)
+      .then(resume).then(tick).expect(h.at == -1 and h.frame == 1)
+}
+
+module late_join_admission_clock_before {
+  import late_join_admission_clock(OWN_CLOCK = false).*
+}
+
+module late_join_admission_clock_fixed {
+  import late_join_admission_clock(OWN_CLOCK = true).*
+}

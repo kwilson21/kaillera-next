@@ -5760,7 +5760,7 @@
   const RUN_NORMAL = 'normal';
   const RUN_PACING = 'pacing'; // frame advantage cap throttling
   const RUN_RB_STALL = 'rollback-stall'; // rollback engine waiting for peer
-  const RUN_LATE_JOIN_PAUSE = 'late-join-pause'; // host paused for joiner
+  const RUN_LATE_JOIN_PAUSE = 'late-join-pause'; // diagnostic name for the admission hold
   const RUN_AWAITING_RESYNC = 'awaiting-resync'; // guest waiting for state
   let _runSubstate = RUN_NORMAL;
   // A catch-up from a host state behind this guest (_startCatchUp).
@@ -5945,11 +5945,9 @@
   // screen. Use the C-level snapshot plus hidden-state sidecar instead.
   const REMIX_INITIAL_SYNC_USE_KN_SYNC = true;
   let _lateJoin = false; // true when joining a game already in progress
-  let _lateJoinPausedAt = 0; // I1 (MF5): wall-clock when late-join pause began
-  // I1: wall-clock of the host's latest `late-join-pause` on a page that is
-  // not the host. The host's own deadline (LATE_JOIN_TIMEOUT_MS per joiner)
-  // normally ends the pause; this one is for a host that never says resume.
-  let _lateJoinGuestPausedAt = 0;
+  // Admission owns the hold. Frame execution only reads whether it is active.
+  let _lateJoinPausedAt = null;
+  let _stopLateJoinGuestPause = null;
   const LATE_JOIN_GUEST_PAUSE_TIMEOUT_MS = 20000;
   // Joiner: its channel to the host closed while it waited for the state or
   // loaded it. The host ends the serve when that channel goes (resetPeerState)
@@ -7468,6 +7466,7 @@
     if (_phase === PHASE_LOCKSTEP_READY) return 'stopped'; // ready but tick loop not started yet
     if (_phase === PHASE_STOPPED) return 'stopped';
     // Runtime sub-states (only when PHASE_RUNNING)
+    if (_lateJoinHoldsFrame()) return RUN_LATE_JOIN_PAUSE;
     if (_runSubstate !== RUN_NORMAL) return _runSubstate;
     if (!_inGameplay) return 'running:menu';
     return 'running';
@@ -9390,6 +9389,10 @@
   // and permanently excludes the late joiner from pacing, allowing the
   // host to run unchecked ahead.
   const _resetPacingAfterLateJoin = () => {
+    // The pause itself cannot count toward a pacing or rollback stall.
+    if (_runSubstate === RUN_PACING || _runSubstate === RUN_RB_STALL) _runSubstate = RUN_NORMAL;
+    _pacingThrottleStartAt = 0;
+    _rollbackStallStart = 0;
     const now = performance.now();
     for (const slot of Object.keys(_peerLastAdvanceTime)) {
       _peerLastAdvanceTime[slot] = now;
@@ -9400,6 +9403,28 @@
         _peerPhantom[slot] = false;
       }
     }
+  };
+
+  const _lateJoinHoldsFrame = () => _lateJoinPausedAt !== null || _stopLateJoinGuestPause !== null;
+  const _clearLateJoinGuestPause = () => {
+    const stop = _stopLateJoinGuestPause;
+    _stopLateJoinGuestPause = null;
+    stop?.();
+    return !!stop;
+  };
+  const _holdGuestFramesForLateJoin = () => {
+    _clearLateJoinGuestPause();
+    const pausedAt = performance.now();
+    const stop = window.KNCore.startAfter(() => {
+      if (_stopLateJoinGuestPause !== stop) return;
+      _stopLateJoinGuestPause = null;
+      _syncLog(
+        `LATE-JOIN-GUEST-PAUSE-TIMEOUT f=${_frameNum} pausedMs=${Math.round(performance.now() - pausedAt)} — ` +
+          'no resume from the host, resuming',
+      );
+      _resetPacingAfterLateJoin();
+    }, LATE_JOIN_GUEST_PAUSE_TIMEOUT_MS);
+    _stopLateJoinGuestPause = stop;
   };
 
   const clearLateJoinReadyRetry = () => {
@@ -9734,9 +9759,8 @@
   };
 
   const resumeLateJoinPause = (source, includeRoster) => {
-    if (_runSubstate !== RUN_LATE_JOIN_PAUSE) return false;
-    _runSubstate = RUN_NORMAL;
-    _lateJoinPausedAt = 0;
+    if (_lateJoinPausedAt === null) return false;
+    _lateJoinPausedAt = null;
     _resetPacingAfterLateJoin();
     if (includeRoster) _broadcastRoster();
     _syncLog(`late-join resume: ${source}${includeRoster ? '' : ' (roster waits for DC)'}`);
@@ -9809,11 +9833,7 @@
 
     const name = senderSid ? _knownPlayers[senderSid]?.playerName || 'Player' : 'Player';
     const noticeKey = `late-join:${senderSid ?? ''}`;
-    if (
-      _runSubstate === RUN_LATE_JOIN_PAUSE &&
-      _playerSlot === 0 &&
-      [..._lateJoinServing.keys()].some((sid) => !_pendingLateJoinReadySids.has(sid))
-    ) {
+    if (_lateJoinPausedAt !== null && [..._lateJoinServing.keys()].some((sid) => !_pendingLateJoinReadySids.has(sid))) {
       // Another joiner has yet to load the state captured for this pause.
       // Resuming now would leave it frames behind; its own "ready" or its
       // timer ends the pause.
@@ -9828,7 +9848,7 @@
       }
       _syncLog(`late-join-ready (${source}) — ${_lateJoinServing.size} joiner(s) still loading, pause kept`);
       if (newlyHandled) _config?.onToast?.(`${name} joined`, 'success', noticeKey);
-    } else if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
+    } else if (_lateJoinPausedAt !== null) {
       resumeLateJoinPause(`joiner ready (via ${source})`, true);
       if (newlyHandled || senderSid) _config?.onToast?.(`${name} joined`, 'success', noticeKey);
     } else {
@@ -11823,10 +11843,7 @@
         // Pause and resume are the host's word alone: no other peer can hold
         // or release this page's game.
         if (e.data === 'late-join-pause' && peer.slot === 0) {
-          _runSubstate = RUN_LATE_JOIN_PAUSE;
-          // Stamped at every pause the host sends: it sends one per joiner
-          // it starts serving, so the deadline runs from the latest.
-          _lateJoinGuestPausedAt = performance.now();
+          _holdGuestFramesForLateJoin();
           setStatus('Player joining...');
           _config?.onToast?.('Player joining…', 'info', 'late-join');
           _syncLog(`paused by host for late-join sync at frame ${_frameNum}`);
@@ -11834,9 +11851,7 @@
         if (e.data === 'join-the-start' && peer.slot === 0) handleJoinTheStart();
         if (e.data === 'late-joiner') handlePeerIsLateJoiner(remoteSid, peer);
         if (e.data === 'late-join-resume' && peer.slot === 0) {
-          const wasPausedForLateJoin = _runSubstate === RUN_LATE_JOIN_PAUSE;
-          if (wasPausedForLateJoin) _runSubstate = RUN_NORMAL;
-          _lateJoinGuestPausedAt = 0;
+          const wasPausedForLateJoin = _clearLateJoinGuestPause();
           _lateJoin = false;
           clearLateJoinReadyRetry();
           _resetPacingAfterLateJoin();
@@ -12719,7 +12734,7 @@
       _pendingLateJoinReadySids.delete(opts.sid);
       _lateJoinOfferedDelay.delete(opts.sid);
     }
-    if (opts.sid && _lateJoinServing.delete(opts.sid) && _runSubstate === RUN_LATE_JOIN_PAUSE) {
+    if (opts.sid && _lateJoinServing.delete(opts.sid) && _lateJoinPausedAt !== null) {
       const leftSid = opts.sid;
       queueMicrotask(() => _endLateJoinPauseIfNoneServed(`${reason} for ${leftSid}`));
     }
@@ -14944,8 +14959,7 @@
       // this, the tick loop can run N frames between getState() and the
       // moment we read _frameNum, causing the late joiner to load state
       // from frame X but think they're at frame X+N (cursor desync).
-      _runSubstate = RUN_LATE_JOIN_PAUSE;
-      if (servedAs === undefined || _lateJoinPausedAt === 0) _lateJoinPausedAt = performance.now();
+      if (servedAs === undefined || _lateJoinPausedAt === null) _lateJoinPausedAt = performance.now();
       _syncLog(`pausing for late-join at frame ${_frameNum}`);
       // I1 (MF5): the pause has a wall-clock deadline from the moment it
       // begins, not from when the state has been compressed: a worker that
@@ -14961,7 +14975,7 @@
         _lateJoinServing.delete(remoteSid);
         _lateJoinStateSent.delete(remoteSid);
         _pendingLateJoinReadySids.delete(remoteSid);
-        const elapsed = Math.round(performance.now() - _lateJoinPausedAt);
+        const elapsed = _lateJoinPausedAt === null ? 0 : Math.round(performance.now() - _lateJoinPausedAt);
         _syncLog(
           `LATE-JOIN-TIMEOUT elapsed=${elapsed}ms joiner=${remoteSid} — ` +
             `resuming without joiner, hard-disconnecting so they can retry`,
@@ -14979,7 +14993,7 @@
       for (const [sid, p] of Object.entries(_peers)) {
         // The pause is for existing players while the host captures a stable
         // state. The joiner is not part of the running timeline yet; pausing
-        // it can leave its freshly-loaded loop stuck in RUN_LATE_JOIN_PAUSE.
+        // it can leave its freshly-loaded loop held by admission.
         if (sid === remoteSid) continue;
         if (p.dc?.readyState === 'open') {
           try {
@@ -15364,11 +15378,7 @@
       _rbTransport = msg.rbTransport === 'dual' || msg.rbTransport === 'unreliable' ? msg.rbTransport : 'reliable';
 
       startLockstep();
-      if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
-        _syncLog('late-join: clearing self pause after state load');
-        _runSubstate = RUN_NORMAL;
-        _lateJoinGuestPausedAt = 0;
-      }
+      if (_clearLateJoinGuestPause()) _syncLog('late-join: clearing self pause after state load');
 
       // Re-establish WebRTC connections to any players whose peer connections
       // failed or are zombied (closed PC but still in _peers). During the
@@ -17697,6 +17707,8 @@
     _endCatchUp(window.EJS_emulator?.gameManager?.Module ?? {}, 'the match stopped');
     // Every connection is about to close; each machine is told, and its per-match state goes.
     _peerDriver()?.sessionEnded();
+    _lateJoinPausedAt = null;
+    _clearLateJoinGuestPause();
     _runSubstate = RUN_NORMAL;
     _checkStateTransition();
     window._lockstepActive = false;
@@ -18041,7 +18053,7 @@
   const _guestRecoveryBlocked = () =>
     _checkpoint?.busy ||
     (_config?.matchReturn && !_config.matchReturn.playing) ||
-    _runSubstate === RUN_LATE_JOIN_PAUSE ||
+    _lateJoinHoldsFrame() ||
     window._rbPendingInit ||
     _workerCoprocPending ||
     (_playerSlot !== 0 && !_isSpectator && _lastUsersUpdated?.hostReturnDeadline && !hostGameConnected());
@@ -18573,10 +18585,10 @@
     // for longer than the warn / error thresholds. Takes NO recovery
     // action — the user still sees the freeze, and the fix belongs
     // in whichever MF category covers the root cause. Skipped while
-    // _lateJoinPaused or document.hidden (both are legitimate
+    // an admission hold or document.hidden (both are legitimate
     // pauses). See docs/netplay-invariants.md.
     const _tickNow = performance.now();
-    if (_runSubstate !== RUN_LATE_JOIN_PAUSE && !(typeof document !== 'undefined' && document.hidden)) {
+    if (!_lateJoinHoldsFrame() && !(typeof document !== 'undefined' && document.hidden)) {
       if (_frameNum !== _tickStuckLastFrame) {
         _tickStuckLastFrame = _frameNum;
         _tickStuckLastAdvanceAt = _tickNow;
@@ -18594,22 +18606,9 @@
       }
     }
 
-    if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
-      const guestPausedMs = _playerSlot !== 0 && _lateJoinGuestPausedAt > 0 ? _tickNow - _lateJoinGuestPausedAt : 0;
-      if (guestPausedMs <= LATE_JOIN_GUEST_PAUSE_TIMEOUT_MS) {
-        _markTickReturn('skip:late-join-pause');
-        return; // frozen while late-joiner loads state
-      }
-      // I1: the host paused this page and never said resume (it reloaded,
-      // its channel died). Longer than the host's own per-joiner deadline,
-      // so a host that is still there has resumed first.
-      _syncLog(
-        `LATE-JOIN-GUEST-PAUSE-TIMEOUT f=${_frameNum} pausedMs=${Math.round(guestPausedMs)} — ` +
-          `no resume from the host, resuming`,
-      );
-      _runSubstate = RUN_NORMAL;
-      _lateJoinGuestPausedAt = 0;
-      _resetPacingAfterLateJoin();
+    if (_lateJoinHoldsFrame()) {
+      _markTickReturn('skip:late-join-pause');
+      return;
     }
     // A guest runs no frame until its C engine is armed with the host's delay
     // at the frame it is on (specs/engine_start.qnt). Each tick asks
@@ -21207,7 +21206,7 @@
       (_isSmashRemix() && !_readMenuPhase().gameplay) ||
       _playerSlot !== 0 ||
       _phase !== PHASE_RUNNING ||
-      _runSubstate === RUN_LATE_JOIN_PAUSE ||
+      _lateJoinHoldsFrame() ||
       _lateJoinServing.size ||
       _pushingSyncState ||
       _proactivePushInFlight ||
@@ -23014,7 +23013,8 @@
     _lateJoinReadyHandled.clear();
     _lateJoinServing.clear();
     _lateJoinStateSent.clear();
-    _lateJoinGuestPausedAt = 0;
+    _lateJoinPausedAt = null;
+    _clearLateJoinGuestPause();
     _lateJoinLostHost = false;
     _lateJoinLostHostAsks = 0;
     _owedResync = false;

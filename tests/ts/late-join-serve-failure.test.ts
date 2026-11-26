@@ -25,9 +25,9 @@ function fixture(): ServeFixture {
     let _hostReconnectFenceVersion = 0, _syncQueueEpoch = 1;
     const _syncQueueGen = {}, _lateJoinServing = new Map(), _lateJoinStateSent = new Map();
     const _pendingLateJoinReadySids = new Set(), _syncLog = () => {};
-    const RUN_LATE_JOIN_PAUSE = 1, LATE_JOIN_TIMEOUT_MS = 15000;
+    const LATE_JOIN_TIMEOUT_MS = 15000;
     const _frameNum = 80, DELAY_FRAMES = 3, _useCRollback = false;
-    let _lateJoinServeSeq = 0, _lateJoinPausedAt = 0, _runSubstate = 0;
+    let _lateJoinServeSeq = 0, _lateJoinPausedAt = null;
     let didResume = false, rejectCompression;
     const _pendingLateJoinPeerSids = new Set(), _pendingLateJoinPeerSlots = new Set();
     const _isValidPlayerSlot = (slot) => Number.isInteger(slot) && slot >= 0 && slot < 4;

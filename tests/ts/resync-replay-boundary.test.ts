@@ -60,7 +60,7 @@ const fixture = (
     };
     let wake;
     const PHASE_RUNNING = 'running', PHASE_STOPPED = 'stopped', _phase = PHASE_RUNNING;
-    const RUN_LATE_JOIN_PAUSE = 'late-join-pause';
+    const _lateJoinHoldsFrame = () => false;
     const _config = {}, _workerCoprocPending = null, _playerSlot = 1, _isSpectator = false;
     const _lastUsersUpdated = null;
     const window = { EJS_emulator: {gameManager: {Module: mod}},

@@ -17,8 +17,8 @@ function room(peerPresent = false) {
  const peer={slot:1,dc:{readyState:'open',send(){}}};
  const _peers=peerPresent?{a:peer}:{},_knownPlayers={a:{slot:1}},_droppedThisMatch=new Set(['a']);
  const _lateJoinServing=new Map(),_lateJoinStateSent=new Map(),_pendingLateJoinReadySids=new Set(),_lateJoinReadyHandled=new Set(),_lateJoinOfferedDelay=new Map();
- let _lateJoinServeSeq=0,_lateJoinPausedAt=0,_runSubstate=0,_syncQueueEpoch=1;
- const _syncQueueGen={},RUN_LATE_JOIN_PAUSE=1,LATE_JOIN_TIMEOUT_MS=15000,_frameNum=100,_playerSlot=0,DELAY_FRAMES=12,_rbTransport='reliable';
+ let _lateJoinServeSeq=0,_lateJoinPausedAt=null,_syncQueueEpoch=1;
+ const _syncQueueGen={},LATE_JOIN_TIMEOUT_MS=15000,_frameNum=100,_playerSlot=0,DELAY_FRAMES=12,_rbTransport='reliable';
  let pending=false,activated=0,emits=0,resumes=0; const timers=[];
  const performance={now:()=>1},setTimeout=f=>timers.push(f);
  const _markPendingLateJoinPeer=()=>{pending=true},_clearPendingLateJoinPeer=(sid,slot,why,opts)=>{pending=false;if(opts?.activate)activated++};
