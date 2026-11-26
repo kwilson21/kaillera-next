@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.73.10",
+    "date": "2026-11-26",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "service host reconnect proof on a recovery clock (#363)"
+      }
+    ]
+  },
+  {
     "version": "0.73.9",
     "date": "2026-11-26",
     "changes": [
