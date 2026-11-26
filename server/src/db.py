@@ -407,14 +407,15 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
     # An in-flight flush from this ring can commit after the exit batch.
     # Its summary must retain the omission marker from the exit batch.
     omission_path = "$.omittedOnExit"
-    stored_omissions = case((func.json_valid(SessionLog.summary), func.json_extract(SessionLog.summary, omission_path)))
+    stored_summary = case((func.json_valid(SessionLog.summary), SessionLog.summary), else_="{}")
     new_summary = case((func.json_valid(new.summary), new.summary), else_="{}")
+    stored_omissions = func.json_extract(stored_summary, omission_path)
     summary = case(
         (
             and_(
                 SessionLog.log_epoch == new.log_epoch,
-                stored_omissions.is_not(None),
-                func.json_extract(new_summary, omission_path).is_(None),
+                func.json_type(stored_summary, omission_path) == "object",
+                func.coalesce(func.json_type(new_summary, omission_path), "") != "object",
             ),
             func.json_set(new_summary, omission_path, func.json(stored_omissions)),
         ),
