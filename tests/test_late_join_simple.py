@@ -132,10 +132,9 @@ def test_the_pause_belongs_to_the_joiners_being_served():
     assert "if (_lateJoinServing.get(remoteSid) !== serveId) return;" in serve
     assert "_endLateJoinPauseIfNoneServed(`timeout for ${remoteSid}`);" in serve
     assert "if (_runSubstate === RUN_LATE_JOIN_PAUSE) {\n          const elapsed" not in serve
-    # A serve ended while compressing sends nothing.
-    assert serve.index("await compressAndEncode(bytes)") < serve.index(
-        "_lateJoinServing.get(remoteSid) !== serveId ||"
-    )
+    # A serve ended while compressing cannot publish or release a slot.
+    assert serve.index("await compressAndEncode(bytes)") < serve.index("if (!ownsServe()) {")
+    assert serve.index("if (!ownsServe()) return;") < serve.index("'state transfer failed'")
 
     ready = src[src.index("const finishLateJoinReady = (source, senderSid = null) => {") :]
     ready = ready[: ready.index("const _syntheticSidForSlot")]

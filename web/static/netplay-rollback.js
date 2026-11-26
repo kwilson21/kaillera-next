@@ -14749,6 +14749,16 @@
       return;
     }
 
+    const serveEpoch = _syncQueueEpoch;
+    const serveGen = _syncQueueGen[remoteSid] || 0;
+    const servePeer = _peers[remoteSid] || null;
+    const ownsServe = () =>
+      _lateJoinServing.get(remoteSid) === serveId &&
+      reconnectFence === _hostReconnectFenceVersion &&
+      serveEpoch === _syncQueueEpoch &&
+      serveGen === (_syncQueueGen[remoteSid] || 0) &&
+      (!servePeer || servePeer === _peers[remoteSid]);
+
     try {
       // Pause lockstep FIRST — freeze all players before capturing state
       // so no frames advance during the async compression below. Without
@@ -14847,21 +14857,12 @@
       const saveRamBytes = _captureSaveRam(hMod);
 
       // Async compression is safe now — tick loop is frozen
-      const serveEpoch = _syncQueueEpoch;
-      const serveGen = _syncQueueGen[remoteSid] || 0;
-      const servePeer = _peers[remoteSid] || null;
       _lateJoinStateSent.delete(remoteSid);
       const encoded = await compressAndEncode(bytes);
       const saveRam = saveRamBytes ? (await compressAndEncode(saveRamBytes)).data : null;
       // The serve was ended while the state was being compressed (its timer
       // fired, the joiner left, the match stopped): nothing to send.
-      if (
-        _lateJoinServing.get(remoteSid) !== serveId ||
-        reconnectFence !== _hostReconnectFenceVersion ||
-        serveEpoch !== _syncQueueEpoch ||
-        serveGen !== (_syncQueueGen[remoteSid] || 0) ||
-        (servePeer && servePeer !== _peers[remoteSid])
-      ) {
+      if (!ownsServe()) {
         _syncLog(`late-join state for ${remoteSid} not sent: the serve ended while compressing`);
         return;
       }
@@ -14895,9 +14896,10 @@
       _signalSocket.emit('data-message', message);
       _lateJoinStateSent.set(remoteSid, { serveId, epoch: serveEpoch, gen: serveGen, peer: servePeer });
     } catch (err) {
+      if (!ownsServe()) return;
       _syncLog(`failed to send late-join state: ${err}`);
       _clearPendingLateJoinPeer(remoteSid, peerSlot, 'state transfer failed');
-      if (_lateJoinServing.get(remoteSid) === serveId) _lateJoinServing.delete(remoteSid);
+      _lateJoinServing.delete(remoteSid);
       _endLateJoinPauseIfNoneServed(`state transfer to ${remoteSid} failed`);
     }
   }
