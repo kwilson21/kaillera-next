@@ -194,6 +194,17 @@ function summarize(matrix: Matrix, entries: Entry[]) {
   };
 }
 
+function readDesignMatrix() {
+  const matrix: Matrix = JSON.parse(readFileSync(resolve(root, path), 'utf8'));
+  const { entries, lines } = validate(matrix);
+  return { matrix, entries, lines };
+}
+
+export function currentDesignMatrix() {
+  const { matrix, entries } = readDesignMatrix();
+  return { requirements: matrix.requirements, parameters: matrix.parameters, current: summarize(matrix, entries) };
+}
+
 function git(...args: string[]) {
   return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
@@ -215,8 +226,7 @@ function main(args: string[]) {
     flags.length === 0 || (flags.length === 1 && flags[0] === '--json'),
     'Usage: node scripts/check-design-matrix.ts [--base REV] [--json]',
   );
-  const matrix: Matrix = JSON.parse(readFileSync(resolve(root, path), 'utf8'));
-  const { entries, lines } = validate(matrix);
+  const { matrix, entries, lines } = readDesignMatrix();
   let previous = matrix.baseline.entries;
   if (revision) {
     requireValid(/^[a-zA-Z0-9_/.-]+$/.test(revision) && !revision.startsWith('-'), 'Invalid base revision');

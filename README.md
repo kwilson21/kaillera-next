@@ -120,6 +120,16 @@ also stores match diagnostics and feedback.
   [Models](specs/) · [Netcode diagrams](docs/netcode-diagrams.md) ·
   [Netplay invariants](docs/netplay-invariants.md)
 
+### Functional design matrix
+
+Rows are behaviors the system must support. Columns are the parts of the design
+that affect those behaviors. Read across a row to see which parts can change
+its behavior.
+
+[![Kaillera-next design matrix with labeled requirements, design parameters, and dependencies](docs/architecture/design-matrix.svg)](docs/architecture/design-matrix.svg)
+
+[How to read the matrix and trace each dependency](docs/architecture/axiomatic-design.md)
+
 ## Contributing
 
 Run `just build` to type-check, run the TypeScript tests, and bundle the
