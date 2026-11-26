@@ -14,7 +14,7 @@ const between = (start: string, end: string) => {
 };
 
 function guest() {
-  const run = vm.runInNewContext(`
+  const run: unknown = vm.runInNewContext(`
     let now = 100, resets = 0;
     const _phase = 5, PHASE_RUNNING = 5, PHASE_IDLE = 0, PHASE_GAME_STARTED = 1,
       PHASE_EMU_READY = 2, PHASE_SYNCING = 3, PHASE_LOCKSTEP_READY = 4, PHASE_STOPPED = 6;
@@ -58,7 +58,12 @@ function guest() {
       }
     }
   `);
-  return run as (command: string, n?: number) => unknown;
+  assert.ok(typeof run === 'function');
+  return (command: string, argument?: number) => {
+    const result: unknown = run(command, argument);
+    assert.ok(result === undefined || typeof result === 'string' || typeof result === 'number');
+    return result;
+  };
 }
 
 test('the guest admission deadline releases a lost host pause without a tick', () => {
