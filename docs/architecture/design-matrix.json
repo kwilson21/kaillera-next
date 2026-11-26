@@ -554,6 +554,15 @@
         "specs/resync_flow.qnt"
       ]
     },
+    "checkpoint-clock": {
+      "path": "web/src/checkpoint-recovery.ts",
+      "anchor": "private armClock()",
+      "line": 142,
+      "coverage": [
+        "tests/ts/checkpoint-recovery.test.ts",
+        "specs/checkpoint_recovery.qnt"
+      ]
+    },
     "host-reconnect-proof-clock": {
       "path": "web/static/netplay-rollback.js",
       "anchor": "const _armHostReconnectClock =",
@@ -1174,7 +1183,7 @@
         "fr": "FR-recovery",
         "dp": "DP-pacing",
         "kind": "necessary",
-        "mechanism": "Frame ticks still service verified-checkpoint recovery. Host protected reconnect proof retries, expiry, and dispatch use the recovery clock. A pacing timeout can mark a peer phantom and end its recovery attempt. Coordinated installation observes frame progression. Host escalation delivery, guest hold expiry, and guest protected reconnect deadlines run on recovery-owned timers.",
+        "mechanism": "Verified checkpoints service their protocol on a recovery clock. Live execution observes their declared freeze frame. Host protected reconnect proof retries, expiry, and dispatch use the recovery clock. A pacing timeout can mark a peer phantom and end its recovery attempt. Coordinated installation observes frame progression. Host escalation delivery, guest hold expiry, and guest protected reconnect deadlines run on recovery-owned timers.",
         "evidence": [
           "tick",
           "recovery-apply",
@@ -1182,7 +1191,8 @@
           "escalation-clock",
           "guest-coordinated-hold-clock",
           "guest-protected-reconnect-clock",
-          "host-reconnect-proof-clock"
+          "host-reconnect-proof-clock",
+          "checkpoint-clock"
         ]
       }
     ],

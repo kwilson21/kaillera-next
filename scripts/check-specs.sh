@@ -835,7 +835,9 @@ $QUINT test "$PROOF" --main=reconnect_proof --backend="$BACKEND"
 
 CHECKPOINT=specs/checkpoint_recovery.qnt
 $QUINT typecheck "$CHECKPOINT"
-$QUINT test "$CHECKPOINT" --backend="$BACKEND"
+for variant in checkpoint_recovery checkpoint_clock_before checkpoint_clock_fixed; do
+  $QUINT test "$CHECKPOINT" --main="$variant" --backend="$BACKEND"
+done
 
 # ── A player dropped in a running match comes back only late ──────────────
 INTEGRITY=specs/reconnect_integrity.qnt

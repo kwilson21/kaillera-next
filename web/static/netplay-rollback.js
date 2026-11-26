@@ -18409,7 +18409,7 @@
       return;
     }
     _checkpointStart();
-    if (_checkpoint?.tick()) {
+    if (_checkpoint?.holdsFrame) {
       _markTickReturn('checkpoint');
       return;
     }
