@@ -297,7 +297,8 @@ test('the host deadline dispatches without frame ticks and fences a stopped matc
   const run: () => Promise<string> = runInNewContext(
     `
     const PHASE_RUNNING = 1, PHASE_STOPPED = 2, SYNC_COORD_TIMEOUT_MS = 3000;
-    const _playerSlot = 0, _pushingSyncState = false, _frameNum = 2189, _checkpoint = null;
+    const _playerSlot = 0, _pushingSyncState = false, _frameNum = 2189;
+    const _config = {matchReturn: {playing: true}}, _checkpoint = {busy: false};
     const _syncQueueGen = {}, _peerPhantom = {}, _followUpWatches = new Map(), _directAnswerNewest = new Map();
     const socket = null, _syncLog = () => {};
     const _peers = {guest: {slot: 1, syncDc: {readyState: 'open'}}};
@@ -329,6 +330,13 @@ test('the host deadline dispatches without frame ticks and fences a stopped matc
       pulse?.();
       if (attempts.length) throw Error('capture before deadline or during replay');
       replay = 0;
+      _checkpoint.busy = true;
+      pulse?.();
+      _checkpoint.busy = false;
+      _config.matchReturn.playing = false;
+      pulse?.();
+      if (attempts.length) throw Error('capture during checkpoint or saved-match restore');
+      _config.matchReturn.playing = true;
       pulse?.();
       await Promise.resolve();
 

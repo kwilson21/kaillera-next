@@ -17907,7 +17907,8 @@
         _cancelScheduledSyncClock();
         return;
       }
-      if (_phase !== PHASE_RUNNING || _checkpoint?.busy) return;
+      if (_phase !== PHASE_RUNNING || _checkpoint?.busy || (_config?.matchReturn && !_config.matchReturn.playing))
+        return;
       // A live browser may be able to answer while frame ticks are stalled.
       // Replay retains exclusive access until its current slice sequence ends.
       if (window.EJS_emulator?.gameManager?.Module?._kn_get_replay_depth?.() > 0) return;

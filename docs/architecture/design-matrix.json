@@ -526,6 +526,15 @@
         "tests/ts/rollback-session-log.test.ts",
         "specs/session_log_store.qnt"
       ]
+    },
+    "coordinated-capture-clock": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _armScheduledSyncClock =",
+      "line": 17901,
+      "coverage": [
+        "tests/ts/resync-replay-boundary.test.ts",
+        "specs/sync_follow_up.qnt"
+      ]
     }
   },
   "baseline": {
@@ -1124,6 +1133,18 @@
           "log-ingest",
           "optional-native-log-stats"
         ]
+      },
+      {
+        "fr": "FR-recovery",
+        "dp": "DP-pacing",
+        "kind": "necessary",
+        "mechanism": "Escalation deadlines still use tick freeze credits, and coordinated installation still observes frame progression. Generic guest retries and the host coordinated capture deadline run on recovery-owned timers.",
+        "evidence": [
+          "tick",
+          "freeze-credit",
+          "recovery-request",
+          "coordinated-capture-clock"
+        ]
       }
     ],
     "remove": [
@@ -1158,6 +1179,10 @@
       {
         "fr": "FR-diagnostics",
         "dp": "DP-diagnostics"
+      },
+      {
+        "fr": "FR-recovery",
+        "dp": "DP-pacing"
       }
     ]
   }
