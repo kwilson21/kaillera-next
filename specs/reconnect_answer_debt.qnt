@@ -61,6 +61,7 @@ module reconnect_answer_debt {
 
   val aTerminalFailureCannotBeHidden = s.status != "unresolved" or s.notices == 1
   val deadlineDoesNotLeaveAPendingObligation = s.now < deadline or s.status != "waiting"
+  val allHold = aTerminalFailureCannotBeHidden and deadlineDoesNotLeaveAPendingObligation
 
   run unrelatedStateDoesNotCompleteTest = init.then(receive(0, 2, 1)).then(apply(true))
     .expect(s.status == "waiting")
