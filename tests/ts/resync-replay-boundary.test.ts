@@ -11,7 +11,9 @@ const from = (start: string, end: string) => {
   return source.slice(i, j);
 };
 
-const fixture = (target: number, stateFrame: number) =>
+type Tick = (ms: number, frame: number) => { replaying: boolean; installed?: number; target: number };
+
+const fixture = (target: number, stateFrame: number): Tick =>
   runInNewContext(
     `
     let now = 100, _frameNum = 100, replaying = true;
@@ -42,7 +44,7 @@ const fixture = (target: number, stateFrame: number) =>
     tick;
     `,
     { target, stateFrame },
-  ) as (ms: number, frame: number) => { replaying: boolean; installed?: number; target: number };
+  );
 
 test('a coordinated future snapshot keeps pending replay until its install boundary', () => {
   const tick = fixture(102, 102);
