@@ -262,6 +262,8 @@ tick_deadlines() {
   expect_violation "$TICK" tick_deadlines_before_lockstep_mode everyWaitHasADeadline
   verify "$TICK" optional_input_close_current deadlineHasNotMoved init 12
   expect_violation "$TICK" optional_input_close_before deadlineHasNotMoved 3
+  verify "$TICK" peer_reset_wait_fixed otherWaitsStayArmed init 8
+  expect_violation "$TICK" peer_reset_wait_before otherWaitsStayArmed 3
   verify "$TICK" peer_staleness_current allHold init 14
   # A live peer catching up below its highest frame: five ticks, the clock
   # never restarted (catchingUpTest).
