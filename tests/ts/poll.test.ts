@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { startEvery, startPolling } from '../../web/src/poll.ts';
+import { startAfter, startEvery, startPolling } from '../../web/src/poll.ts';
 
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -98,4 +98,22 @@ test('startEvery runs after each interval, not at once, until stopped', async ()
   assert.ok(seen >= 2 && seen <= 5, `ran ${seen} times in 70 ms at 15 ms`);
   await pause(60);
   assert.equal(runs, seen, 'it ran again after being stopped');
+});
+
+test('startAfter runs once and cancellation prevents an outstanding callback', async () => {
+  let runs = 0;
+  const cancelled = startAfter(() => {
+    runs += 10;
+  }, 15);
+  cancelled();
+  const done = new Promise<void>((resolve) => {
+    startAfter(() => {
+      runs++;
+      resolve();
+    }, 15);
+  });
+  assert.equal(runs, 0);
+  await done;
+  await pause(40);
+  assert.equal(runs, 1);
 });

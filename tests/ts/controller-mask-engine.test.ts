@@ -46,7 +46,8 @@ const page = (slot: number): Page => {
     const _maskSchedule=KNCore.controllerMask.createMaskSchedule();
     const _knownPlayers={a:{slot:0},b:{slot:1}},_peers={};
     const _isPeerPendingLateJoin=()=>false,_syncLog=()=>{},KNEvent=()=>{};
-    let asks=0,_resyncRequestInFlight=false,_syncTargetFrame=-1,_syncTargetDeadlineAt=0;
+    let asks=0,_resyncRequestInFlight=false;
+    const _clearSyncTarget=()=>{};
     const _sendResyncRequest=()=>{asks++},_beginResyncRequest=()=>{_resyncRequestInFlight=true;return 1};
     function _requestSocketFullResync(){asks++}
     let stepMask=-1,_inDeterministicStep=false;

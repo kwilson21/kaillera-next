@@ -962,3 +962,63 @@ module resync_replay_boundary_revoked_before {
 module resync_replay_boundary_native_before {
   import resync_replay_boundary(START_BEFORE_TARGET = false, CHECK_ELIGIBILITY = true, CLEAR_AFTER_WRITE = false).*
 }
+
+// The old guest clears an expired hold only when the simulation ticks. The
+// recovery clock variant releases it even if the emulator is paused. A frame
+// boundary still owns installing the state. Epoch identifies the hold whose
+// clock fired, including after replacement or teardown.
+module coordinated_guest_hold_clock {
+  const RECOVERY_CLOCK: bool
+  pure val NONE = -1
+  var h: { epoch: int, time: int, deadline: int, target: int, frame: int,
+    awaiting: bool, pending: bool, applied: bool, serviced: bool }
+
+  action init = h' = { epoch: 1, time: 0, deadline: 2, target: 3, frame: 2,
+    awaiting: true, pending: true, applied: false, serviced: false }
+
+  action elapse = h' = { ...h, time: h.time + 1 }
+  action arm = h' = { ...h, epoch: h.epoch + 1, deadline: h.time + 2,
+    target: h.frame + 1, awaiting: true, serviced: false }
+  action stop = h' = { ...h, epoch: h.epoch + 1, target: NONE,
+    awaiting: false, pending: false, serviced: false }
+
+  action pulse(epoch: int): bool = {
+    val current = epoch == h.epoch and h.target != NONE and h.time >= h.deadline
+    h' = if (current and RECOVERY_CLOCK)
+      { ...h, target: NONE, awaiting: false, serviced: true }
+    else if (current) { ...h, serviced: true } else h
+  }
+
+  action tick = {
+    val expired = not(RECOVERY_CLOCK) and h.time >= h.deadline
+    val eligible = h.target == NONE or h.frame >= h.target or expired
+    h' = if (eligible and h.pending)
+      { ...h, frame: h.frame + 1, target: NONE, pending: false, applied: true, awaiting: false }
+    else if (expired) { ...h, target: NONE, awaiting: false } else h
+  }
+
+  action step = any { elapse, arm, stop, pulse(h.epoch), pulse(h.epoch - 1), tick }
+
+  val servicedDeadlineReleasesHold = h.serviced implies (h.target == NONE and not(h.awaiting))
+
+  run expiryWithoutFrameTicksTest =
+    init.then(elapse).then(pulse(1))
+      .expect(h.target == 3 and h.pending and not(h.applied))
+      .then(elapse).then(pulse(1))
+      .expect((h.target == NONE) == RECOVERY_CLOCK and h.frame == 2 and h.pending and not(h.applied))
+      .then(tick).expect(h.applied and h.frame == 3)
+
+  run replacedOrStoppedClockTest =
+    init.then(elapse).then(arm).then(elapse).then(elapse).then(pulse(1))
+      .expect(h.epoch == 2 and h.target == 3 and h.awaiting)
+      .then(stop).then(arm).then(elapse).then(elapse).then(pulse(2))
+      .expect(h.epoch == 4 and h.target == 3 and h.awaiting and not(h.applied))
+}
+
+module coordinated_guest_hold_clock_before {
+  import coordinated_guest_hold_clock(RECOVERY_CLOCK = false).*
+}
+
+module coordinated_guest_hold_clock_fixed {
+  import coordinated_guest_hold_clock(RECOVERY_CLOCK = true).*
+}

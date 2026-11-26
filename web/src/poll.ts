@@ -1,14 +1,15 @@
 /**
  * Waiting for something on the page by looking again at intervals.
  *
- * Two shapes, both Effect programs so that a wait has an end and stopping it
- * cancels its timer with it:
+ * These Effect programs share cancellation so that stopping a wait
+ * also cancels its timer:
  *
  * - `startPolling`: look now, then every `everyMs`, for at most `attempts`
  *   looks. It ends with what was found, or with nothing once the looks run
  *   out. Used for the emulator coming up (web/src/page/shared.ts).
  * - `startEvery`: run something every `everyMs` until stopped. Used for the
  *   gamepad manager's hot-plug poll (web/src/page/gamepad-manager.ts).
+ * - `startAfter`: run once after a delay.
  *
  * The first look of `startPolling` is made by the caller's own call, before
  * it returns: the code this replaced did that, and callers rely on it (a
@@ -78,6 +79,14 @@ export const startPolling = <A>(look: (attempt: number) => A | undefined, option
 /** Run `run` every `everyMs`, first after one interval. Returns how to stop it. */
 export const startEvery = (run: () => void, everyMs: number): (() => void) => {
   const fiber = Effect.runFork(Effect.forever(Effect.delay(Effect.sync(run), Duration.millis(everyMs))));
+  return () => {
+    Effect.runFork(Fiber.interrupt(fiber));
+  };
+};
+
+/** Run `run` once after `delayMs`. Returns how to cancel it. */
+export const startAfter = (run: () => void, delayMs: number): (() => void) => {
+  const fiber = Effect.runFork(Effect.delay(Effect.sync(run), Duration.millis(delayMs)));
   return () => {
     Effect.runFork(Fiber.interrupt(fiber));
   };

@@ -76,7 +76,7 @@ import * as connect from './play/connect.ts';
 import * as roomIdentity from './play/host-return.ts';
 import * as hostReturnEffects from './play/host-return-effects.ts';
 import { matchSave } from './match-save.ts';
-import { startEvery } from './poll.ts';
+import { startAfter, startEvery } from './poll.ts';
 import { MatchReturn } from './play/match-return.ts';
 import * as connectionNotices from './play/connection-notices.ts';
 import { installShared } from './page/shared.ts';
@@ -346,6 +346,7 @@ export const createSession = (
 export const KNCore = {
   canvasCadence,
   matchSave,
+  startAfter,
   startEvery,
   checkpoint: { CheckpointRecovery, CHECKPOINT_CAP, CHECKPOINT_MESSAGE },
   analogScale,

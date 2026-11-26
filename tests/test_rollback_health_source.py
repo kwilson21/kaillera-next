@@ -1178,9 +1178,12 @@ def test_a_late_answer_that_would_take_the_guest_back_is_dropped():
     assert "_pendingResyncState = null;" in dropped
     # The wait goes on: the target and its deadline are left as they are.
     assert "_syncTargetFrame = " not in dropped and "_syncTargetDeadlineAt" not in dropped
-    # After the target's deadline gives the target up, before either branch
-    # holds or applies anything.
-    assert tick.index("COORD-SYNC-TIMEOUT target=") < drop_at
+    # The recovery timer releases the target. Only the frame path applies the
+    # buffered state and re-checks its eligibility first.
+    clock = src[src.index("const _armSyncTarget =") : src.index("// A resync state at most")]
+    assert "COORD-SYNC-TIMEOUT target=" in clock
+    assert "applySyncState(" not in clock
+    assert "_clearSyncTarget();" not in dropped
     hold_at = tick.index("if (pending && atSyncBoundary) {")
     replay_at = tick.index("const replayStep = canInstall ? _syncApplyReplayStep() : null;")
     assert drop_at < hold_at < replay_at

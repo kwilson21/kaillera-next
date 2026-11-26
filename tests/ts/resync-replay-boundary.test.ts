@@ -46,7 +46,8 @@ const fixture = (
       _kn_peek_pending_rollback: () => replaying ? 99 : -1,
       _kn_clear_replay_state: () => { replaying = false; },
     };
-    const window = { EJS_emulator: {gameManager: {Module: mod}} };
+    const window = { EJS_emulator: {gameManager: {Module: mod}}, KNCore: {startAfter: () => () => {}} };
+    const _syncQueueEpoch = 1;
     const _catchUpTo = -1, _syncLog = () => {};
     const RUN_AWAITING_RESYNC = 2, RUN_NORMAL = 0;
     let _runSubstate = RUN_NORMAL, _awaitingResyncAt = 0;
@@ -65,6 +66,7 @@ const fixture = (
     const _checkpoint = null, _checkpointFloor = 0;
     const _guestAllowsReconnectState = () => true;
     ${from('  const _syncStateCanInstall =', '  // -- Init / Stop API')}
+    ${from('  let _cancelSyncTargetClock', '  // A resync state at most')}
     ${from('  const SYNC_APPLY_REPLAY_WAIT_MS', '  // Coordinated sync dispatch')}
     const tick = (ms, frame) => {
       now = ms;
@@ -350,4 +352,71 @@ test('the host deadline dispatches without frame ticks and fences a stopped matc
     `,
   );
   assert.deepEqual(JSON.parse(await run()), { attempts: [3], cancelled: 2 });
+});
+
+const guestHoldClock = () => {
+  const begin = source.includes('  const _armSyncTarget =')
+    ? '_armSyncTarget(frame);'
+    : '_syncTargetFrame = frame; _syncTargetDeadlineAt = now + SYNC_COORD_TIMEOUT_MS;';
+  const clear = source.includes('  const _clearSyncTarget =')
+    ? '_clearSyncTarget();'
+    : '_syncTargetFrame = -1; _syncTargetDeadlineAt = 0;';
+  const clock = source.includes('  let _cancelSyncTargetClock')
+    ? from('  let _cancelSyncTargetClock', '  // A resync state at most')
+    : '';
+  const read: (action: string, at?: number, timer?: number) => string = runInNewContext(
+    `
+    const SYNC_COORD_TIMEOUT_MS = 3000, PHASE_RUNNING = 'running';
+    const RUN_AWAITING_RESYNC = 'awaiting', RUN_NORMAL = 'normal';
+    let _runSubstate = RUN_AWAITING_RESYNC, _phase = PHASE_RUNNING, _syncQueueEpoch = 1;
+    let now = 100, _frameNum = 100, _syncTargetFrame = -1, _syncTargetDeadlineAt = 0;
+    const _pendingResyncState = {frame: 102}, timers = [];
+    const performance = { now: () => now }, _syncLog = () => {};
+    const start = (run, ms) => {
+      const timer = { run, due: now + ms, cancelled: false };
+      timers.push(timer);
+      return () => { timer.cancelled = true; };
+    };
+    const window = { KNCore: { startEvery: start, startAfter: start } };
+    ${clock}
+    const hold = (frame) => { ${begin} };
+    const reset = () => { ${clear} _syncQueueEpoch++; };
+    hold(102);
+    (action, at, timer) => {
+      if (action === 'advance') {
+        now = at;
+        for (const entry of timers) if (!entry.cancelled && entry.due <= now) entry.run();
+      }
+      if (action === 'replace') hold(102);
+      if (action === 'reset') reset();
+      if (action === 'stale') timers[timer]?.run();
+      return JSON.stringify({
+        frame: _frameNum,
+        target: _syncTargetFrame,
+        pending: _pendingResyncState.frame,
+        substate: _runSubstate,
+      });
+    }
+    `,
+  );
+  return (action: string, at?: number, timer?: number) => JSON.parse(read(action, at, timer));
+};
+
+test('guest coordinated hold expires without installing a buffered state or stepping a frame', () => {
+  const clock = guestHoldClock();
+  assert.equal(clock('advance', 3099).target, 102);
+  assert.deepEqual(clock('advance', 3100), { frame: 100, target: -1, pending: 102, substate: 'normal' });
+});
+
+test('an expired guest clock cannot release a replacement or reset match hold', () => {
+  const clock = guestHoldClock();
+  clock('advance', 1000);
+  clock('replace');
+  clock('advance', 3100);
+  assert.equal(clock('stale', 3100, 0).target, 102);
+  clock('reset');
+  clock('replace');
+  clock('advance', 4000);
+  assert.equal(clock('stale', 4000, 1).target, 102);
+  assert.equal(clock('advance', 6100).target, -1);
 });

@@ -457,6 +457,9 @@ $QUINT run "$PAUSE" --main=late_join_pause_before_resync --invariant=holdBeforeT
 
 # ── A resync from request to apply ──────────────────────────────────────────
 FLOW=specs/resync_flow.qnt
+for variant in coordinated_guest_hold_clock_before coordinated_guest_hold_clock_fixed; do
+  $QUINT test "$FLOW" --main="$variant" --backend="$BACKEND"
+done
 $QUINT typecheck "$FLOW"
 for variant in resync_flow_before resync_flow_any_answer resync_flow_frame_named resync_flow_drop_older \
   resync_flow_asked_from resync_flow_unnumbered resync_flow_rewinds resync_flow_current \
