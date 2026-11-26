@@ -122,3 +122,18 @@ export const joinInputAgreement = ({ pages, slots, from, to }) => {
     supersededCount: superseded.length,
   };
 };
+
+/** Compare both finalized hashes against the host in the admission window. */
+export const joinHashAgreement = ([host, ...guests], firstFrame, frames) =>
+  guests.map((guest) => {
+    let compared = 0;
+    const differing = [];
+    for (let frame = firstFrame; frame < firstFrame + frames; frame++) {
+      const h = host[frame];
+      const g = guest[frame];
+      if (!h?.[0] || !h[1] || !g?.[0] || !g[1]) continue;
+      compared++;
+      if (h[0] !== g[0] || h[1] !== g[1]) differing.push(frame);
+    }
+    return { compared, differing };
+  });
