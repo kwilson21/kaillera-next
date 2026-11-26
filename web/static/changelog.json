@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.73.4",
+    "date": "2026-11-26",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "keep input deadlines scoped to the peer being reset (#350)"
+      }
+    ]
+  },
+  {
     "version": "0.73.3",
     "date": "2026-11-26",
     "changes": [
