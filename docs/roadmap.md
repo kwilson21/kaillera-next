@@ -91,7 +91,9 @@ DataChannel in 64KB chunks -> guest buffers state for async application at next 
 boundary via `_kn_sync_write()`. No mid-frame stall — gameplay continues during transfer.
 
 **Diagnostics:** Sync log ring buffer, per-region hash logging on mismatch, drift rate
-tracking, exportable CSV logs via `debug-sync` Socket.IO event.
+tracking, exportable CSV logs via `debug-sync` Socket.IO event. On document exit, the
+HTTP keepalive carries the newest pending diagnostics that fit. The session summary's
+`omittedOnExit` counts older pending records left out of that upload.
 
 **Files:** `web/static/netplay-rollback.js`, `server/src/api/signaling.py` (debug-sync,
 debug-logs events), `server/src/api/app.py` (POST /api/session-log).

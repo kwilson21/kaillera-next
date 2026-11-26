@@ -745,11 +745,11 @@
 
   // ── Clean tab close ───────────────────────────────────────────────────
 
-  window.addEventListener('pagehide', () => {
-    // Flush session log via HTTP keepalive (survives page close)
+  window.addEventListener('pagehide', (event) => {
+    // A cached page can resume and drain its pending records.
     if (engine?.exportSyncLog) {
       try {
-        engine.flushSyncLog?.({ keepalive: true });
+        engine.flushSyncLog?.({ keepalive: !event.persisted });
       } catch (_) {}
     }
     // Notify peers this is intentional so they skip the 15s reconnect wait

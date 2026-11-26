@@ -1113,6 +1113,11 @@ done
 # (session_log_store_unrecorded; evictionIsRecordedTest). No flush adds more
 # than its bound of rows (rowsPerFlushBounded): VIOLATED with one row per run
 # and no bound (session_log_store_unbounded; alternatingLinesTest).
+for variant in session_log_page_exit_before session_log_page_exit_current; do
+  $QUINT test "$STORE" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$STORE" --main=session_log_page_exit_current --invariant=newestWasSubmitted \
+  --max-samples=1000 --max-steps=5 --backend="$BACKEND"
 $QUINT run "$STORE" --main=session_log_store_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 

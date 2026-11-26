@@ -138,7 +138,7 @@
     const boundary = window.KNCore.protocol.createBoundary((line) => console.warn(line));
     let token = config.uploadToken;
     const started = performance.now();
-    return _rules.startLogUpload(_syncLogRing, async (epoch, entries, keepalive) => {
+    return _rules.startLogUpload(_syncLogRing, async (epoch, entries, mode) => {
       if (_config === config && KNState.uploadToken) token = KNState.uploadToken;
       const payload = {
         matchId,
@@ -149,7 +149,7 @@
         entries,
         summary: { duration_sec: Math.round((performance.now() - started) / 1000) },
       };
-      if (!keepalive && connection.connected) {
+      if (mode === 'regular' && connection.connected) {
         const ack = await new Promise((resolve) => {
           connection.timeout(4000).emit('session-log', payload, (err, value) => resolve(err ? null : value));
         });
@@ -157,17 +157,15 @@
         if (accepted) return accepted.lastSeq;
       }
       if (!token || !room) return -1;
-      const body = JSON.stringify(payload);
-      // An individual oversized line still belongs in the log. The normal
-      // HTTP path can carry it while the page remains open.
-      const canKeepAlive = keepalive && new Blob([body]).size <= 60 * 1024;
+      const body = mode === 'exit' ? window.KNCore.sessionLogKeepaliveBody(payload, 'exit') : JSON.stringify(payload);
+      if (body === null) return -1;
       const response = await fetch(
         `/api/session-log?token=${encodeURIComponent(token)}&room=${encodeURIComponent(room)}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body,
-          keepalive: canKeepAlive,
+          keepalive: mode === 'exit',
         },
       );
       if (!response.ok) return -1;

@@ -352,3 +352,40 @@ module session_log_store_unbounded {
 module session_log_store_current {
   import session_log_store(SPLIT = "runs", RECORD = true, BOUND = true).*
 }
+
+// A keepalive already submitted can reach the collector after the document
+// goes away. Only a live document can start another request after an ack.
+module session_log_page_exit {
+  const NEWEST: bool
+  pure val PENDING = 0.to(5)
+  pure val CAPACITY = 2
+  var alive: bool
+  var submitted: Set[int]
+  var delivered: Set[int]
+
+  action init = all { alive' = true, submitted' = Set(), delivered' = Set() }
+  action pagehide = all {
+    alive, submitted == Set(),
+    alive' = alive,
+    submitted' = PENDING.filter(n => if (NEWEST) n >= PENDING.size() - CAPACITY else n < CAPACITY),
+    delivered' = delivered,
+  }
+  action destroy = all { alive, alive' = false, submitted' = submitted, delivered' = delivered }
+  action collect = all { alive' = alive, submitted' = submitted, delivered' = submitted }
+  action step = any { pagehide, destroy, collect }
+
+  val newestWasSubmitted = submitted != Set() implies
+    (submitted.contains(5) and submitted.size() <= CAPACITY)
+
+  run delayedCollectorTest =
+    init.then(pagehide).then(destroy).then(collect)
+      .expect(delivered.contains(5) == NEWEST and delivered.size() == CAPACITY)
+}
+
+module session_log_page_exit_before {
+  import session_log_page_exit(NEWEST = false).*
+}
+
+module session_log_page_exit_current {
+  import session_log_page_exit(NEWEST = true).*
+}
