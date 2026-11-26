@@ -1,0 +1,1164 @@
+{
+  "requirements": [
+    {
+      "id": "FR-room",
+      "counterpart": "DP-room"
+    },
+    {
+      "id": "FR-roster",
+      "counterpart": "DP-roster"
+    },
+    {
+      "id": "FR-session",
+      "counterpart": "DP-session"
+    },
+    {
+      "id": "FR-peers",
+      "counterpart": "DP-peers"
+    },
+    {
+      "id": "FR-delivery",
+      "counterpart": "DP-delivery"
+    },
+    {
+      "id": "FR-boot",
+      "counterpart": "DP-boot"
+    },
+    {
+      "id": "FR-execution",
+      "counterpart": "DP-execution"
+    },
+    {
+      "id": "FR-replay",
+      "counterpart": "DP-replay"
+    },
+    {
+      "id": "FR-pacing",
+      "counterpart": "DP-pacing"
+    },
+    {
+      "id": "FR-recovery",
+      "counterpart": "DP-recovery"
+    },
+    {
+      "id": "FR-admission",
+      "counterpart": "DP-admission"
+    },
+    {
+      "id": "FR-spectators",
+      "counterpart": "DP-spectators"
+    },
+    {
+      "id": "FR-presentation",
+      "counterpart": "DP-presentation"
+    },
+    {
+      "id": "FR-diagnostics",
+      "counterpart": "DP-diagnostics"
+    }
+  ],
+  "parameters": [
+    "DP-room",
+    "DP-roster",
+    "DP-session",
+    "DP-peers",
+    "DP-delivery",
+    "DP-boot",
+    "DP-execution",
+    "DP-replay",
+    "DP-pacing",
+    "DP-recovery",
+    "DP-admission",
+    "DP-spectators",
+    "DP-presentation",
+    "DP-diagnostics"
+  ],
+  "evidence": {
+    "room-join": {
+      "path": "server/src/api/signaling.py",
+      "anchor": "async def join_room(",
+      "line": 1307,
+      "coverage": [
+        "tests/test_room_logic.py",
+        "specs/room_lifecycle.qnt"
+      ]
+    },
+    "room-start": {
+      "path": "server/src/api/signaling.py",
+      "anchor": "async def start_game(",
+      "line": 1588,
+      "coverage": [
+        "tests/test_room_logic.py",
+        "specs/room_lifecycle.qnt"
+      ]
+    },
+    "room-host-deadline": {
+      "path": "server/src/api/signaling.py",
+      "anchor": "async def _close_host_timeout(",
+      "line": 770,
+      "coverage": [
+        "tests/test_host_reload.py",
+        "specs/room_lifecycle.qnt"
+      ]
+    },
+    "room-host-departure": {
+      "path": "server/src/api/signaling.py",
+      "anchor": "async def _remove_member(",
+      "line": 890,
+      "coverage": [
+        "tests/test_signaling_reconnect.py",
+        "specs/room_owner_seat.qnt"
+      ]
+    },
+    "seat-assignment": {
+      "path": "server/src/api/signaling.py",
+      "anchor": "def arrange_lobby_seats(",
+      "line": 367,
+      "coverage": [
+        "tests/test_roster.py",
+        "specs/room_owner_seat.qnt"
+      ]
+    },
+    "watch-role": {
+      "path": "server/src/api/signaling.py",
+      "anchor": "async def claim_slot(",
+      "line": 1455,
+      "coverage": [
+        "tests/test_roster.py",
+        "specs/room_lifecycle.qnt"
+      ]
+    },
+    "signal-relay": {
+      "path": "server/src/api/signaling.py",
+      "anchor": "async def webrtc_signal(",
+      "line": 2183,
+      "coverage": [
+        "tests/ts/peer-signaling.test.ts",
+        "specs/peer_identity.qnt"
+      ]
+    },
+    "session-machine": {
+      "path": "web/src/session.ts",
+      "anchor": "export const sessionMachine =",
+      "line": 65,
+      "coverage": [
+        "tests/ts/session.test.ts",
+        "specs/room_lifecycle.qnt"
+      ]
+    },
+    "rejoin-page": {
+      "path": "web/static/play.js",
+      "anchor": "const _reconcileAfterRejoin =",
+      "line": 1041,
+      "coverage": [
+        "tests/ts/host-return.test.ts",
+        "tests/lifecycle-e2e.mjs"
+      ]
+    },
+    "peer-machine": {
+      "path": "web/src/peer-connection.ts",
+      "anchor": "export const peerConnectionMachine =",
+      "line": 501,
+      "coverage": [
+        "tests/ts/peer-connection.test.ts",
+        "specs/peer_connection.qnt"
+      ]
+    },
+    "stream-offer": {
+      "path": "web/src/streaming/roster.ts",
+      "anchor": "export const hostRosterPlan =",
+      "line": 83,
+      "coverage": [
+        "tests/ts/streaming-roster.test.ts",
+        "specs/streaming_connection.qnt"
+      ]
+    },
+    "channel-send": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _sendFrameInput =",
+      "line": 16507,
+      "coverage": [
+        "tests/ts/rollback-input-transport.test.ts",
+        "tests/rb-two-player.mjs"
+      ]
+    },
+    "channel-receive": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _processInputPacket =",
+      "line": 11089,
+      "coverage": [
+        "tests/ts/rollback-input-transport.test.ts",
+        "specs/resync_inputs.qnt"
+      ]
+    },
+    "optional-close": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const resetPeerRollbackTransport =",
+      "line": 12434,
+      "coverage": [
+        "tests/ts/rollback-input-transport.test.ts",
+        "specs/tick_deadlines.qnt"
+      ]
+    },
+    "boot-machine": {
+      "path": "web/src/play/emulator-boot.ts",
+      "anchor": "export const emulatorBootMachine =",
+      "line": 7,
+      "coverage": [
+        "tests/ts/emulator-boot.test.ts",
+        "specs/emulator_boot.qnt",
+        "tests/test_emulator_boot_sequence.py"
+      ]
+    },
+    "boot-page": {
+      "path": "web/static/play.js",
+      "anchor": "const bootEmulator =",
+      "line": 3253,
+      "coverage": [
+        "tests/test_emulator_boot_sequence.py",
+        "specs/emulator_boot.qnt"
+      ]
+    },
+    "engine-start": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const startLockstep =",
+      "line": 16649,
+      "coverage": [
+        "tests/ts/rollback-lockstep-ownership.test.ts",
+        "specs/engine_start.qnt"
+      ]
+    },
+    "stream-core": {
+      "path": "web/static/netplay-streaming.js",
+      "anchor": "const startHost =",
+      "line": 1103,
+      "coverage": [
+        "tests/test_streaming_late_join.py",
+        "tests/test_streaming_reconnect.py"
+      ]
+    },
+    "stream-input": {
+      "path": "web/static/netplay-streaming.js",
+      "anchor": "const startHostInputLoop =",
+      "line": 1259,
+      "coverage": [
+        "tests/ts/streaming-input.test.ts",
+        "tests/test_streaming_input_packet.py"
+      ]
+    },
+    "native-tick": {
+      "path": "build/kn_rollback/kn_rollback.c",
+      "anchor": "int kn_pre_tick(",
+      "line": 1586,
+      "coverage": [
+        "tests/rollback-native/test_solo_save.py",
+        "tests/rb-two-player.mjs"
+      ]
+    },
+    "native-input": {
+      "path": "build/kn_rollback/kn_rollback.c",
+      "anchor": "int kn_feed_input(",
+      "line": 1423,
+      "coverage": [
+        "tests/rollback-native/test_stale_prediction_flag.py",
+        "specs/reconnect_inputs.qnt"
+      ]
+    },
+    "native-frame-authority": {
+      "path": "build/kn_rollback/kn_rollback.c",
+      "anchor": "void kn_set_frame(",
+      "line": 3215,
+      "coverage": [
+        "tests/rollback-native/test_ring_after_resync.py",
+        "specs/ring_after_resync.qnt"
+      ]
+    },
+    "peer-reset": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const resetPeerState =",
+      "line": 12523,
+      "coverage": [
+        "tests/ts/peer-reset.test.ts",
+        "specs/reconnect_inputs.qnt"
+      ]
+    },
+    "close-primary": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _handlePeerDisconnect =",
+      "line": 12646,
+      "coverage": [
+        "tests/ts/peer-reconnect-runtime.test.ts",
+        "specs/reconnect_proof.qnt"
+      ]
+    },
+    "peer-ejection": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const hardDisconnectPeer =",
+      "line": 12716,
+      "coverage": [
+        "tests/test_roster.py",
+        "specs/recovery_delivery.qnt",
+        "tests/rb-mesh.mjs"
+      ]
+    },
+    "roster-cut": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _hostRosterCut =",
+      "line": 6370,
+      "coverage": [
+        "tests/ts/controller-mask-engine.test.ts",
+        "specs/removed_input.qnt",
+        "tests/rb-mesh.mjs"
+      ]
+    },
+    "roster-frame-mask": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _applyControllerMaskForStep =",
+      "line": 6531,
+      "coverage": [
+        "tests/ts/controller-mask-engine.test.ts",
+        "specs/controller_mask.qnt"
+      ]
+    },
+    "tick": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const tick = () =>",
+      "line": 18187,
+      "coverage": [
+        "tests/rb-two-player.mjs",
+        "tests/rb-mesh.mjs",
+        "specs/tick_deadlines.qnt"
+      ]
+    },
+    "freeze-credit": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _creditLocalFreeze =",
+      "line": 18157,
+      "coverage": [
+        "tests/test_rollback_health_source.py",
+        "specs/tick_deadlines.qnt"
+      ]
+    },
+    "recovery-apply": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const applySyncState =",
+      "line": 22284,
+      "coverage": [
+        "tests/ts/recovery-apply-boundary.test.ts",
+        "specs/recovery_apply_boundary.qnt"
+      ]
+    },
+    "busy-replay": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _replayBlocksSyncApply =",
+      "line": 17825,
+      "coverage": [
+        "tests/rollback-native/test_ring_after_resync.py",
+        "specs/resync_flow.qnt"
+      ]
+    },
+    "recovery-actor": {
+      "path": "web/src/recovery-delivery.ts",
+      "anchor": "export const recoveryMachine =",
+      "line": 45,
+      "coverage": [
+        "tests/ts/recovery-delivery.test.ts",
+        "specs/recovery_delivery.qnt"
+      ]
+    },
+    "recovery-request": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _checkResyncRequestDeadline =",
+      "line": 7534,
+      "coverage": [
+        "tests/ts/resync-request.test.ts",
+        "specs/resync_reask.qnt"
+      ]
+    },
+    "recovery-detect": {
+      "path": "web/src/page/desync-detector.ts",
+      "anchor": "export const createDesyncDetector =",
+      "line": 215,
+      "coverage": [
+        "tests/ts/desync-confirm.test.ts",
+        "specs/desync_digest.qnt"
+      ]
+    },
+    "admission-send": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "async function sendLateJoinState(",
+      "line": 14718,
+      "coverage": [
+        "tests/lifecycle-e2e.mjs",
+        "specs/late_join_pause.qnt"
+      ]
+    },
+    "admission-load": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const handleLateJoinState =",
+      "line": 14968,
+      "coverage": [
+        "tests/ts/late-join-input-bridge.test.ts",
+        "specs/late_join_input_agreement.qnt"
+      ]
+    },
+    "admission-release": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const resumeLateJoinPause =",
+      "line": 9556,
+      "coverage": [
+        "tests/ts/late-join-drop-ready.test.ts",
+        "specs/late_join_pause.qnt"
+      ]
+    },
+    "admission-wait": {
+      "path": "web/src/late-join-wait.ts",
+      "anchor": "export const lateJoinWait =",
+      "line": 36,
+      "coverage": [
+        "tests/ts/late-join-wait.test.ts",
+        "specs/room_lifecycle.qnt"
+      ]
+    },
+    "spectator-track": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const startSpectatorStream =",
+      "line": 15351,
+      "coverage": [
+        "tests/ts/spectator-publication.test.ts",
+        "specs/spectator_publication.qnt"
+      ]
+    },
+    "spectator-playback": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const showSpectatorVideo =",
+      "line": 15393,
+      "coverage": [
+        "tests/lifecycle-e2e.mjs",
+        "tests/ts/spectator-publication.test.ts"
+      ]
+    },
+    "audio-output": {
+      "path": "web/src/page/audio.ts",
+      "anchor": "export const startAudio =",
+      "line": 286,
+      "coverage": [
+        "tests/ts/page-audio.test.ts",
+        "tests/test_audio_recovery.py"
+      ]
+    },
+    "replay-output": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _setReplayFullHeadless =",
+      "line": 16115,
+      "coverage": [
+        "tests/rb-two-player.mjs",
+        "tests/rollback-native/test_replay_preemption.py"
+      ]
+    },
+    "log-ingest": {
+      "path": "server/src/api/signaling.py",
+      "anchor": "async def session_log_handler(",
+      "line": 2556,
+      "coverage": [
+        "tests/test_session_logging.py",
+        "specs/session_log_store.qnt"
+      ]
+    },
+    "log-pagehide": {
+      "path": "web/static/play.js",
+      "anchor": "window.addEventListener('pagehide',",
+      "line": 748,
+      "coverage": [
+        "tests/ts/rollback-session-log.test.ts"
+      ]
+    },
+    "log-drain": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _flushFinalLog =",
+      "line": 7250,
+      "coverage": [
+        "tests/ts/rollback-session-log.test.ts",
+        "tests/test_session_log_flush_e2e.py"
+      ]
+    },
+    "peer-wait-reset": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const clearPeerStallTimers = (slot) => {",
+      "line": 12425,
+      "coverage": [
+        "tests/ts/peer-reset.test.ts",
+        "specs/tick_deadlines.qnt"
+      ]
+    },
+    "resync-replay-step": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _syncApplyReplayStep =",
+      "line": 17835,
+      "coverage": [
+        "tests/ts/resync-replay-boundary.test.ts",
+        "specs/resync_flow.qnt"
+      ]
+    },
+    "late-join-serve-owner": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const ownsServe = () =>",
+      "line": 14764,
+      "coverage": [
+        "tests/ts/late-join-serve-failure.test.ts",
+        "specs/late_join_pause.qnt"
+      ]
+    },
+    "roster-prelude-owner": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "Roster preludes belong to the selected ordered channel.",
+      "line": 11412,
+      "coverage": [
+        "tests/ts/controller-mask-rule.test.ts",
+        "specs/controller_mask.qnt"
+      ]
+    },
+    "optional-native-log-stats": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _buildRollbackStats =",
+      "line": 7092,
+      "coverage": [
+        "tests/ts/rollback-session-log.test.ts",
+        "specs/session_log_store.qnt"
+      ]
+    }
+  },
+  "baseline": {
+    "revision": "a1bf02c98bf427ab5d1f7a053ae42d027bbf35ed",
+    "entries": [
+      {
+        "fr": "FR-room",
+        "dp": "DP-room",
+        "kind": "necessary",
+        "mechanism": "The server admits members, authorizes a start, and closes or resumes the room and match on authoritative host transitions.",
+        "evidence": [
+          "room-join",
+          "room-start",
+          "room-host-deadline"
+        ]
+      },
+      {
+        "fr": "FR-room",
+        "dp": "DP-roster",
+        "kind": "necessary",
+        "mechanism": "Host removal branches on slot zero; lobby seat rearrangement follows removal while active seats retain the match’s controller identity.",
+        "evidence": [
+          "room-host-departure",
+          "seat-assignment"
+        ]
+      },
+      {
+        "fr": "FR-roster",
+        "dp": "DP-roster",
+        "kind": "necessary",
+        "mechanism": "Server seat and role assignment supplies persistent identities; the host broadcasts frame-tagged controller cuts and the engine files the mask used for those frames.",
+        "evidence": [
+          "seat-assignment",
+          "watch-role",
+          "roster-cut",
+          "roster-frame-mask"
+        ]
+      },
+      {
+        "fr": "FR-roster",
+        "dp": "DP-room",
+        "kind": "necessary",
+        "mechanism": "Match phase determines whether the server preserves an in-game reservation or permits lobby seat reassignment.",
+        "evidence": [
+          "room-host-departure",
+          "seat-assignment"
+        ]
+      },
+      {
+        "fr": "FR-roster",
+        "dp": "DP-admission",
+        "kind": "necessary",
+        "mechanism": "A player held outside the active group earns controller ownership through the host’s late-join completion and roster publication.",
+        "evidence": [
+          "admission-release",
+          "roster-frame-mask"
+        ]
+      },
+      {
+        "fr": "FR-roster",
+        "dp": "DP-peers",
+        "kind": "necessary",
+        "mechanism": "Exhausting primary peer recovery can remove a peer from the active host roster and publish the corresponding cut.",
+        "evidence": [
+          "close-primary",
+          "peer-ejection",
+          "roster-cut"
+        ]
+      },
+      {
+        "fr": "FR-session",
+        "dp": "DP-session",
+        "kind": "necessary",
+        "mechanism": "The page machine chooses current session and pending/late/running transitions and reconciles the new socket with the current match.",
+        "evidence": [
+          "session-machine",
+          "rejoin-page"
+        ]
+      },
+      {
+        "fr": "FR-session",
+        "dp": "DP-room",
+        "kind": "necessary",
+        "mechanism": "Join and match messages select the session’s match epoch and route host return and match end.",
+        "evidence": [
+          "room-start",
+          "rejoin-page",
+          "session-machine"
+        ]
+      },
+      {
+        "fr": "FR-peers",
+        "dp": "DP-peers",
+        "kind": "necessary",
+        "mechanism": "Attempt-owned peer state controls offers, answers and healing; relay routes only the current identities.",
+        "evidence": [
+          "peer-machine",
+          "signal-relay",
+          "stream-offer"
+        ]
+      },
+      {
+        "fr": "FR-peers",
+        "dp": "DP-roster",
+        "kind": "necessary",
+        "mechanism": "Native offer ownership depends on slot ordering; streaming assigns the offer to the slot-zero host.",
+        "evidence": [
+          "peer-machine",
+          "stream-offer"
+        ]
+      },
+      {
+        "fr": "FR-delivery",
+        "dp": "DP-delivery",
+        "kind": "necessary",
+        "mechanism": "Transport policy chooses reliable plus optional unordered delivery, and applies fallback and duplicate admission on the same input protocol.",
+        "evidence": [
+          "channel-send",
+          "channel-receive",
+          "optional-close"
+        ]
+      },
+      {
+        "fr": "FR-delivery",
+        "dp": "DP-peers",
+        "kind": "necessary",
+        "mechanism": "The active channel and connection attempt fence input from retired connections and provide the carrier for both stream types.",
+        "evidence": [
+          "channel-receive",
+          "optional-close",
+          "peer-machine"
+        ]
+      },
+      {
+        "fr": "FR-boot",
+        "dp": "DP-boot",
+        "kind": "necessary",
+        "mechanism": "A cancellable Effect owned by the emulator boot machine loads the current core and resolves the current boot.",
+        "evidence": [
+          "boot-machine",
+          "boot-page"
+        ]
+      },
+      {
+        "fr": "FR-boot",
+        "dp": "DP-session",
+        "kind": "necessary",
+        "mechanism": "Page lifecycle selects whether this boot belongs to the running match, a wait, or a replacement that cancels the old boot.",
+        "evidence": [
+          "boot-page",
+          "session-machine"
+        ]
+      },
+      {
+        "fr": "FR-execution",
+        "dp": "DP-execution",
+        "kind": "necessary",
+        "mechanism": "The C pre/step/post boundary owns native advancement; streaming instead owns one host emulator and applies remote input there.",
+        "evidence": [
+          "native-tick",
+          "engine-start",
+          "stream-core",
+          "stream-input"
+        ]
+      },
+      {
+        "fr": "FR-execution",
+        "dp": "DP-boot",
+        "kind": "necessary",
+        "mechanism": "Execution is armed only once the selected, compatible emulator is available.",
+        "evidence": [
+          "boot-machine",
+          "engine-start"
+        ]
+      },
+      {
+        "fr": "FR-execution",
+        "dp": "DP-replay",
+        "kind": "necessary",
+        "mechanism": "When the C timeline returns replay work, the JS runner executes corrected history before continuing live advancement.",
+        "evidence": [
+          "native-tick",
+          "replay-output"
+        ]
+      },
+      {
+        "fr": "FR-execution",
+        "dp": "DP-pacing",
+        "kind": "necessary",
+        "mechanism": "The tick loop admits normal steps according to readiness and input progress; externally blocked waits have deadlines.",
+        "evidence": [
+          "tick",
+          "freeze-credit"
+        ]
+      },
+      {
+        "fr": "FR-execution",
+        "dp": "DP-roster",
+        "kind": "necessary",
+        "mechanism": "The controller mask is selected for the input tag consumed by each kind of step, including replay.",
+        "evidence": [
+          "roster-frame-mask"
+        ]
+      },
+      {
+        "fr": "FR-execution",
+        "dp": "DP-recovery",
+        "kind": "necessary",
+        "mechanism": "State apply installs the authoritative emulator bytes and timeline tag before a local step resumes.",
+        "evidence": [
+          "recovery-apply",
+          "native-frame-authority"
+        ]
+      },
+      {
+        "fr": "FR-replay",
+        "dp": "DP-replay",
+        "kind": "necessary",
+        "mechanism": "C owns input predictions and replays a retained snapshot when the actual input differs.",
+        "evidence": [
+          "native-input",
+          "native-tick"
+        ]
+      },
+      {
+        "fr": "FR-replay",
+        "dp": "DP-peers",
+        "kind": "necessary",
+        "mechanism": "A real replacement changes the JS frontier and can reset native slot history; same-owner safe reconnect preserves predictions.",
+        "evidence": [
+          "close-primary",
+          "peer-reset",
+          "native-input"
+        ]
+      },
+      {
+        "fr": "FR-replay",
+        "dp": "DP-roster",
+        "kind": "necessary",
+        "mechanism": "A late controller cut reinterprets retained input history at its effective frame and can trigger re-execution.",
+        "evidence": [
+          "roster-cut",
+          "roster-frame-mask"
+        ]
+      },
+      {
+        "fr": "FR-replay",
+        "dp": "DP-recovery",
+        "kind": "necessary",
+        "mechanism": "Applying an authoritative state invalidates the ring baseline, can preempt pending replay, and reconciles the input floor.",
+        "evidence": [
+          "recovery-apply",
+          "native-frame-authority",
+          "busy-replay"
+        ]
+      },
+      {
+        "fr": "FR-pacing",
+        "dp": "DP-pacing",
+        "kind": "necessary",
+        "mechanism": "Tick owns deadline checks, slot/frame wait identity, freeze credits, and the decision to advance or release a wait.",
+        "evidence": [
+          "tick",
+          "freeze-credit"
+        ]
+      },
+      {
+        "fr": "FR-pacing",
+        "dp": "DP-peers",
+        "kind": "necessary",
+        "mechanism": "The primary host connection gates progress during a host reservation. A full peer reset also clears the shared input waits, even where a surviving peer was the blocker.",
+        "evidence": [
+          "tick",
+          "peer-reset"
+        ]
+      },
+      {
+        "fr": "FR-pacing",
+        "dp": "DP-replay",
+        "kind": "necessary",
+        "mechanism": "Replay depth, prediction window, and retained inputs constrain how far the page can advance safely.",
+        "evidence": [
+          "tick",
+          "native-tick",
+          "native-input"
+        ]
+      },
+      {
+        "fr": "FR-pacing",
+        "dp": "DP-recovery",
+        "kind": "necessary",
+        "mechanism": "State held for coordinated application gates progress, while repair completion and the applied input floor release waits.",
+        "evidence": [
+          "tick",
+          "recovery-apply"
+        ]
+      },
+      {
+        "fr": "FR-pacing",
+        "dp": "DP-admission",
+        "kind": "necessary",
+        "mechanism": "The host’s admission pause freezes already-running pages; resume or deadline expiration reanchors pacing.",
+        "evidence": [
+          "admission-send",
+          "admission-release",
+          "tick"
+        ]
+      },
+      {
+        "fr": "FR-pacing",
+        "dp": "DP-delivery",
+        "kind": "accidental",
+        "mechanism": "Closing a spare input channel directly clears both wait clocks even when the primary channel survives or the wait concerns another player.",
+        "evidence": [
+          "optional-close"
+        ]
+      },
+      {
+        "fr": "FR-recovery",
+        "dp": "DP-recovery",
+        "kind": "necessary",
+        "mechanism": "Digest splits and overdue input trigger a bounded, numbered host state transfer, with settlement and retry per recipient.",
+        "evidence": [
+          "recovery-detect",
+          "recovery-request",
+          "recovery-actor",
+          "recovery-apply"
+        ]
+      },
+      {
+        "fr": "FR-recovery",
+        "dp": "DP-replay",
+        "kind": "necessary",
+        "mechanism": "Capture and install are fenced against pending rollback; a bounded deferral can explicitly drop replay before installation.",
+        "evidence": [
+          "busy-replay",
+          "native-frame-authority",
+          "recovery-apply"
+        ]
+      },
+      {
+        "fr": "FR-recovery",
+        "dp": "DP-pacing",
+        "kind": "necessary",
+        "mechanism": "The tick checks answer and coordinated dispatch deadlines and credits page-local freezes before processing them.",
+        "evidence": [
+          "tick",
+          "freeze-credit",
+          "recovery-request"
+        ]
+      },
+      {
+        "fr": "FR-recovery",
+        "dp": "DP-peers",
+        "kind": "necessary",
+        "mechanism": "A primary connection loss and reconnect arm answer debt; stale attempts must not discharge that debt.",
+        "evidence": [
+          "close-primary",
+          "peer-reset",
+          "recovery-actor"
+        ]
+      },
+      {
+        "fr": "FR-recovery",
+        "dp": "DP-roster",
+        "kind": "necessary",
+        "mechanism": "Which slots must settle, and whether a removed player’s cut needs replay or host state, depend on the effective roster.",
+        "evidence": [
+          "roster-cut",
+          "recovery-actor",
+          "recovery-apply"
+        ]
+      },
+      {
+        "fr": "FR-admission",
+        "dp": "DP-admission",
+        "kind": "necessary",
+        "mechanism": "The host serves a per-joiner snapshot and input bridge, then waits for readiness or releases the pause on deadline.",
+        "evidence": [
+          "admission-send",
+          "admission-load",
+          "admission-release",
+          "admission-wait"
+        ]
+      },
+      {
+        "fr": "FR-admission",
+        "dp": "DP-session",
+        "kind": "necessary",
+        "mechanism": "The session chooses starter versus late joiner, gives a wait a match identity, and ends that wait on replacement.",
+        "evidence": [
+          "session-machine",
+          "admission-wait"
+        ]
+      },
+      {
+        "fr": "FR-admission",
+        "dp": "DP-roster",
+        "kind": "necessary",
+        "mechanism": "Admission snapshots and installs source slots and their controller masks to attach the joiner to the same input timeline.",
+        "evidence": [
+          "admission-load",
+          "roster-frame-mask"
+        ]
+      },
+      {
+        "fr": "FR-admission",
+        "dp": "DP-pacing",
+        "kind": "necessary",
+        "mechanism": "A join snapshot has a host frame boundary and the serving host pauses progression until its admission barrier is released.",
+        "evidence": [
+          "admission-send",
+          "admission-release",
+          "tick"
+        ]
+      },
+      {
+        "fr": "FR-admission",
+        "dp": "DP-recovery",
+        "kind": "necessary",
+        "mechanism": "Loss of the original input bridge can settle only after an aligned host state is applied.",
+        "evidence": [
+          "admission-load",
+          "recovery-apply"
+        ]
+      },
+      {
+        "fr": "FR-spectators",
+        "dp": "DP-spectators",
+        "kind": "necessary",
+        "mechanism": "The host negotiates and publishes video to spectators without a simulated slot; the watcher binds the resulting stream.",
+        "evidence": [
+          "spectator-track",
+          "spectator-playback"
+        ]
+      },
+      {
+        "fr": "FR-spectators",
+        "dp": "DP-room",
+        "kind": "necessary",
+        "mechanism": "The match host and running epoch own spectator publication and its teardown on host departure.",
+        "evidence": [
+          "room-host-deadline",
+          "spectator-track",
+          "spectator-playback"
+        ]
+      },
+      {
+        "fr": "FR-spectators",
+        "dp": "DP-roster",
+        "kind": "necessary",
+        "mechanism": "Server watch and claim-slot roles select video-only participation versus active controller ownership.",
+        "evidence": [
+          "watch-role",
+          "spectator-track"
+        ]
+      },
+      {
+        "fr": "FR-spectators",
+        "dp": "DP-peers",
+        "kind": "necessary",
+        "mechanism": "Media attaches to the spectator’s current peer connection and is renegotiated independently from player input.",
+        "evidence": [
+          "spectator-track",
+          "stream-offer"
+        ]
+      },
+      {
+        "fr": "FR-spectators",
+        "dp": "DP-presentation",
+        "kind": "necessary",
+        "mechanism": "The host publishes a captured canvas and audio stream; missing output prevents successful publication.",
+        "evidence": [
+          "spectator-track",
+          "audio-output"
+        ]
+      },
+      {
+        "fr": "FR-presentation",
+        "dp": "DP-presentation",
+        "kind": "necessary",
+        "mechanism": "The audio pipeline buffers PCM and the video paths display local canvas output or the incoming host track.",
+        "evidence": [
+          "audio-output",
+          "spectator-playback"
+        ]
+      },
+      {
+        "fr": "FR-presentation",
+        "dp": "DP-execution",
+        "kind": "necessary",
+        "mechanism": "Visible local output comes from committed emulator steps; a streaming viewer displays the single host emulator’s output.",
+        "evidence": [
+          "native-tick",
+          "stream-core",
+          "audio-output"
+        ]
+      },
+      {
+        "fr": "FR-presentation",
+        "dp": "DP-replay",
+        "kind": "necessary",
+        "mechanism": "Headless replay gates audio/video side effects while retaining live output for normal work.",
+        "evidence": [
+          "replay-output",
+          "audio-output"
+        ]
+      },
+      {
+        "fr": "FR-diagnostics",
+        "dp": "DP-diagnostics",
+        "kind": "necessary",
+        "mechanism": "The page batches final events and the server admits chunks through match- and sequence-scoped ingestion.",
+        "evidence": [
+          "log-drain",
+          "log-ingest"
+        ]
+      },
+      {
+        "fr": "FR-diagnostics",
+        "dp": "DP-session",
+        "kind": "accidental",
+        "mechanism": "The teardown trigger can destroy the uploader before it resumes after the first acknowledgement; the live-page drain depends on that continuation.",
+        "evidence": [
+          "log-drain",
+          "log-pagehide"
+        ]
+      }
+    ]
+  },
+  "changes": {
+    "add": [
+      {
+        "fr": "FR-pacing",
+        "dp": "DP-peers",
+        "kind": "necessary",
+        "mechanism": "The primary host connection gates frame progression during the host reservation. A full peer reset invalidates only the input wait for the affected slot.",
+        "evidence": [
+          "tick",
+          "peer-reset",
+          "peer-wait-reset"
+        ]
+      },
+      {
+        "fr": "FR-replay",
+        "dp": "DP-recovery",
+        "kind": "necessary",
+        "mechanism": "A successful native snapshot write can preempt pending replay after the bounded wait. Commit aligns the frame, invalidates the ring baseline, and reconciles the input floor.",
+        "evidence": [
+          "recovery-apply",
+          "native-frame-authority",
+          "resync-replay-step"
+        ]
+      },
+      {
+        "fr": "FR-recovery",
+        "dp": "DP-replay",
+        "kind": "necessary",
+        "mechanism": "Snapshot capture respects replay. Install waits for its frame and checks eligibility and buffer readiness before considering replay preemption. Native rejection preserves replay.",
+        "evidence": [
+          "resync-replay-step",
+          "native-frame-authority",
+          "recovery-apply"
+        ]
+      },
+      {
+        "fr": "FR-roster",
+        "dp": "DP-admission",
+        "kind": "necessary",
+        "mechanism": "Host admission completion and roster publication grant controller ownership. Failure can release only a pending slot still owned by its serve.",
+        "evidence": [
+          "admission-release",
+          "roster-frame-mask",
+          "late-join-serve-owner"
+        ]
+      },
+      {
+        "fr": "FR-roster",
+        "dp": "DP-peers",
+        "kind": "necessary",
+        "mechanism": "Exhausting primary peer recovery can publish a controller cut. The selected host channel carries mask announcements and cuts until its roster consumes them.",
+        "evidence": [
+          "close-primary",
+          "peer-ejection",
+          "roster-cut",
+          "roster-prelude-owner"
+        ]
+      },
+      {
+        "fr": "FR-diagnostics",
+        "dp": "DP-diagnostics",
+        "kind": "necessary",
+        "mechanism": "The page batches buffered events and the server ingests them by match and sequence. Live native counters are optional enrichment.",
+        "evidence": [
+          "log-drain",
+          "log-ingest",
+          "optional-native-log-stats"
+        ]
+      }
+    ],
+    "remove": [
+      {
+        "fr": "FR-pacing",
+        "dp": "DP-delivery"
+      },
+      {
+        "fr": "FR-diagnostics",
+        "dp": "DP-session"
+      },
+      {
+        "fr": "FR-pacing",
+        "dp": "DP-peers"
+      },
+      {
+        "fr": "FR-replay",
+        "dp": "DP-recovery"
+      },
+      {
+        "fr": "FR-recovery",
+        "dp": "DP-replay"
+      },
+      {
+        "fr": "FR-roster",
+        "dp": "DP-admission"
+      },
+      {
+        "fr": "FR-roster",
+        "dp": "DP-peers"
+      },
+      {
+        "fr": "FR-diagnostics",
+        "dp": "DP-diagnostics"
+      }
+    ]
+  }
+}

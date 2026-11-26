@@ -4,6 +4,9 @@ Every diagram here is generated from the code or the model it describes and chec
 `npm run check`, so none can drift from its source. To change one, change the source and
 run the generator named beside it.
 
+For dependencies between functional requirements and their implementation owners, see the
+[axiomatic design audit](architecture/axiomatic-design.md).
+
 ## State machines
 
 | Diagram | What it covers | Source | Generator |
