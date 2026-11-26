@@ -761,6 +761,7 @@ done
 
 # ── The escalation push as a transfer that takes time ────────────────────
 ESCP=specs/escalation_push.qnt
+$QUINT test "$ESCP" --main=recovery_wake_visibility --backend="$BACKEND"
 for variant in escalation_clock_before escalation_clock_fixed; do
   $QUINT test "$ESCP" --main="$variant" --backend="$BACKEND"
 done

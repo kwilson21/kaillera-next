@@ -16,7 +16,7 @@ interface ClockFixture {
   begin: () => void;
   step: (ms: number, frames: boolean) => void;
   history: () => number[];
-  pause: (value: boolean) => void;
+  pause: (value: boolean, at?: number) => void;
   stop: () => void;
 }
 function fixture(): ClockFixture {
@@ -32,6 +32,7 @@ function fixture(): ClockFixture {
     const SYNC_DECODE_GRACE_MS = 10000, RESYNC_REQUEST_TIMEOUT_MS = 8000, RESYNC_MAX_ASKS_AGAIN = 2;
     const LOCAL_FREEZE_CREDIT_MS = 1000, performance = {now: () => now};
     const document = {hidden: false}, window = {KNCore: {resyncRequest}}, _syncLog = () => {};
+    ${source.includes('  let _recoveryVisibilityChangedAt') ? '' : 'let _recoveryVisibilityChangedAt = 0;'}
     const scheduled = new Map(), calls = [];
     let timerId = 0;
     const setTimeout = (run, delay) => { scheduled.set(++timerId, { run, at: now + delay }); return timerId; };
@@ -50,7 +51,7 @@ function fixture(): ClockFixture {
         }
       },
       history: () => calls.slice(),
-      pause: (hidden) => { document.hidden = hidden; },
+      pause: (hidden, at = now) => { document.hidden = hidden; _recoveryVisibilityChangedAt = at; },
       stop: () => { _resyncRequestInFlight = false; },
     })
     `,
@@ -93,4 +94,14 @@ test('ending a request leaves its queued callback unable to retry', () => {
   clock.stop();
   for (let ms = 250; ms <= 25000; ms += 250) clock.step(ms, false);
   assert.deepEqual([...clock.history()], []);
+});
+
+test('showing a throttled tab does not credit its hidden interval', () => {
+  const clock = fixture();
+  clock.begin();
+  for (let ms = 250; ms <= 7500; ms += 250) clock.step(ms, false);
+  clock.pause(true, 7550);
+  clock.pause(false, 10000);
+  clock.step(10000, false);
+  assert.deepEqual([...clock.history()], [10000]);
 });

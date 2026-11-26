@@ -5624,13 +5624,17 @@
       }
       // A late wake measures a suspended browser independently of frame ticks.
       // Hidden pages can handle acknowledgements between throttled wakeups.
-      const gap = now - (blockedSince ?? previousWake);
+      const gap = _foregroundRecoveryGap(blockedSince ?? previousWake, now);
       blockedSince = null;
-      if (gap >= LOCAL_FREEZE_CREDIT_MS && !(typeof document !== 'undefined' && document.hidden)) {
-        _recovery.freeze(gap, now);
-        for (const sid in _syncChainMovedAt) _syncChainMovedAt[sid] = Math.min(now, _syncChainMovedAt[sid] + gap);
+      try {
+        if (gap >= LOCAL_FREEZE_CREDIT_MS) {
+          _recovery.freeze(gap, now);
+          for (const sid in _syncChainMovedAt) _syncChainMovedAt[sid] = Math.min(now, _syncChainMovedAt[sid] + gap);
+        }
+        _checkOverduePushes();
+      } catch (error) {
+        _syncLog(`recovery deadline wake failed: ${error}`);
       }
-      _checkOverduePushes();
     }, ESCALATION_CLOCK_INTERVAL_MS);
     _stopEscalationClock = stop;
   };
@@ -7611,6 +7615,13 @@
     _resyncDeadlineTimer = null;
   };
 
+  let _recoveryVisibilityChangedAt = 0;
+  // Count only the continuously visible part of a delayed wake.
+  const _foregroundRecoveryGap = (from, now) =>
+    typeof document !== 'undefined' && document.hidden
+      ? 0
+      : Math.max(0, now - Math.max(from, _recoveryVisibilityChangedAt));
+
   const _scheduleResyncDeadline = (requestId) => {
     _cancelResyncDeadline();
     const dueAt = performance.now() + RESYNC_DEADLINE_POLL_MS;
@@ -7621,8 +7632,8 @@
       // Credit a stalled browser, measured against this timer's own wakeup.
       // Hidden pages can process messages despite intentionally slower timers.
       const now = performance.now();
-      const lateBy = now - dueAt;
-      if (lateBy >= LOCAL_FREEZE_CREDIT_MS && !(typeof document !== 'undefined' && document.hidden)) {
+      const lateBy = _foregroundRecoveryGap(dueAt, now);
+      if (lateBy >= LOCAL_FREEZE_CREDIT_MS) {
         _resyncRequestSentAt = Math.min(now, _resyncRequestSentAt + lateBy);
       }
       if (
@@ -17430,6 +17441,7 @@
     };
 
     _visChangeHandler = () => {
+      _recoveryVisibilityChangedAt = performance.now();
       if (_phase !== PHASE_RUNNING) return;
       if (document.hidden) {
         _backgroundAt = Date.now();
