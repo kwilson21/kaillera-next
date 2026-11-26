@@ -240,7 +240,7 @@ const OLD_SCRIPT = `/**
       else if (state.label && state.label.kind === 'bad') text = 'Wrong guess — the opponent did something else.';
       else if (state.label && state.label.kind === 'replay')
         text = 'Rewinding and replaying from the last correct frame.';
-      else if (state.mode === 'lockstep') text = 'Lockstep: waiting for the opponent’s input every frame.';
+      else if (state.mode === 'lockstep') text = 'Classic: waiting for the opponent’s input every frame.';
       else text = 'Rollback: running ahead, predicting the opponent.';
       refs.caption.textContent = text;
     }

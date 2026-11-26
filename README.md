@@ -24,10 +24,10 @@ is disabled there.
 | Mode | How it plays |
 | --- | --- |
 | **Rollback** (default) | Up to four players run the emulator locally and exchange inputs over WebRTC. The GGPO-style rollback engine predicts missing inputs and replays frames when a prediction is wrong. |
-| **Lockstep** | Uses the same emulator and engine. Each frame waits for all players’ inputs before it runs. |
+| **Classic** | The original Kaillera feel. Each frame waits for all players’ inputs, with no rollback. |
 | **Streaming** | The host runs the emulator and sends live video and audio over WebRTC. Guests send their controller inputs back to the host. |
 
-Spectators can watch a live match. In Rollback and Lockstep, a player joining
+Spectators can watch a live match. In Rollback and Classic, a player joining
 mid-match loads the host’s emulator state before catching up.
 
 ### Controller support
@@ -56,7 +56,7 @@ DISABLE_HTTPS=1 just serve
 frontend bundles.
 
 Open <http://localhost:27888/> on the machine running the server. Rollback and
-Lockstep require cross-origin isolation for `SharedArrayBuffer`. The server
+Classic require cross-origin isolation for `SharedArrayBuffer`. The server
 sends the required headers on the play page, and browsers treat
 `http://localhost` as a secure context. Use trusted HTTPS when accessing the
 server from another device.

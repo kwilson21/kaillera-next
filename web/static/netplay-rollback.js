@@ -650,7 +650,7 @@
   // lockstep (config.lockstep), or toggled by the demo page.
   let _predictionsPaused = false;
   // The mode this page plays, as the logs and the info panel name it.
-  const _modeName = () => (_predictionsPaused ? 'lockstep' : 'rollback');
+  const _modeName = () => (_predictionsPaused ? 'classic' : 'rollback');
   // For the current apply frame, keep a separate wait start for each missing slot.
   // A slot's deadline can expire while another slot is still blocking the frame.
   let _lockstepWaitFrame = -1;

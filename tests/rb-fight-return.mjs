@@ -118,7 +118,7 @@ export async function checkFightReturn({ host, guest, baseUrl, room, out, mode, 
   const report = { passed: false };
   let returned;
   try {
-    assert.ok(['rollback', 'lockstep'].includes(mode), 'fight return expects rollback or lockstep');
+    assert.ok(['rollback', 'classic'].includes(mode), 'fight return expects Rollback or Classic');
     assert.equal(jitter, 20, 'the fight return acceptance scenario requires JITTER=20');
     const pingDelay = Number(process.env.FIGHT_RETURN_PING_DELAY_MS ?? 0);
     assert.ok(Number.isFinite(pingDelay) && pingDelay >= 0, 'FIGHT_RETURN_PING_DELAY_MS must be nonnegative');
@@ -232,7 +232,7 @@ export async function checkFightReturn({ host, guest, baseUrl, room, out, mode, 
       original.map((player) => player.pid),
     );
     assert.equal(saved.rom, original[0].rom);
-    assert.equal(saved.mode, mode);
+    assert.equal(saved.mode === 'lockstep' ? 'classic' : saved.mode, mode);
     assert.ok(saved.seal);
     const fight = reads.get(saved.frame);
     report.saved = { ...saved, fight };

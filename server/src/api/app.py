@@ -62,7 +62,7 @@ from src.api.og import (
     feature_enabled_for_host,
     inject_og_tags,
 )
-from src.api.payloads import FeedbackPayload
+from src.api.payloads import FeedbackPayload, canonical_game_mode
 from src.api.signaling import (
     MAX_ROOMS,
     MAX_SPECTATORS,
@@ -83,6 +83,7 @@ from src.api.signaling import (
 from src.log_archive import ArchiveUnreadable
 from src.ratelimit import check_ip, extract_ip, ip_hash
 from src.schema import ClientEvent, DesyncEvent, Feedback, MatchMetrics, SessionLog
+from src.session_modes import reported_session_mode
 
 log = logging.getLogger(__name__)
 
@@ -1254,7 +1255,7 @@ def create_app(lifespan=None) -> FastAPI:
         if db.session_log_busy(match_id, slot):
             raise HTTPException(status_code=429, detail="Session log busy")
         player_name = str(data.get("playerName", ""))[:32]
-        mode = str(data.get("mode", ""))[:16]
+        mode = canonical_game_mode(str(data.get("mode", ""))[:16])
         epoch = str(data.get("epoch", ""))[:64]
 
         # Newest entries win, as in the Socket.IO handler.
@@ -1552,13 +1553,14 @@ def create_app(lifespan=None) -> FastAPI:
     async def admin_session_logs_list(request: Request, _auth: None = Depends(_require_admin)) -> dict:
         room = request.query_params.get("room")
         match_id = request.query_params.get("match_id")
-        mode = request.query_params.get("mode")
+        mode = canonical_game_mode(request.query_params.get("mode"))
         has_desyncs = request.query_params.get("has_desyncs")
         player_name = request.query_params.get("player_name")
         days = int(request.query_params.get("days", "30"))
         limit = min(int(request.query_params.get("limit", "50")), 200)
         offset = int(request.query_params.get("offset", "0"))
 
+        reported_mode = reported_session_mode()
         matching = select(
             SessionLog.id,
             SessionLog.match_id,
@@ -1566,6 +1568,7 @@ def create_app(lifespan=None) -> FastAPI:
             SessionLog.slot,
             SessionLog.player_name,
             SessionLog.mode,
+            reported_mode.label("reported_mode"),
             SessionLog.summary,
             SessionLog.ended_by,
             SessionLog.created_at,
@@ -1575,11 +1578,8 @@ def create_app(lifespan=None) -> FastAPI:
             matching = matching.where(SessionLog.room == room)
         if match_id:
             matching = matching.where(SessionLog.match_id == match_id)
-        if mode in ("rollback", "lockstep", "streaming"):
-            # Each mode is its own: "lockstep" is the mode a host picks (no
-            # prediction). Rows from before v0.64.0 (2026-09-30) used
-            # "lockstep" for rollback; they are older than the default window.
-            matching = matching.where(SessionLog.mode == mode)
+        if mode in ("rollback", "classic", "streaming"):
+            matching = matching.where(reported_mode == mode)
         if has_desyncs == "true":
             matching = matching.where(db.json_field(SessionLog.summary, "$.desyncs") > 0)
         if player_name:
@@ -1619,6 +1619,7 @@ def create_app(lifespan=None) -> FastAPI:
                 SessionLog.slot,
                 SessionLog.player_name,
                 SessionLog.mode,
+                reported_session_mode().label("reported_mode"),
                 SessionLog.summary,
                 SessionLog.ended_by,
                 SessionLog.created_at,
@@ -1646,7 +1647,9 @@ def create_app(lifespan=None) -> FastAPI:
     async def admin_session_log_detail(
         request: Request, log_id: int, _auth: None = Depends(_require_admin)
     ) -> Response:
-        rows = await db.fetch(select(SessionLog).where(SessionLog.id == log_id))
+        rows = await db.fetch(
+            select(SessionLog, reported_session_mode().label("reported_mode")).where(SessionLog.id == log_id)
+        )
         if not rows:
             raise HTTPException(status_code=404, detail="Session log not found")
         entry = rows[0]
@@ -1700,7 +1703,9 @@ def create_app(lifespan=None) -> FastAPI:
         """
         if format != "jsonl":
             raise HTTPException(status_code=400, detail="Only format=jsonl is supported")
-        rows = await db.fetch(select(SessionLog).where(SessionLog.id == log_id))
+        rows = await db.fetch(
+            select(SessionLog, reported_session_mode().label("reported_mode")).where(SessionLog.id == log_id)
+        )
         if not rows:
             raise HTTPException(status_code=404, detail="Session log not found")
         entry = rows[0]
@@ -1736,6 +1741,7 @@ def create_app(lifespan=None) -> FastAPI:
             "slot": slot,
             "player_name": entry.get("player_name"),
             "mode": entry.get("mode"),
+            "reported_mode": entry.get("reported_mode"),
             "ended_by": entry.get("ended_by"),
             "created_at": str(entry.get("created_at")),
             "updated_at": str(entry.get("updated_at")),

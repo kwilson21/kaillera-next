@@ -6,7 +6,7 @@
     <title>Rollback demo | kaillera-next</title>
     <meta
       name="description"
-      content="Drop your Super Smash Bros. 64 ROM, crank the simulated network lag, and feel the difference between rollback and lockstep netplay."
+      content="Drop your Super Smash Bros. 64 ROM, crank the simulated network lag, and feel the difference between Rollback and Classic netplay."
     />
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
     <style>
@@ -892,12 +892,12 @@
             included, takes effect after a small fixed delay (a frame or two, just enough to absorb jitter), so both
             machines apply it on the same frame. For the rest of the round-trip, the engine predicts what the opponent
             pressed and keeps going, then rewinds and replays if the guess was wrong: invisible at low latency, visible
-            as judder at high latency. Lockstep, the older approach, waits for the opponent's input every frame, so its
+            as judder at high latency. Classic mode uses lockstep. It waits for the opponent's input every frame, so its
             delay has to cover about half the round-trip plus a jitter cushion, and you feel all of it.
           </p>
           <p class="explainer">
-            The proof is the contrast: at the same simulated RTT, rollback keeps your input delay small while lockstep
-            makes every press arrive noticeably later. Lockstep stays smoother visually (it never rewinds); rollback's
+            The proof is the contrast: at the same simulated RTT, rollback keeps your input delay small while Classic
+            makes every press arrive noticeably later. Classic stays smoother visually (it never rewinds); rollback's
             framerate dips at high RTT because predictions miss more often and the engine has more to replay. The
             rollback button switches between them, and auto-compare switches every 6 seconds. Each switch changes the
             input delay, so the game briefly holds behind a "Switching to…" banner while it does.

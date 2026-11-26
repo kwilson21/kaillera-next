@@ -44,8 +44,7 @@ def test_current_play_page_loads_only_the_canonical_engine():
 def test_mode_select_dropdown_offers_the_three_modes():
     src = PLAY_HTML.read_text()
     assert '<option value="rollback">Rollback</option>' in src
-    # Lockstep is its own mode now (no prediction), not the old name of rollback.
-    assert '<option value="lockstep">Lockstep</option>' in src
+    assert '<option value="classic">Classic</option>' in src
     assert '<option value="streaming">Streaming</option>' in src
 
 
@@ -53,7 +52,7 @@ def test_play_js_reads_every_mode_through_one_rule():
     """play.js reads the mode at every intake (URL params, users-updated,
     data-message, dropdown) through KNCore.play.mode.normalizeMode."""
     src = PLAY_JS.read_text()
-    assert "const normalizeMode = window.KNCore.play.mode.normalizeMode;" in src
+    assert "normalizeMode } = window.KNCore.play.mode;" in src
     assert "let mode = 'rollback';" in src
     # Rollback and lockstep both use the rollback engine.
     assert "window.NetplayRollback" in src
@@ -71,11 +70,11 @@ def test_core_redirector_loads_patched_core_for_rollback_mode():
 
 def test_engine_names_its_mode_in_one_place():
     """getInfo().mode and the session-log payloads say 'rollback', or
-    'lockstep' when the host picked lockstep (predictions off for the match).
+    'classic' when the host picked Classic (predictions off for the match).
     Verified by source pattern because the actual call requires a full
     browser stack; tests/rb-two-player.mjs checks getInfo() in a real match."""
     src = ROLLBACK_JS.read_text()
-    assert "const _modeName = () => (_predictionsPaused ? 'lockstep' : 'rollback');" in src
+    assert "const _modeName = () => (_predictionsPaused ? 'classic' : 'rollback');" in src
     # getInfo() and both session-log payloads (socket and HTTP fallback).
     assert src.count("mode: _modeName(),") == 3
     # No mode reported as a fixed literal.

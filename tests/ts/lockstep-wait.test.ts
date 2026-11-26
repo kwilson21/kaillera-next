@@ -32,7 +32,8 @@ test('a missing input never runs the frame without dropping someone', () => {
 
 test('the play page reads every mode through one rule; rollback and lockstep both run the game', async () => {
   const { normalizeMode, everyoneRunsTheGame } = await import('../../web/src/play/mode.ts');
-  assert.equal(normalizeMode('lockstep'), 'lockstep');
+  assert.equal(normalizeMode('lockstep'), 'classic');
+  assert.equal(normalizeMode('classic'), 'classic');
   assert.equal(normalizeMode('streaming'), 'streaming');
   assert.equal(normalizeMode('rollback'), 'rollback');
   for (const other of [null, undefined, '', 'turbo', 'Lockstep']) assert.equal(normalizeMode(other), 'rollback');

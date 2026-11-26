@@ -8,7 +8,7 @@
  */
 import { Schema } from 'effect';
 
-export const GameMode = Schema.Literals(['rollback', 'lockstep', 'streaming']);
+export const GameMode = Schema.Literals(['rollback', 'classic', 'lockstep', 'streaming']);
 export type GameMode = typeof GameMode.Type;
 
 export const RoomStatus = Schema.Literals(['lobby', 'playing']);

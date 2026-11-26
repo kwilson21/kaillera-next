@@ -52,6 +52,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from src import db, retention, schema
 from src.schema import MatchRetention, SessionLog
+from src.session_modes import reported_session_mode
 
 log = logging.getLogger(__name__)
 
@@ -124,7 +125,7 @@ def _compute_metrics(
     """
     # Mode: prefer the first non-null mode across peers (they should all
     # agree for a given match, but be defensive).
-    mode = next((r.get("mode") for r in session_rows if r.get("mode")), None)
+    mode = next((r.get("reported_mode", r["mode"]) for r in session_rows if r.get("mode")), None)
     ended_by = next((r.get("ended_by") for r in session_rows if r.get("ended_by")), None)
 
     # Summary-level stats: sum rollback counters across peers, max frames/duration.
@@ -319,7 +320,11 @@ async def rotate_match(match_id: str) -> MatchMetrics | None:
     still writes a metrics row (peer_count=0 or entry_count=0) so the
     sweeper doesn't keep picking it up on every tick.
     """
-    rows = await db.fetch(select(SessionLog).where(SessionLog.match_id == match_id).order_by(SessionLog.slot))
+    rows = await db.fetch(
+        select(SessionLog, reported_session_mode().label("reported_mode"))
+        .where(SessionLog.match_id == match_id)
+        .order_by(SessionLog.slot)
+    )
     if not rows:
         log.warning("rotate_match: no session_logs rows for match %s", match_id[:8])
         return None

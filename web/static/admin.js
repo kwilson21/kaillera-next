@@ -136,6 +136,11 @@
 
   let currentSessionLogs = [];
 
+  const sessionModeLabel = (session) => {
+    const mode = session.reported_mode ?? session.mode;
+    return mode === 'classic' ? 'Classic' : mode;
+  };
+
   const loadSessionLogs = async () => {
     const q = ($('#session-search')?.value || '').trim();
     const params = new URLSearchParams({ days: '30', limit: '100' });
@@ -205,7 +210,7 @@
         <div class="room-header">
           <div class="room-info">
             <span class="room-code">${escapeHtml(room)}</span>
-            <span class="room-meta">${logs.length} player${logs.length > 1 ? 's' : ''} &middot; ${escapeHtml(String(logs[0].mode || 'unknown'))}${auditLink ? ' &middot; ' + auditLink : ''}</span>
+            <span class="room-meta">${logs.length} player${logs.length > 1 ? 's' : ''} &middot; ${escapeHtml(String(sessionModeLabel(logs[0]) || 'unknown'))}${auditLink ? ' &middot; ' + auditLink : ''}</span>
           </div>
         </div>
         <table>
@@ -264,7 +269,7 @@
       const data = await res.json();
       if (sessionView !== view) return;
       view.data = data;
-      $('#viewer-meta').textContent = [data.room, data.player_name, data.mode].filter(Boolean).join(' · ');
+      $('#viewer-meta').textContent = [data.room, data.player_name, sessionModeLabel(data)].filter(Boolean).join(' · ');
       content.textContent = JSON.stringify(data, null, 2);
       $('#viewer-copy').textContent = 'Copy summary';
       const download = $('#viewer-download');
@@ -1081,7 +1086,8 @@
     lines.push(`=== SESSION LOG #${data.id} ===`);
     if (data.match_id) lines.push(`Match: ${data.match_id}`);
     if (data.room) lines.push(`Room: ${data.room}`);
-    if (data.mode) lines.push(`Mode: ${data.mode}`);
+    const mode = sessionModeLabel(data);
+    if (mode) lines.push(`Mode: ${mode}`);
     if (data.player_name != null) lines.push(`Player: ${data.player_name} (slot P${data.slot ?? 0})`);
     if (data.created_at) lines.push(`Created: ${data.created_at}`);
     if (data.ended_by) lines.push(`Ended by: ${data.ended_by}`);

@@ -95,6 +95,28 @@ def _open(browser, url, init_script=None):
     return page
 
 
+@pytest.mark.parametrize("mode", ["classic", "lockstep"])
+def test_classic_lobby_explains_the_mode_to_host_and_mobile_guest(browser, server_url, room, mode):
+    host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host&mode={mode}")
+    guest = browser.new_page(viewport={"width": 393, "height": 852}, is_mobile=True, has_touch=True)
+    try:
+        select = host.locator("#mode-select")
+        expect(select).to_have_value("classic")
+        expect(select).to_have_accessible_description(re.compile("original Kaillera"))
+        expect(host.locator("#classic-mode-hint")).to_contain_text("original Kaillera")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
+        expect(guest.locator("#classic-mode-hint")).to_be_visible()
+        expect(guest.locator("#classic-mode-hint")).to_contain_text("no rollback")
+        select.select_option("rollback")
+        expect(select).not_to_have_attribute("aria-describedby", "classic-mode-hint")
+        expect(guest.locator("#classic-mode-hint")).to_be_hidden()
+        host.select_option("#mode-select", "classic")
+        expect(guest.locator("#classic-mode-hint")).to_be_visible()
+    finally:
+        guest.close()
+        host.close()
+
+
 def _load_rom(page, rom=ROM):
     page.set_input_files("#rom-drop input[type=file]", rom)
     expect(page.locator("#rom-status")).to_contain_text(rom["name"], timeout=15000)
@@ -1041,7 +1063,7 @@ def test_dual_input_mode_is_a_host_choice_for_the_room(browser, server_url, room
         expect(help_text).to_be_hidden()
         host.select_option("#mode-select", "streaming")
         expect(option).to_be_hidden()
-        host.select_option("#mode-select", "lockstep")
+        host.select_option("#mode-select", "classic")
         expect(option).to_be_visible()
         host.select_option("#mode-select", "rollback")
         host.click("#start-btn")

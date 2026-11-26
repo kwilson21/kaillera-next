@@ -272,7 +272,7 @@ export const timelineCaption = (state: TimelineState): string => {
   if (!state.matchActive) return 'Waiting for a match to start.';
   if (state.label?.kind === 'bad') return 'Wrong guess — the opponent did something else.';
   if (state.label?.kind === 'replay') return 'Rewinding and replaying from the last correct frame.';
-  if (state.mode === 'lockstep') return 'Lockstep: waiting for the opponent’s input every frame.';
+  if (state.mode === 'lockstep') return 'Classic: waiting for the opponent’s input every frame.';
   return 'Rollback: running ahead, predicting the opponent.';
 };
 

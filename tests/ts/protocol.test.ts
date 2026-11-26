@@ -198,12 +198,13 @@ test("the server's own webrtc-signal and the session-log ack decode", () => {
   assert.ok(Result.isFailure(decodeSessionLogAck(null)));
 });
 
-test('a room mode is one of the three modes, or null before one is picked', () => {
+test('a room mode accepts both Classic spellings and null before selection', () => {
   assert.ok(Result.isSuccess(decodeUsersUpdated({ ...usersUpdated, mode: 'streaming' })));
   assert.ok(Result.isSuccess(decodeUsersUpdated({ ...usersUpdated, mode: 'lockstep' })));
+  assert.ok(Result.isSuccess(decodeUsersUpdated({ ...usersUpdated, mode: 'classic' })));
   assert.ok(Result.isSuccess(decodeUsersUpdated({ ...usersUpdated, mode: null })));
   assert.ok(Result.isFailure(decodeUsersUpdated({ ...usersUpdated, mode: 'turbo' })));
-  assert.deepEqual(GameMode.literals, ['rollback', 'lockstep', 'streaming']);
+  assert.deepEqual(GameMode.literals, ['rollback', 'classic', 'lockstep', 'streaming']);
 });
 
 test('serverEvents maps each server-authored event to its schema, relays left out', () => {
@@ -257,7 +258,7 @@ test("the server's bounds are the client's bounds", () => {
 
 test('a host can start or pick any of the three modes, and nothing else', () => {
   // "lockstep" was once the old name of rollback; it is its own mode now.
-  for (const mode of ['rollback', 'lockstep', 'streaming']) {
+  for (const mode of ['rollback', 'classic', 'lockstep', 'streaming']) {
     assert.ok(Result.isSuccess(decodeStartGamePayload({ mode })));
     assert.ok(Result.isSuccess(decodeSetModePayload({ mode })));
   }
