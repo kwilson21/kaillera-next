@@ -189,14 +189,9 @@ static host (Cloudflare Pages / Worker)   game server (Render)
   `tests/test_landing_build.py` checks `landing_build.py` against the
   repo's `web/` directory and that editing a landing file moves the id.
 
-**Deploys.** `.github/workflows/version-bump.yml` deploys this Worker once
-per merge to `main`, right after it asks Render to deploy the same commit
-(deploy/render/README.md): `npm ci`, `build_landing.py`, `wrangler deploy`.
-Until Render's deploy finishes, the Worker sees its build id differ from the
-game server's and passes the pages through to it (see "Self-correcting"
-above). Before this step the Worker was redeployed by hand, and it fell
-behind: on 2026-11-15 it had last been deployed at v0.67.0 while `main` was
-at v0.69.3.
+**Deploys.** The [release batch](../render/README.md#deploys) deploys this Worker from the
+same commit it sends to Render. Until Render serves that build, the Worker passes requests
+through to the origin (see "Self-correcting" above).
 
 Setup, once: GitHub → repo → **Settings → Secrets and variables → Actions**,
 two repository secrets:

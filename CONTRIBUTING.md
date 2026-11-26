@@ -205,10 +205,10 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 - **No unnecessary comments** — code should be self-evident. Add comments only
   where the _why_ isn't obvious from the _what_.
 - **Commit messages** — use [conventional commits](https://www.conventionalcommits.org/):
-  `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, etc. This drives auto-versioning.
+  `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, etc. These determine the bump for a release batch.
 - Pre-commit hooks handle formatting automatically.
-- A **GitHub Actions workflow** (`.github/workflows/version-bump.yml`) auto-bumps the
-  version on `feat:`/`fix:` pushes to main (also runnable locally via `just deploy`).
+- Releases are explicit batches of verified changes on `main`. Write one short changelog bullet
+  per player-visible improvement, then follow the [release steps](deploy/render/README.md#deploys).
 
 ### Docs layout
 

@@ -1,116 +1,111 @@
-name: Version Bump
+name: Release batch
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Full SHA of the verified main commit to release
+        type: string
+        required: true
+      player_notes:
+        description: Player-facing changelog bullets, one per line
+        type: string
+        required: true
 
-# One release at a time. GitHub keeps one waiting run per group and cancels an
-# older waiting one, so a run must not depend on having seen its own push:
-# each run works from the tip of main and covers everything since the last
-# version commit, which makes up for any run that was cancelled or failed.
 concurrency:
   group: release-main
   cancel-in-progress: false
 
 jobs:
   release:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: write
+    env:
+      RELEASE_SHA: ${{ inputs.commit }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      # If main has moved past the push that started this run, a newer run is
-      # waiting and will bump and deploy for both. Standing down here keeps
-      # merges that land together to one deploy. Version commits on top of
-      # this push don't count: that is a re-run, which should deploy again.
-      - name: Check this run is for the newest push
-        id: newest
+      - name: Select the release commit
+        id: batch
         run: |
-          newer=$(git log --format=%s "${GITHUB_SHA}..HEAD" | grep -vc '^chore(version):' || true)
-          if [ "$newer" -gt 0 ]; then
-            echo "::notice::main has $newer newer commit(s); the run for the newest push will release this one."
-            echo "release=false" >> "$GITHUB_OUTPUT"
+          if [[ ! "$RELEASE_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::Enter the full SHA of the verified main commit."
+            exit 1
+          fi
+          tip=$(git rev-parse HEAD)
+          last_version=$(git log --first-parent --format=%H --grep='^chore(version):' -1)
+          if [[ -z "$last_version" ]]; then
+            echo "::error::Could not find the previous version commit."
+            exit 1
+          fi
+          if [[ "$GITHUB_RUN_ATTEMPT" -gt 1 && "$(git rev-parse "$last_version^")" == "$RELEASE_SHA" ]]; then
+            # A deployment retry uses the same version and changelog.
+            git checkout --detach "$last_version"
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$tip" == "$RELEASE_SHA" && "$last_version" != "$tip" ]]; then
+            echo "bump=true" >> "$GITHUB_OUTPUT"
           else
-            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "::error::The verified SHA must be the current main tip with unreleased changes."
+            exit 1
           fi
 
-      # 24, as in the Dockerfile: wrangler, which deploys the landing Worker
-      # below, needs 22.12 or later.
+      - name: Require successful main checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for workflow in lint.yml browser.yml capture-privacy.yml; do
+            result=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" \
+              --branch main --event push --commit "$RELEASE_SHA" --limit 1 \
+              --json status,conclusion --jq '.[0] | select(.status == "completed") | .conclusion')
+            if [[ "$result" != success ]]; then
+              echo "::error::$workflow has no successful run for $RELEASE_SHA."
+              exit 1
+            fi
+          done
+
       - uses: actions/setup-node@v7
-        if: steps.newest.outputs.release == 'true'
         with:
           node-version: 24
 
-      - name: Configure git
-        if: steps.newest.outputs.release == 'true'
+      - name: Version and publish the batch
+        if: steps.batch.outputs.bump == 'true'
+        env:
+          PLAYER_NOTES: ${{ inputs.player_notes }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          bash scripts/bump-version.sh
+          # If main advanced after checkout, reject both the branch and tag.
+          git push --atomic --follow-tags origin main
 
-      - name: Run version bump
-        if: steps.newest.outputs.release == 'true'
-        # `just deploy` invokes the script with no args (range = origin/main..HEAD).
-        # Here origin/main == HEAD, so we pass --from with the last
-        # chore(version) commit: the range is every commit released since.
-        # The script bumps only if that range holds a feat: or fix: commit.
-        # Everything else — bump rule, changelog, commit, tag — is identical
-        # to local `just deploy`.
-        run: |
-          last_version=$(git log --format=%H --grep='^chore(version):' -1)
-          bash scripts/bump-version.sh --from "$last_version"
-
-      - name: Push version bump
-        if: steps.newest.outputs.release == 'true'
-        run: |
-          if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
-            echo "No version commit to push."
-          else
-            # --atomic: if main moved and the branch is rejected, the tag must
-            # not land on its own, or every later bump stops at "tag exists".
-            git push --atomic --follow-tags
-          fi
-
-      # The only thing that deploys the site. Render's own auto-deploy is off
-      # (render.yaml): it ran one deploy for the merge and a second for the
-      # version commit seconds later, and on the free plan the second could be
-      # killed while the service was being put back to sleep. The hook deploys
-      # the tip of main, which by now includes the version commit. A push made
-      # with GITHUB_TOKEN starts no workflow, so this runs once per merge.
       - name: Deploy to Render
-        if: steps.newest.outputs.release == 'true'
         env:
           RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
         run: |
           if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
-            echo "::error::RENDER_DEPLOY_HOOK_URL is not set, so nothing was deployed. See deploy/render/README.md."
+            echo "::error::RENDER_DEPLOY_HOOK_URL is not set. See deploy/render/README.md."
             exit 1
           fi
-          curl --fail --silent --show-error --output /dev/null --retry 3 --request POST "$RENDER_DEPLOY_HOOK_URL"
-          echo "Asked Render to deploy main at $(git rev-parse --short HEAD)."
+          curl --fail --silent --show-error --output /dev/null --retry 3 \
+            --request POST --url-query "ref=$(git rev-parse HEAD)" "$RENDER_DEPLOY_HOOK_URL"
+          echo "Asked Render to deploy $(git rev-parse --short HEAD)."
 
-      # The landing Worker serves / and /join from its own copies of the
-      # landing pages (deploy/static/README.md). Deployed here, once per merge
-      # like Render and from the same tip of main, so its copies keep up with
-      # the game server's; it was last deployed by hand at v0.67.0
-      # while main reached v0.69.3. wrangler uploads only the files that
-      # changed. Until Render's deploy finishes, the Worker sees its build id
-      # differ from the game server's and passes the pages through to it.
       - name: Deploy the landing Worker
-        if: steps.newest.outputs.release == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "::error::CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID is not set, so the landing Worker was not deployed. See deploy/static/README.md."
+            echo "::error::CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID is not set."
             exit 1
           fi
           npm ci --ignore-scripts
           python3 scripts/build_landing.py
           npx wrangler deploy -c wrangler.landing.jsonc
-          echo "Deployed the landing Worker from main at $(git rev-parse --short HEAD)."
+          echo "Deployed the landing Worker from $(git rev-parse --short HEAD)."

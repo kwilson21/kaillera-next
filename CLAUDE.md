@@ -268,16 +268,11 @@ invariants doc before proposing any watchdog that _acts_ on stalls.
 
 ## Versioning
 
-- **Auto-versioning** via a GitHub Actions workflow (`.github/workflows/version-bump.yml`)
-  that runs `scripts/bump-version.sh` on push to `main` (also runnable locally via `just deploy`)
-- Commit messages use **conventional commits**: `feat:` → minor bump, `fix:` → patch bump, anything else → no bump
-- Only runs on the `main` branch
-- The same workflow then deploys: it calls Render's deploy hook
-  (`RENDER_DEPLOY_HOOK_URL` secret) once per push to `main`, bump or not.
-  Render's own auto-deploy is off (`render.yaml`); see `deploy/render/README.md`.
-  Right after, it deploys the landing Worker from the same commit
-  (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` secrets); see
-  `deploy/static/README.md`
+- Release a batch from `main` through the **Release batch** GitHub Actions workflow
+  (`.github/workflows/version-bump.yml`) or `just deploy <sha> path/to/notes.txt`.
+- The workflow requires green main checks for the selected commit. It writes one version and
+  changelog entry for the batch. A `feat:` commit makes it a minor bump. Other batches get a patch bump.
+- Render and the landing Worker deploy the same resulting commit. See [deploy steps](deploy/render/README.md#deploys).
 - Version displayed in page footer (`web/static/version.json`), changelog in modal (`web/static/changelog.json`)
 - PRs are squash-merged; PR title becomes the commit message
 

@@ -35,19 +35,19 @@ whichever server the hostname points to.
 
 ## Deploys
 
-One deploy per merge, started by GitHub rather than by Render.
-`.github/workflows/version-bump.yml` runs on every push to `main`, pushes
-a `chore(version)` commit when there is a `feat:` or `fix:` since the last
-one, then calls the service's deploy hook, which deploys the tip of `main`.
-Runs go one at a time; if one is cancelled or fails, the next covers it.
-When merges land together, only the run for the newest one releases.
-The same run then deploys the landing Worker from that commit
-(deploy/static/README.md, "Deploys").
+Merges to `main` accumulate for the next release. When the batch is ready:
 
-Render's auto-deploy is off (`autoDeployTrigger: 'off'` in `render.yaml`).
-With it on, a merge produced two deploys seconds apart, one for the merge
-and one for the version commit. On 2026-11-12 the free instance was being
-put back to sleep as the second one started, and that deploy timed out.
+1. Run `just deploy-dry` to preview the main commit and unreleased changes.
+2. Wait for Lint, types, specs and proofs, Browser suites, and Capture privacy to pass for that commit.
+3. Write one line per player-facing improvement in a text file. Describe what changes for players.
+4. Run `just deploy <sha> path/to/notes.txt`. You can also dispatch **Release batch** in GitHub Actions
+   with the full verified main commit SHA and the notes.
+
+The workflow requires successful main checks, writes one version commit and tag, and requests
+deployment of that exact commit on Render and the landing Worker. Render auto-deploy stays off.
+If deployment fails after the version is pushed, rerun the whole workflow run to reuse that version.
+The selector requires the verified main tip for a fresh release. If more fixes merge first, check the
+new batch and update its notes.
 
 Setup, once:
 
