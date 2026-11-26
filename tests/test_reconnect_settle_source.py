@@ -122,7 +122,7 @@ def _race(*, transport, order, tag):
       _syncQueueGen.M++;
       _remoteInputs[1] = {}; // normal reset clears JS input state
     }
-    if (['inputs-first', 'pacing-phantom-before-capture', 'pacing-phantom-after-advance', 'bystander-phantom'].includes(fixture.order)) {
+    if (['inputs-first', 'pacing-phantom-before-capture', 'pacing-phantom-after-advance', 'bystander-phantom', 'pacing-phantom-retry', 'pacing-phantom-stale-retry'].includes(fixture.order)) {
       receive();
       _drainPendingCInputs(tickMod);
       finishReplay();
@@ -133,6 +133,12 @@ def _race(*, transport, order, tag):
     if (fixture.order === 'bystander-phantom') _setPacingPhantom(2);
     await service();
     const capturesBeforeLateInput = captures.length;
+    if (fixture.order.endsWith('phantom-retry') || fixture.order.endsWith('phantom-stale-retry')) {
+      if (fixture.order.endsWith('stale-retry')) _syncQueueGen.M++;
+      now = 601;
+      _receiveReconnectProofRequest('M', 10, fixture.transport);
+      await service();
+    }
     let capturesAfterDrain = null;
     if (fixture.order === 'recovery-expiry') {
       now = 600;
@@ -279,3 +285,14 @@ def test_returning_owner_proof_cannot_authorize_a_phantom_bystanders_history():
     phantom = _race(transport="dc", order="bystander-phantom", tag=96)
     assert phantom["captures"] == []
     assert phantom["cutoff"] is None
+
+@pytest.mark.parametrize("transport", ["dc", "socket"])
+def test_returning_phantom_can_retry_a_handoff_on_its_current_route(transport):
+    result = _race(transport=transport, order="pacing-phantom-retry", tag=96)
+    assert result["capturesBeforeLateInput"] == 1
+    assert result["captures"] == [{"sid": "M", "buttons": 128, "transport": transport}] * 2
+
+
+def test_returning_phantom_cannot_retry_the_previous_route():
+    result = _race(transport="dc", order="pacing-phantom-stale-retry", tag=96)
+    assert len(result["captures"]) == 1

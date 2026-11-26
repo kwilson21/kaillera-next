@@ -8586,11 +8586,11 @@
       !peer ||
       !_requestIdFrom(id) ||
       !_activeRoster?.has(peer.slot) ||
-      _peerPhantom[peer.slot] ||
       _reconnectProofStatus(sid) !== true
     )
       return;
-    const route = _unsafeCheckpointRoutes.get(peer.slot);
+    // A phantom can retry only through an existing, current receipt debt.
+    const route = _peerPhantom[peer.slot] ? null : _unsafeCheckpointRoutes.get(peer.slot);
     if (
       transport === 'dc' &&
       route?.key === sid &&
