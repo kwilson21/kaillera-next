@@ -35,6 +35,7 @@ def _run(scenario):
     let _syncQueueEpoch = 1, _frameNum = 100, now = 100, _lastAppliedRecoveryId = 0;
     let _lastAppliedSyncHostFrame = -1, _pendingResyncState = null, _hostNumbersAnswers = true;
     let _resyncRequestInFlight = true, _resyncRequestId = 9;
+    const _stageGuestRecovery = state => { _pendingResyncState = state; };
     const logs = [], toasts = [], events = [];
     const _config = {onToast: s => toasts.push(s)};
     const performance = {now: () => now}, _syncLog = s => logs.push(s);
@@ -222,9 +223,11 @@ def test_prototype_arms_only_on_actual_host_reopen_and_routes_proof_to_native_ap
     assert reconnect.count("_startsReconnectAnswerDebt(") == 1
     assert "peer.slot === 0 && _phase === PHASE_RUNNING && _useCRollback" in " ".join(reconnect.split())
     assert "handleSyncChunksComplete(ownsAssembly, proofScopeAssembly, proofForAssembly)" in source
+    wake = _between(source, "  const _serviceGuestRecoveryBoundary = () => {", "  const COORDINATED_CAPTURE_POLL_MS")
+    assert "pending.answerFor, pending.answerScope, pending.proofFor," in " ".join(wake.split())
     tick = _between(source, "  const tick = () => {", "    if (_coreFatalError) return; // sync application")
-    assert "pending.answerFor, pending.answerScope, pending.proofFor," in " ".join(tick.split())
     assert "_checkReconnectAnswerDebt()" not in tick
+    assert "_serviceGuestRecoveryBoundary()" not in tick
 
 
 def test_fallback_to_socket_keeps_dedicated_request_and_never_downgrades():

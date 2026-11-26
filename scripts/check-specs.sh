@@ -469,7 +469,7 @@ for variant in host_reconnect_clock_before host_reconnect_clock_fixed; do
 done
 $QUINT run "$HOST_RECONNECT_CLOCK" --main=host_reconnect_clock_fixed --invariant=noCaptureBeforeProof \
   --max-samples=1000 --max-steps=8 --backend="$BACKEND"
-for variant in coordinated_guest_hold_clock_before coordinated_guest_hold_clock_fixed; do
+for variant in coordinated_guest_hold_clock_before coordinated_guest_hold_clock_fixed guest_restore_clock_before guest_restore_clock_fixed; do
   $QUINT test "$FLOW" --main="$variant" --backend="$BACKEND"
 done
 $QUINT typecheck "$FLOW"
