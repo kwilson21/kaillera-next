@@ -31,11 +31,8 @@ from src.api.payloads import (
     JoinRoomAck,
     JoinRoomPayload,
     OpenRoomPayload,
-    RenegotiateRequest,
-    RomSharingUpdated,
     SessionLogAck,
     StartGamePayload,
-    TokenMessage,
     UsersUpdated,
 )
 from src.api.signaling import (
@@ -80,7 +77,12 @@ async def _room_life_steps() -> dict[str, dict | None]:
         assert err is None, err
         acks[name] = ack
 
-    assert await _open_room_locked("sid-host", OpenRoomPayload(extra={"sessionid": "ROOM1", "persistentId": "pid-host", "player_name": "Host"})) is None
+    assert (
+        await _open_room_locked(
+            "sid-host", OpenRoomPayload(extra={"sessionid": "ROOM1", "persistentId": "pid-host", "player_name": "Host"})
+        )
+        is None
+    )
     await join("guest", "sid-guest", "pid-guest")
     await join("spectator", "sid-spec", "pid-spec", spectate=True)
     rom = {"ready": True, "hash": "S" + "ab" * 32, "name": "Smash.z64", "size": 16 * 1024 * 1024}
@@ -273,7 +275,7 @@ def test_an_event_without_a_model_cannot_be_emitted():
 
 
 def test_a_restored_lockstep_room_matches():
-    """A room saved in lockstep mode comes back in lockstep mode, which the payload literal takes."""
+    """A legacy room reports Classic in the roster after hydration."""
     import json
 
     from src import state
@@ -282,7 +284,7 @@ def test_a_restored_lockstep_room_matches():
     room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
     room.mode = "lockstep"
     restored = state._deserialize_room(json.loads(state._serialize_room(room)))
-    assert UsersUpdated.model_validate(_players_payload(restored)).mode == "lockstep"
+    assert UsersUpdated.model_validate(_players_payload(restored)).mode == "classic"
 
 
 # ── the generator ────────────────────────────────────────────────────────────

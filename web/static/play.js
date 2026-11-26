@@ -92,12 +92,11 @@
   let mySlot = null;
   let coreFatal = false;
 
-  const { compatibilityMode, everyoneRunsTheGame, modeLabel, normalizeMode } = window.KNCore.play.mode;
+  const { everyoneRunsTheGame, modeLabel, normalizeMode } = window.KNCore.play.mode;
 
   const publishRoomMode = () => {
-    const wireMode = compatibilityMode(mode);
-    socket.emit('data-message', { type: 'mode-select', mode: wireMode });
-    socket.emit('set-mode', { mode: wireMode });
+    socket.emit('data-message', { type: 'mode-select', mode });
+    socket.emit('set-mode', { mode });
   };
 
   const emulatorMissing = () => {
@@ -3880,7 +3879,7 @@
       socket,
       sessionId: roomCode,
       matchId: KNState.matchId,
-      mode: compatibilityMode(mode),
+      mode,
       resumeFromMatchId: savedStart?.source ?? null,
       matchReturn: savedStart,
       playerSlot: isSpectator ? null : mySlot,
@@ -4106,7 +4105,7 @@
     }
     _preloadAudioCtx();
     const sel = document.getElementById('mode-select');
-    const selectedMode = sel ? sel.value : mode;
+    const selectedMode = normalizeMode(sel?.value ?? mode);
     const optResync = document.getElementById('opt-resync');
     crumb('start-game-click', {
       mode: selectedMode,
@@ -4120,7 +4119,7 @@
     socket.emit(
       'start-game',
       {
-        mode: compatibilityMode(normalizeMode(selectedMode)),
+        mode: selectedMode,
         resyncEnabled: optResync ? optResync.checked : true,
         dualInputEnabled: dualInputSelected(),
         romHash: _romHash ?? null,

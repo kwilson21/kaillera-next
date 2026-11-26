@@ -5,7 +5,7 @@ import json
 import pytest
 from src import state
 from src.api import signaling
-from src.api.payloads import SetModePayload, StartGamePayload, compatible_game_mode
+from src.api.payloads import SetModePayload, StartGamePayload
 
 
 def test_payloads_default_to_rollback():
@@ -30,9 +30,4 @@ def test_classic_room_mode_round_trips(value):
     )
     room.mode = value
     restored = state._deserialize_room(json.loads(state._serialize_room(room)))
-    assert restored.mode == "lockstep"
-
-
-@pytest.mark.parametrize("value", ["classic", "lockstep"])
-def test_classic_remains_readable_by_old_tabs(value):
-    assert compatible_game_mode(value) == "lockstep"
+    assert restored.mode == "classic"

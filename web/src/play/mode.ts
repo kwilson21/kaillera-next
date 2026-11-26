@@ -7,9 +7,6 @@ export const canonicalMode = (mode: GameMode): PlayMode => (mode === 'lockstep' 
 export const normalizeMode = (raw: string | null | undefined): PlayMode =>
   raw === 'classic' || raw === 'lockstep' || raw === 'streaming' ? canonicalMode(raw) : 'rollback';
 
-/** Active tabs from before Classic only understand its original protocol value. */
-export const compatibilityMode = (mode: PlayMode): GameMode => (mode === 'classic' ? 'lockstep' : mode);
-
 export const modeLabel = (mode: PlayMode): string =>
   mode === 'classic' ? 'Classic' : mode === 'streaming' ? 'Streaming' : 'Rollback';
 
