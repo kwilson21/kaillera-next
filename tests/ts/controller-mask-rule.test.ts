@@ -22,8 +22,13 @@ const runStep = (() => {
   return src.slice(from, src.indexOf('\n  };\n', from) + 5);
 })();
 const guestHandler = part(
-  '        // The host schedules the controller mask of the roster that follows.',
+  "        // The host's cut of a player the roster that follows removes.",
   '          const previousRoster',
+);
+
+const hostLaneOpened = part(
+  '    const onOpen = () => {\n      const peer = _peers[remoteSid];',
+  '      const openedAttempt = ch._knPc?._knAttempt;',
 );
 
 interface Page {
@@ -33,6 +38,8 @@ interface Page {
   broadcast: (frame: number, slots: number[]) => string[];
   /** Guest: hear a string from the host on its channel. */
   hear: (text: string) => void;
+  replaceHostLane: () => void;
+  receivedCuts: () => number;
   /** Host: the player in `slot` said it can schedule (or not). */
   capable: (slot: number, can: boolean) => void;
   start: (frame: number) => void;
@@ -77,15 +84,27 @@ const page = (slot: number): Page => {
     ${part('  const _controllerPresentMask = () => {', '  // Apply the real player-count mask the *instant*')}
     ${runStep}
     ${part('  const _hostRosterSlots = () => {', '  const _snapshotLateJoinBridgeSources')}
+    let receivedCuts = 0;
     const onText=(e,peer,ch)=>{
+
       ${guestHandler}
+          receivedCuts = heardCuts.size;
           _activeRoster=new Set(slots);
           _fileRosterControllerMask(rosterFrame,slots,'roster');
         }
     };
     globalThis.step=(f)=>{mod.cFrame=f;_frameNum=f;_runStepOneFrame('test');return stepMask};
     globalThis.broadcast=(f,slots)=>{_frameNum=f;globalThis.withJoiner=slots.includes(2);sent.length=0;_broadcastRoster();return [...sent]};
-    globalThis.hear=(text)=>onText({data:text},_peers.h,hostDc);
+    globalThis.hear=(text)=>onText({data:text},_peers.h,_peers.h.dc);
+    globalThis.replaceHostLane=()=>{
+      const remoteSid='h', ch={readyState:'open'};
+      _peers.h.dc=ch;
+      ${hostLaneOpened}
+      };
+      onOpen();
+    };
+    globalThis.receivedCuts=()=>receivedCuts;
+
     globalThis.capable=(s,can)=>_maskCapablePeers.set(_peerEntryForSlot(s)[0],can);
     globalThis.start=(f)=>{_frameNum=f;_maskSchedule.start(_controllerPresentMask(),f)};
     globalThis.scheduled=()=>_maskMatchScheduled&&_maskSchedule.active();
@@ -96,6 +115,8 @@ const page = (slot: number): Page => {
     step: (frame) => c.step(frame),
     broadcast: (frame, slots) => [...c.broadcast(frame, slots)],
     hear: (text) => c.hear(text),
+    replaceHostLane: () => c.replaceHostLane(),
+    receivedCuts: () => c.receivedCuts(),
     capable: (s, can) => c.capable(s, can),
     start: (frame) => c.start(frame),
     scheduled: () => c.scheduled(),
@@ -195,4 +216,40 @@ test('an announcement for another roster frame does not schedule a roster', () =
   guest.hear('roster-mask:7');
   guest.hear('roster:8:0,1');
   assert.equal(guest.scheduled(), false);
+});
+
+test('replacing the host lane drops an incomplete mask announcement before a same-frame immediate roster', () => {
+  const host = page(0);
+  const guest = page(1);
+  host.start(100);
+  guest.start(100);
+  host.capable(1, true);
+  host.capable(2, false);
+  const scheduled = host.broadcast(100, [0, 1]);
+  assert.deepEqual(scheduled, ['roster-mask:100', 'roster:100:0,1']);
+  guest.hear(scheduled[0] ?? '');
+  guest.replaceHostLane();
+
+  // The host admits an older page while paused at the same frame.
+  const immediate = host.broadcast(100, [0, 1, 2]);
+  assert.deepEqual(immediate, ['roster:100:0,1,2']);
+  for (const text of immediate) guest.hear(text);
+  assert.equal(guest.scheduled(), false);
+  assert.equal(guest.step(100), host.step(100));
+});
+
+test('a cut belongs to the lane that carried it and the matching roster', () => {
+  const guest = page(1);
+  guest.start(100);
+  const cut = 'roster-cut:100:2:98:98:';
+  guest.hear(cut);
+  guest.replaceHostLane();
+  guest.hear('roster-mask:100');
+  guest.hear('roster:100:0,1');
+  assert.equal(guest.receivedCuts(), 0);
+
+  guest.hear(cut);
+  guest.hear('roster-mask:100');
+  guest.hear('roster:100:0,1');
+  assert.equal(guest.receivedCuts(), 1);
 });

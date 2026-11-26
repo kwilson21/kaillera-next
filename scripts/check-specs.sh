@@ -1058,7 +1058,8 @@ $QUINT run "$BOOT_CONTINUATION" --main=late_join_boot_continuation_fixed --invar
 # ── Which controllers the game sees as plugged in, frame by frame ─────────
 MASK=specs/controller_mask.qnt
 $QUINT typecheck "$MASK"
-for variant in controller_mask_before controller_mask_unversioned controller_mask_fixed; do
+for variant in controller_mask_before controller_mask_unversioned controller_mask_fixed \
+  roster_prelude_lane_before roster_prelude_lane_fixed; do
   $QUINT test "$MASK" --main="$variant" --backend="$BACKEND"
 done
 # Before, each page set the mask when it heard the roster: pages ran the
@@ -1073,6 +1074,10 @@ done
 # every player page can.
 $QUINT run "$MASK" --main=controller_mask_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
+# An incomplete roster prelude never follows a replacement primary channel.
+$QUINT run "$MASK" --main=roster_prelude_lane_fixed --invariant=rosterPreludeStaysOnItsLane \
+  --max-samples=2000 --max-steps=10 --backend="$BACKEND"
 
 # ── What a removed player's slot is fed with, frame by frame ──────────────
 REMOVED=specs/removed_input.qnt
