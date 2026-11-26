@@ -18358,22 +18358,29 @@
         if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
         _syncApplyDeferredAt = 0;
         _syncLog(`sync held: state frame ${pending.frame} is ${ahead} ahead of f=${_frameNum}, applying there`);
-      } else if (!_replayBlocksSyncApply()) {
-        // Only an install at this boundary can supersede pending replay.
-        _pendingResyncState = null;
-        if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-        _syncTargetFrame = -1;
-        _syncTargetDeadlineAt = 0;
-        applySyncState(
-          pending.bytes,
-          pending.frame,
-          pending.fromProactive,
-          pending.recoveryId,
-          pending.extras,
-          pending.answerFor,
-          pending.answerScope,
-          pending.proofFor,
-        );
+      } else {
+        // A rejected snapshot has no authority to discard local replay.
+        const canInstall = _syncStateCanInstall(pending);
+        if (!canInstall || !_replayBlocksSyncApply()) {
+          _pendingResyncState = null;
+          if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
+          _syncTargetFrame = -1;
+          _syncTargetDeadlineAt = 0;
+          if (canInstall) {
+            applySyncState(
+              pending.bytes,
+              pending.frame,
+              pending.fromProactive,
+              pending.recoveryId,
+              pending.extras,
+              pending.answerFor,
+              pending.answerScope,
+              pending.proofFor,
+            );
+          } else {
+            _syncApplyDeferredAt = 0;
+          }
+        }
       }
     } else {
       _syncApplyDeferredAt = 0;
@@ -22248,6 +22255,20 @@
     if (stoppedAt || _frameNum >= _catchUpTo) _endCatchUp(mod, stoppedAt);
   };
 
+  const _syncStateCanInstall = ({ frame, recoveryId, answerFor = 0, answerScope = null, proofFor = 0 }) => {
+    if (_checkpoint?.busy || frame < _checkpointFloor) return false;
+    // A same-match warning may arrive after a full state was buffered.
+    // Unverified is terminal for this match: do not change native state
+    // or settle inputs from even a previously valid protected answer.
+    if (_hostMatchUnverified()) {
+      _syncLog(`SYNC-STATE-HELD recovery unverified frame=${frame}`);
+      return false;
+    }
+    if (!_guestAllowsReconnectState(answerFor, answerScope, proofFor)) return false;
+    if (recoveryId && recoveryId <= _lastAppliedRecoveryId) return false;
+    return !!window.EJS_emulator?.gameManager;
+  };
+
   const applySyncState = (
     bytes,
     frame,
@@ -22258,23 +22279,12 @@
     answerScope = null,
     proofFor = 0,
   ) => {
-    if (_checkpoint?.busy || frame < _checkpointFloor) return;
-    // A same-match warning may arrive after a full state was buffered.
-    // Unverified is terminal for this match: do not change native state
-    // or settle inputs from even a previously valid protected answer.
-    if (_hostMatchUnverified()) {
-      _syncLog(`SYNC-STATE-HELD recovery unverified frame=${frame}`);
-      return;
-    }
-    if (!_guestAllowsReconnectState(answerFor, answerScope, proofFor)) return;
-    if (recoveryId && recoveryId <= _lastAppliedRecoveryId) return;
     // Guest: hot-swap emulator state at a clean frame boundary.
     // Called from tick() when _pendingResyncState is set — ensures loadState()
     // never fires mid-tick or mid-input-processing. The kn_sync path moves
     // _frameNum to the state's frame (see below); the loadState fallback
     // keeps it where it is.
-    const gm = window.EJS_emulator?.gameManager;
-    if (!gm) return;
+    const gm = window.EJS_emulator.gameManager;
     const frameBeforeApply = _frameNum;
 
     if (_hasKnSync) {

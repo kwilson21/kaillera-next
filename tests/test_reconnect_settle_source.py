@@ -216,7 +216,8 @@ def test_real_routing_arms_reset_and_fences_native_capture_before_settlement():
     assert push.index("_recoveryTransfers.run(") < push.index("_admitReconnectNativeCapture(")
     assert push.index("_admitReconnectNativeCapture(") < push.index("mod._kn_sync_read(")
     assert "!mayDeliver(socketTarget)" in push
-    assert "if (!_guestAllowsReconnectState(answerFor, answerScope, proofFor)) return;" in source
+    install_guard = _between(source, "  const _syncStateCanInstall =", "  const applySyncState =")
+    assert "if (!_guestAllowsReconnectState(answerFor, answerScope, proofFor)) return false;" in install_guard
 
 
 @pytest.mark.parametrize("transport", ["dc", "socket"])

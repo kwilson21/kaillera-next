@@ -66,7 +66,7 @@ for (const [label, refuses, warning, guarded] of [
  const _handleCoreFatal=()=>{_coreFatalError=true};
  const _settleInputsAtResync=()=>{acks++;throw Error('settled-test-boundary')};
  ${reconnectProofSource(source)}
- ${between('  const applySyncState =', '  // -- Init / Stop API')}
+ ${between('  const _syncStateCanInstall =', '  // -- Init / Stop API')}
  const queuedState = new Uint8Array([1]); // the last chunk already arrived
  const scope = guarded ? _reconnectAnswerScope('host') : null;
  if(guarded) _reconnectAnswerDebt={id:9,status:'waiting',scope,absolute:200};
@@ -79,7 +79,10 @@ for (const [label, refuses, warning, guarded] of [
  }
  const recoveryId=(!guarded && warning==='none')?8:0;
  const proof=guarded?9:0;
- try {applySyncState(queuedState,100,false,recoveryId,'extras',proof,scope,proof)}
+ try {
+   if (_syncStateCanInstall({frame:100,recoveryId,answerFor:proof,answerScope:scope,proofFor:proof}))
+     applySyncState(queuedState,100,false,recoveryId,'extras',proof,scope,proof)
+ }
  catch(e){if(e.message!=='settled-test-boundary')throw e}
  globalThis.result={fatal:_coreFatalError,acks,frame:_frameNum,knFrame:KNState.frameNum,id:_lastAppliedRecoveryId,calls};
  `,

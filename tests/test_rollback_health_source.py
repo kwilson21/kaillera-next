@@ -1167,7 +1167,7 @@ def test_a_late_answer_that_would_take_the_guest_back_is_dropped():
     # holds or applies anything.
     assert tick.index("COORD-SYNC-TIMEOUT target=") < drop_at
     hold_at = tick.index("if (pending && atSyncBoundary) {")
-    replay_at = tick.index("else if (!_replayBlocksSyncApply()) {")
+    replay_at = tick.index("if (!canInstall || !_replayBlocksSyncApply()) {")
     assert drop_at < hold_at < replay_at
     # The stale-state check stays.
     assert "explicit sync discarded: stale frame=${frame} <= lastApplied=${_lastAppliedSyncHostFrame}" in src

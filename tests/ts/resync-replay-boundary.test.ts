@@ -13,7 +13,7 @@ const from = (start: string, end: string) => {
 
 type Tick = (ms: number, frame: number) => { replaying: boolean; installed?: number; target: number };
 
-const fixture = (target: number, stateFrame: number): Tick =>
+const fixture = (target: number, stateFrame: number, warnAt = Infinity): Tick =>
   runInNewContext(
     `
     let now = 100, _frameNum = 100, replaying = true;
@@ -30,6 +30,10 @@ const fixture = (target: number, stateFrame: number): Tick =>
     let _syncTargetFrame = target, _syncTargetDeadlineAt = target > 0 ? 3100 : 0;
     const SYNC_HOLD_MAX_FRAMES = 2, SYNC_COORD_TIMEOUT_MS = 3000;
     let _pendingResyncState = {frame: stateFrame}, installed;
+    const _hostMatchUnverified = () => now >= warnAt;
+    const _checkpoint = null, _checkpointFloor = 0, _lastAppliedRecoveryId = 0;
+    const _guestAllowsReconnectState = () => true;
+    ${from('  const _syncStateCanInstall =', '  const applySyncState =')}
     const applySyncState = (_, frame) => {
       if (replaying) throw Error('replay still owns the native frame');
       installed = frame;
@@ -43,7 +47,7 @@ const fixture = (target: number, stateFrame: number): Tick =>
     };
     tick;
     `,
-    { target, stateFrame },
+    { target, stateFrame, warnAt },
   );
 
 test('a coordinated future snapshot keeps pending replay until its install boundary', () => {
@@ -65,4 +69,13 @@ test('a newly buffered ahead-of-frame snapshot establishes its hold while replay
     assert.equal(tick(100, 100).target, 102);
     assert.equal(tick(1100, 101).replaying, true);
   }
+});
+
+test('a room warning that invalidates the buffered state preserves pending replay', () => {
+  const tick = fixture(100, 100, 1100);
+  assert.equal(tick(100, 100).replaying, true);
+  const rejected = tick(1100, 100);
+  assert.equal(rejected.replaying, true);
+  assert.equal(rejected.installed, undefined);
+  assert.equal(rejected.target, -1);
 });

@@ -875,34 +875,49 @@ module resync_flow_current {
 // open. Waiting for a future frame does not spend the replay deadline.
 module resync_replay_boundary {
   const START_BEFORE_TARGET: bool
+  const CHECK_ELIGIBILITY: bool
   pure val LIMIT = 2
   var ready: bool
   var waited: int
   var replaying: bool
   var applied: bool
+  var eligible: bool
+  var rejectedDiscard: bool
 
   action init = all {
-    ready' = false, waited' = 0, replaying' = true, applied' = false,
+    ready' = false, waited' = 0, replaying' = true, applied' = false, eligible' = true, rejectedDiscard' = false,
   }
   action reachBoundary = all {
-    ready' = true, waited' = waited, replaying' = replaying, applied' = applied,
+    ready' = true, waited' = waited, replaying' = replaying, applied' = applied, eligible' = eligible, rejectedDiscard' = rejectedDiscard,
   }
   action completeReplay = all {
-    ready' = ready, waited' = waited, replaying' = false, applied' = applied,
+    ready' = ready, waited' = waited, replaying' = false, applied' = applied, eligible' = eligible, rejectedDiscard' = rejectedDiscard,
+  }
+  action invalidateSnapshot = all {
+    not(applied),
+    ready' = ready, waited' = waited, replaying' = replaying, applied' = applied,
+    eligible' = false, rejectedDiscard' = rejectedDiscard,
   }
   action tick = {
-    val service = ready or START_BEFORE_TARGET
+    val service = (ready or START_BEFORE_TARGET) and (eligible or not(CHECK_ELIGIBILITY))
     val expired = replaying and service and waited == LIMIT
     all {
       ready' = ready,
       waited' = if (replaying and service and waited < LIMIT) waited + 1 else waited,
       replaying' = (replaying and not(expired)),
-      applied' = (applied or (ready and (not(replaying) or expired))),
+      applied' = (applied or (ready and eligible and (not(replaying) or expired))),
+      eligible' = eligible,
+      rejectedDiscard' = (rejectedDiscard or (expired and not(eligible))),
     }
   }
-  action step = any { reachBoundary, completeReplay, tick }
+  action step = any { reachBoundary, completeReplay, invalidateSnapshot, tick }
 
   val futureStateHasNoReplayDeadline = ready or waited == 0
+  val rejectedStateKeepsReplay = not(rejectedDiscard)
+
+  run invalidatedWhileWaitingTest =
+    init.then(reachBoundary).then(tick).then(invalidateSnapshot).then(tick).then(tick)
+      .expect(replaying == CHECK_ELIGIBILITY and not(applied))
 
   run futureStateKeepsReplayTest =
     init.then(tick).then(tick).then(tick)
@@ -915,9 +930,13 @@ module resync_replay_boundary {
 }
 
 module resync_replay_boundary_before {
-  import resync_replay_boundary(START_BEFORE_TARGET = true).*
+  import resync_replay_boundary(START_BEFORE_TARGET = true, CHECK_ELIGIBILITY = false).*
 }
 
 module resync_replay_boundary_fixed {
-  import resync_replay_boundary(START_BEFORE_TARGET = false).*
+  import resync_replay_boundary(START_BEFORE_TARGET = false, CHECK_ELIGIBILITY = true).*
+}
+
+module resync_replay_boundary_revoked_before {
+  import resync_replay_boundary(START_BEFORE_TARGET = false, CHECK_ELIGIBILITY = false).*
 }
