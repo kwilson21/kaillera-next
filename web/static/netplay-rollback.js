@@ -21462,8 +21462,8 @@
           return null;
         }
         try {
-          // Transfer admission can resume between replay slices. The live core
-          // is then behind the frame a snapshot would advertise.
+          // Transfer admission can resume between replay slices, when the
+          // live core still contains intermediate replay state.
           if (!capturedPublication && gm.Module?._kn_get_replay_depth?.() > 0) {
             _syncLog(`sync capture skipped: native replay active at frame ${_frameNum}`);
             notSent('native replay is active', attempts);

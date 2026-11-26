@@ -339,7 +339,8 @@ def test_an_escalation_push_is_a_full_state_and_the_counter_is_per_match():
     ]
     # The host sends no deltas (sync_base): every state is full and no base
     # is kept for it.
-    assert "const toCompress = currentState;" in push[:12000]
+    push = push[: push.index("\n  };\n")]
+    assert "const toCompress = currentState;" in push
     assert "`sync-start:${frame}:${numChunks}:1:${isProactive ? '1' : '0'}${proofSuffix}`" in src
     assert "_setLastSyncState(currentState.slice(), 'pushSync')" not in src
     assert "toCompress[i] = currentState[i] ^ _lastSyncState[i];" not in src
