@@ -7694,6 +7694,32 @@
   let _resyncRequestAt = -1;
   // Exact protected answer, independent of generic resync bookkeeping.
   let _reconnectAnswerDebt = null;
+  let _stopReconnectAnswerClock = null;
+  const _cancelReconnectAnswerClock = () => {
+    const stop = _stopReconnectAnswerClock;
+    _stopReconnectAnswerClock = null;
+    stop?.();
+  };
+  const _armReconnectAnswerClock = (debt) => {
+    _cancelReconnectAnswerClock();
+    const stop = window.KNCore.startEvery(() => {
+      if (_stopReconnectAnswerClock !== stop) return;
+      if (_reconnectAnswerDebt !== debt || !_reconnectAnswerScopeCurrent(debt.scope) || _phase !== PHASE_RUNNING) {
+        if (_reconnectAnswerDebt === debt) _reconnectAnswerDebt = null;
+        _cancelReconnectAnswerClock();
+        return;
+      }
+      if (
+        _checkpoint?.busy ||
+        (_config?.matchReturn && !_config.matchReturn.playing) ||
+        (_lastUsersUpdated?.hostReturnDeadline && !hostGameConnected())
+      )
+        return;
+      _checkReconnectAnswerDebt();
+      if (_stopReconnectAnswerClock === stop && debt.status !== 'waiting') _cancelReconnectAnswerClock();
+    }, RESYNC_DEADLINE_POLL_MS);
+    _stopReconnectAnswerClock = stop;
+  };
   const _reconnectAnswerScope = (key, peer = _peers[key]) => {
     if (!peer || peer.slot !== 0 || _peers[key] !== peer || !KNState.matchId) return null;
     return { key, peer, matchId: KNState.matchId, epoch: _syncQueueEpoch, gen: _syncQueueGen[key] || 0 };
@@ -7715,7 +7741,10 @@
         : performance.now() + (RESYNC_MAX_ASKS_AGAIN + 1) * RESYNC_REQUEST_TIMEOUT_MS + SYNC_DECODE_GRACE_MS;
     const status = absolute === old?.absolute && old.status === 'unresolved' ? 'unresolved' : 'waiting';
     _reconnectAnswerDebt = { scope, id, absolute, status, attempts: 0, retryAt: 0 };
-    if (status === 'waiting') _transmitReconnectProofRequest(_reconnectAnswerDebt);
+    if (status === 'waiting') {
+      _transmitReconnectProofRequest(_reconnectAnswerDebt);
+      _armReconnectAnswerClock(_reconnectAnswerDebt);
+    }
   };
   const _transmitReconnectProofRequest = (debt) => {
     debt.attempts++;
@@ -7756,6 +7785,7 @@
   const _finishReconnectAnswer = (answerFor, scope, aligned, proofFor) => {
     if (!aligned || !_readReconnectAnswer(answerFor, scope, proofFor)) return;
     _reconnectAnswerDebt = null;
+    _cancelReconnectAnswerClock();
     _syncLog('RECONNECT-ANSWER-APPLIED f=' + _frameNum + ' request=' + answerFor);
   };
   const _checkReconnectAnswerDebt = () => {
@@ -17624,6 +17654,7 @@
     window._lockstepActive = false;
     _resyncRequestInFlight = false;
     _reconnectAnswerDebt = null;
+    _cancelReconnectAnswerClock();
     _hostReconnectDebts.clear();
     _hostAuthoredReceipts.clear();
     _deferredPhantomRecovery.clear();
@@ -18335,7 +18366,6 @@
       return;
     }
     _creditLocalFreeze();
-    if (!_checkpoint?.busy) _checkReconnectAnswerDebt();
     _serviceReconnectHostAnswers();
     _flushResendLogs();
     _checkStateTransition();

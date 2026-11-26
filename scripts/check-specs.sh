@@ -457,6 +457,11 @@ $QUINT run "$PAUSE" --main=late_join_pause_before_resync --invariant=holdBeforeT
 
 # ── A resync from request to apply ──────────────────────────────────────────
 FLOW=specs/resync_flow.qnt
+RECONNECT_DEBT=specs/reconnect_answer_debt.qnt
+$QUINT typecheck "$RECONNECT_DEBT"
+for variant in reconnect_answer_debt protected_reconnect_clock_before protected_reconnect_clock_fixed; do
+  $QUINT test "$RECONNECT_DEBT" --main="$variant" --backend="$BACKEND"
+done
 for variant in coordinated_guest_hold_clock_before coordinated_guest_hold_clock_fixed; do
   $QUINT test "$FLOW" --main="$variant" --backend="$BACKEND"
 done
