@@ -73,6 +73,9 @@ jobs:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           if [ -n "$PR_BASE" ]; then
+            if ! git cat-file -e "${PR_BASE}^{commit}" 2>/dev/null; then
+              git fetch --no-tags --depth=1 origin "$PR_BASE"
+            fi
             node scripts/check-design-matrix.ts --base "$PR_BASE"
           else
             node scripts/check-design-matrix.ts

@@ -404,12 +404,38 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
         updated_at=now(),
     )
     new = upsert.excluded
+    # Keep the largest omission reported for each stream in this epoch.
+    # A later flush can report fewer after the exit batch advances its cursor.
+    omission_path = "$.omittedOnExit"
+    stored_summary = case((func.json_valid(SessionLog.summary), SessionLog.summary), else_="{}")
+    new_summary = case((func.json_valid(new.summary), new.summary), else_="{}")
+
+    def omission_count(summary, kind):
+        path = f"{omission_path}.{kind}"
+        return case((func.json_type(summary, path) == "integer", func.json_extract(summary, path)), else_=0)
+
+    omissions = func.json_object(
+        "logEntries",
+        func.max(0, omission_count(stored_summary, "logEntries"), omission_count(new_summary, "logEntries")),
+        "auditEntries",
+        func.max(0, omission_count(stored_summary, "auditEntries"), omission_count(new_summary, "auditEntries")),
+    )
+    summary = case(
+        (
+            and_(
+                SessionLog.log_epoch == new.log_epoch,
+                func.json_type(stored_summary, omission_path) == "object",
+            ),
+            func.json_set(new_summary, omission_path, omissions),
+        ),
+        else_=new.summary,
+    )
     # Within one epoch the high-water mark only moves forward; a new epoch replaces it.
     statements.append(
         upsert.on_conflict_do_update(
             index_elements=[SessionLog.match_id, SessionLog.slot],
             set_={
-                "summary": new.summary,
+                "summary": summary,
                 "context": new.context,
                 "ip_hash": new.ip_hash,
                 "updated_at": now(),

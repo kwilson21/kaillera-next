@@ -4,6 +4,7 @@ Run: pytest tests/test_session_logging.py -v
 """
 
 import asyncio
+import json
 import os
 import threading
 
@@ -136,3 +137,46 @@ def test_upload_token_roundtrip():
     token = make_upload_token("ROOM1")
     assert verify_upload_token("ROOM1", token) is True
     assert verify_upload_token("ROOM1", "bad") is False
+
+
+def test_older_upload_preserves_exit_omissions_in_same_epoch(tmp_db):
+    async def scenario():
+        from src.db import append_session_log, close_db, init_db, query
+
+        await init_db(tmp_db)
+        try:
+            base = {"match_id": "m1", "room": "R1", "slot": 1, "epoch": "log"}
+            omissions = {"logEntries": 8, "auditEntries": 2}
+            await append_session_log({
+                **base,
+                "entries": [{"seq": 10, "msg": "exit"}],
+                "summary": json.dumps({"frames": 20, "omittedOnExit": omissions}),
+            })
+            await append_session_log({
+                **base,
+                "entries": [{"seq": 1, "msg": "older"}],
+                "summary": json.dumps({"frames": 8}),
+            })
+            [row] = await query("SELECT summary FROM session_logs WHERE match_id='m1'", ())
+            assert json.loads(row["summary"])["omittedOnExit"] == omissions
+
+            for reported, expected in [
+                ({"logEntries": 0, "auditEntries": 0}, omissions),
+                ({"logEntries": 0, "auditEntries": 4}, {"logEntries": 8, "auditEntries": 4}),
+            ]:
+                await append_session_log({**base, "summary": json.dumps({"omittedOnExit": reported})})
+                [row] = await query("SELECT summary FROM session_logs WHERE match_id='m1'", ())
+                assert json.loads(row["summary"])["omittedOnExit"] == expected
+
+            await append_session_log({**base, "epoch": "new", "summary": "{}"})
+            [row] = await query("SELECT summary FROM session_logs WHERE match_id='m1'", ())
+            assert "omittedOnExit" not in json.loads(row["summary"])
+
+            await append_session_log({**base, "epoch": "new", "summary": '{"omittedOnExit":"invalid"}'})
+            await append_session_log({**base, "epoch": "new", "summary": "{}"})
+            [row] = await query("SELECT summary FROM session_logs WHERE match_id='m1'", ())
+            assert "omittedOnExit" not in json.loads(row["summary"])
+        finally:
+            await close_db()
+
+    _run_async(scenario())

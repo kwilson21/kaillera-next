@@ -159,16 +159,16 @@
       if (!token || !room) return -1;
       const body = mode === 'exit' ? window.KNCore.sessionLogKeepaliveBody(payload, 'exit') : JSON.stringify(payload);
       if (body === null) return -1;
-      const response = await fetch(
-        `/api/session-log?token=${encodeURIComponent(token)}&room=${encodeURIComponent(room)}`,
-        {
+      const url = `/api/session-log?token=${encodeURIComponent(token)}&room=${encodeURIComponent(room)}`;
+      const send = () =>
+        fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body,
           keepalive: mode === 'exit',
-        },
-      );
-      if (!response.ok) return -1;
+        });
+      const response = mode === 'exit' ? await window.KNCore.sendSessionLogKeepalive('exit', send) : await send();
+      if (!response?.ok) return -1;
       return boundary.ack('session-log', await response.json())?.lastSeq ?? -1;
     });
   };

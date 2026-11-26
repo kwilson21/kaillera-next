@@ -15,10 +15,8 @@ const slice = (text, first, last) => {
   return text.slice(start, end);
 };
 
-test(
-  'destroying the document with an ack outstanding keeps the newest session log batch',
-  { timeout: 20000 },
-  async (t) => {
+function checkPagehide(persisted) {
+  return async (t) => {
     const rules = buildSync({
       entryPoints: [fileURLToPath(new URL('../web/src/session-log-keepalive.ts', import.meta.url))],
       bundle: true,
@@ -93,8 +91,12 @@ test(
     t.after(() => browser.close());
     const page = await browser.newPage();
     await page.goto(origin);
-    await page.goto(origin + '/replacement');
-    assert.equal(await page.title(), 'Replacement');
+    if (persisted) {
+      await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true })));
+    } else {
+      await page.goto(origin + '/replacement');
+      assert.equal(await page.title(), 'Replacement');
+    }
     const upload = await received;
     assert.ok(upload.bytes <= 56 * 1024);
     assert.deepEqual(
@@ -103,5 +105,8 @@ test(
     );
     assert.deepEqual(upload.payload.summary.omittedOnExit, { logEntries: 8, auditEntries: 0 });
     acknowledge();
-  },
-);
+  };
+}
+
+test('a discarded document keeps the newest session log batch', { timeout: 20000 }, checkPagehide(false));
+test('a cached document keeps the newest session log batch', { timeout: 20000 }, checkPagehide(true));

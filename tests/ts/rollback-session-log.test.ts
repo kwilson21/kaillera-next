@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import vm from 'node:vm';
 import { createSyncLogRing } from '../../web/src/sync-log-ring.ts';
 import { createBoundary } from '../../web/src/socket-boundary.ts';
-import { sessionLogKeepaliveBody } from '../../web/src/session-log-keepalive.ts';
+import { sendSessionLogKeepalive, sessionLogKeepaliveBody } from '../../web/src/session-log-keepalive.ts';
 
 const engine = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
 const source = engine.slice(engine.indexOf('  const _buildRollbackStats'), engine.indexOf('  // -- Canvas pixel hash'));
@@ -28,8 +28,9 @@ function page(cap: number) {
   const audit: { seq: number }[] = [];
   const deadlines: (() => void)[] = [];
   let busy = false;
+  let hold: Promise<void> | undefined;
   const ctx = vm.createContext({
-    window: { _playerSlot: 0, KNCore: { sessionLogKeepaliveBody } },
+    window: { _playerSlot: 0, KNCore: { sendSessionLogKeepalive, sessionLogKeepaliveBody } },
     navigator: { userAgent: 'test' },
     performance,
     TextEncoder,
@@ -65,6 +66,7 @@ function page(cap: number) {
     fetch: async (url: string, options: { body: string; keepalive: boolean }) => {
       const body: Body = JSON.parse(options.body);
       posts.push({ url, body, keepalive: options.keepalive, bytes: Buffer.byteLength(options.body) });
+      if (hold) await hold;
       if (busy) {
         busy = false;
         return { ok: false, status: 429 };
@@ -88,6 +90,16 @@ function page(cap: number) {
     deadlines,
     ctx,
     flush,
+    holdResponses: () => {
+      let release!: () => void;
+      hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return () => {
+        hold = undefined;
+        release();
+      };
+    },
     rejectOnce: () => {
       busy = true;
     },
@@ -250,4 +262,22 @@ test('pagehide does not wait and retry a declined request', async () => {
   await p.flush({ keepalive: true });
   assert.equal(p.posts.length, 1);
   assert.equal(p.ctx._syncLogAckedSeq, -1);
+});
+
+test('repeated visibility changes share the hidden keepalive reservation while an exit can still send', async () => {
+  const p = page(10);
+  p.ring.push({ t: 1, f: 1, msg: 'row 0' });
+  const release = p.holdResponses();
+  const hidden = p.flush({ hidden: true });
+  const hiddenAgain = p.flush({ hidden: true });
+  const exit = p.flush({ keepalive: true });
+  const exitAgain = p.flush({ keepalive: true });
+  release();
+  await Promise.all([hidden, hiddenAgain, exit, exitAgain]);
+  assert.equal(p.posts.length, 2);
+  assert.equal(p.posts[0]?.body.summary.omittedOnExit, undefined);
+  assert.deepEqual(p.posts[1]?.body.summary.omittedOnExit, { logEntries: 0, auditEntries: 0 });
+
+  await p.flush({ hidden: true });
+  assert.equal(p.posts.length, 3);
 });

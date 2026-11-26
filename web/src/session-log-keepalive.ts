@@ -8,6 +8,20 @@ type LogPayload = {
   summary?: { duration_sec?: number; omittedOnExit?: ExitOmissions };
 };
 
+type KeepalivePhase = 'hidden' | 'exit';
+const pending = new Set<KeepalivePhase>();
+
+// Both engines share a document's keepalive budget.
+export async function sendSessionLogKeepalive(phase: KeepalivePhase, send: () => Promise<Response>) {
+  if (pending.has(phase)) return;
+  pending.add(phase);
+  try {
+    return await send();
+  } finally {
+    pending.delete(phase);
+  }
+}
+
 const encoder = new TextEncoder();
 const sizeOf = (value: LogPayload | SequencedEntry) => encoder.encode(JSON.stringify(value)).length;
 
@@ -28,7 +42,7 @@ function fit(records: readonly SequencedEntry[], budget: number, newest: boolean
  * only start one request, so it sends the newest pending diagnostics.
  * Leave space for the hidden-page prefix within the shared keepalive limit.
  */
-export function sessionLogKeepaliveBody(payload: LogPayload, phase: 'hidden' | 'exit'): string | null {
+export function sessionLogKeepaliveBody(payload: LogPayload, phase: KeepalivePhase): string | null {
   const newest = phase === 'exit';
   const audit = payload.audit?.entries ?? [];
   const empty: LogPayload = { ...payload, entries: [] };
