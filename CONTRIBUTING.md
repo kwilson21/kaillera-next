@@ -207,7 +207,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 - **Commit messages** — use [conventional commits](https://www.conventionalcommits.org/):
   `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, etc. These determine the bump for a release batch.
 - Pre-commit hooks handle formatting automatically.
-- Releases are explicit batches of verified changes on `main`. Write one short changelog bullet
+- Releases are batches of verified changes on `main`. Write one short changelog bullet
   per player-visible improvement, then follow the [release steps](deploy/render/README.md#deploys).
 
 ### Docs layout

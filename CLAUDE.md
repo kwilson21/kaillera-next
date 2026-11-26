@@ -268,8 +268,9 @@ invariants doc before proposing any watchdog that _acts_ on stalls.
 
 ## Versioning
 
-- Release a batch from `main` through the **Release batch** GitHub Actions workflow
-  (`.github/workflows/version-bump.yml`) or `just deploy <sha> path/to/notes.txt`.
+- Verified batches ship Tuesdays at 11:15 a.m. Eastern when notes are queued for the
+  selected `main` commit. **Release batch** also supports manual dispatch or
+  `just deploy <sha> path/to/notes.txt`.
 - The workflow requires green main checks for the selected commit. It writes one version and
   changelog entry for the batch. A `feat:` commit makes it a minor bump. Other batches get a patch bump.
 - Render and the landing Worker deploy the same resulting commit. See [deploy steps](deploy/render/README.md#deploys).

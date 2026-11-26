@@ -1,6 +1,9 @@
 name: Release batch
 
 on:
+  schedule:
+    - cron: '15 11 * * 2'
+      timezone: America/New_York
   workflow_dispatch:
     inputs:
       commit:
@@ -24,7 +27,7 @@ jobs:
       actions: read
       contents: write
     env:
-      RELEASE_SHA: ${{ inputs.commit }}
+      RELEASE_SHA: ${{ github.event_name == 'schedule' && github.sha || inputs.commit }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -50,12 +53,36 @@ jobs:
             echo "bump=false" >> "$GITHUB_OUTPUT"
           elif [[ "$tip" == "$RELEASE_SHA" && "$last_version" != "$tip" ]]; then
             echo "bump=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
+            echo "::notice::No release: the scheduled commit is stale or main has no unreleased changes."
           else
             echo "::error::The verified SHA must be the current main tip with unreleased changes."
             exit 1
           fi
 
+      - name: Select player notes
+        id: notes
+        if: steps.batch.outputs.bump == 'true'
+        env:
+          MANUAL_NOTES: ${{ inputs.player_notes }}
+          SCHEDULED_RELEASE: ${{ vars.SCHEDULED_RELEASE }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
+            notes=$(jq -sce --arg sha "$RELEASE_SHA" \
+              'select(length == 1) | .[0] | objects | select(.commit == $sha) | .player_notes | strings | select(test("[^[:space:]]"))' \
+              <<< "$SCHEDULED_RELEASE" 2>/dev/null) || notes=
+            if [[ -z "$notes" ]]; then
+              echo "::notice::No release: player notes are missing for $RELEASE_SHA."
+              exit 0
+            fi
+          else
+            notes=$(jq -cn --arg notes "$MANUAL_NOTES" '$notes')
+          fi
+          printf '%s\n' "player_notes_json=$notes" >> "$GITHUB_OUTPUT"
+
       - name: Require successful main checks
+        id: checks
+        if: steps.batch.outputs.bump == 'false' || steps.notes.outputs.player_notes_json != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -64,20 +91,28 @@ jobs:
               --branch main --event push --commit "$RELEASE_SHA" --limit 1 \
               --json status,conclusion --jq '.[0] | select(.status == "completed") | .conclusion')
             if [[ "$result" != success ]]; then
+              if [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
+                echo "::notice::No release: $workflow has no successful run for $RELEASE_SHA."
+                exit 0
+              fi
               echo "::error::$workflow has no successful run for $RELEASE_SHA."
               exit 1
             fi
           done
+          echo "ready=true" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v7
+        if: steps.checks.outputs.ready == 'true'
         with:
           node-version: 24
 
       - name: Version and publish the batch
-        if: steps.batch.outputs.bump == 'true'
+        if: steps.checks.outputs.ready == 'true' && steps.batch.outputs.bump == 'true'
         env:
-          PLAYER_NOTES: ${{ inputs.player_notes }}
+          PLAYER_NOTES_JSON: ${{ steps.notes.outputs.player_notes_json }}
         run: |
+          PLAYER_NOTES=$(jq -r . <<< "$PLAYER_NOTES_JSON")
+          export PLAYER_NOTES
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           bash scripts/bump-version.sh
@@ -85,6 +120,7 @@ jobs:
           git push --atomic --follow-tags origin main
 
       - name: Deploy to Render
+        if: steps.checks.outputs.ready == 'true'
         env:
           RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
         run: |
@@ -97,6 +133,7 @@ jobs:
           echo "Asked Render to deploy $(git rev-parse --short HEAD)."
 
       - name: Deploy the landing Worker
+        if: steps.checks.outputs.ready == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
