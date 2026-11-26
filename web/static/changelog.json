@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.73.9",
+    "date": "2026-11-26",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "preserve exit diagnostics across cached navigation (#362)"
+      }
+    ]
+  },
+  {
     "version": "0.73.8",
     "date": "2026-11-26",
     "changes": [
