@@ -417,7 +417,7 @@ def test_a_stalled_page_asks_for_the_inputs_it_dropped():
         assert snippet in ask_src
 
     # It asks from inside the stall, before the stall returns.
-    stall_idx = src.index("// Too far ahead — stall to let peer catch up")
+    stall_idx = src.index("const stallThreshold = _rbInputStallThreshold();")
     stall_src = src[stall_idx : src.index("_markTickReturn('skip:rb-input-stall');", stall_idx)]
     assert "_askForMissingInputs(p, rbApplyFrame, windowEdge);" in stall_src
 
@@ -701,7 +701,7 @@ def test_local_freeze_is_credited_to_every_deadline_that_drops_a_peer():
     credit_src = src[idx : src.index("\n  };\n", idx)]
     for snippet in (
         "_peerLastAdvanceTime[s] = Math.min(now, _peerLastAdvanceTime[s] + gap);",
-        "_rbInputStallStartTime = Math.min(now, _rbInputStallStartTime + gap);",
+        "_rbInputStallAt.set(slot, Math.min(now, startedAt + gap));",
         "_pacingThrottleStartAt = Math.min(now, _pacingThrottleStartAt + gap);",
     ):
         assert snippet in credit_src

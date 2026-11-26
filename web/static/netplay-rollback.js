@@ -4313,8 +4313,8 @@
   let _wasmStepActive = false;
   const TICK_STUCK_WARN_MS = 2000;
   const TICK_STUCK_ERROR_MS = 5000;
-  let _rbInputStallKey = '';
-  let _rbInputStallStartTime = 0;
+  let _rbInputStallFrame = -1;
+  const _rbInputStallAt = new Map();
   let _strictMenuResendState = {}; // slot -> { key, lastAt }
   // P4: last observed failed_rollbacks counter (logged only — see policy below).
   let _rbLastFailedRollbacks = 0;
@@ -12555,10 +12555,7 @@
   // -- Per-peer state cleanup (Invariant I2) --------------------------------
 
   const clearPeerStallTimers = (slot) => {
-    if (_rbInputStallKey.startsWith(`${slot}:`)) {
-      _rbInputStallKey = '';
-      _rbInputStallStartTime = 0;
-    }
+    _rbInputStallAt.delete(slot);
     _lockstepWaitAt.delete(slot);
   };
 
@@ -16930,8 +16927,8 @@
     _resumeInputGuardUntil = 0;
     _stallStart = 0;
     _resetStrictMenuResends();
-    _rbInputStallKey = '';
-    _rbInputStallStartTime = 0;
+    _rbInputStallFrame = -1;
+    _rbInputStallAt.clear();
     _rbPendingInputLastLogAt = 0;
     window._netplayFrameLog = [];
 
@@ -18329,7 +18326,9 @@
     for (const s of Object.keys(_peerLastAdvanceTime)) {
       _peerLastAdvanceTime[s] = Math.min(now, _peerLastAdvanceTime[s] + gap);
     }
-    if (_rbInputStallStartTime > 0) _rbInputStallStartTime = Math.min(now, _rbInputStallStartTime + gap);
+    for (const [slot, startedAt] of _rbInputStallAt) {
+      _rbInputStallAt.set(slot, Math.min(now, startedAt + gap));
+    }
     // The lockstep wait drops a player at its deadline too (specs/tick_deadlines.qnt).
     for (const [slot, startedAt] of _lockstepWaitAt) {
       _lockstepWaitAt.set(slot, Math.min(now, startedAt + gap));
@@ -19094,9 +19093,16 @@
           // cap is now 7, so mispredictions 8+ deep were being skipped.)
           // Legacy mode keeps its own delay+4 sizing.
           const stallThreshold = _rbInputStallThreshold();
+          if (_rbInputStallFrame !== rbApplyFrame) {
+            _rbInputStallFrame = rbApplyFrame;
+            if (_rbInputStallAt.size) _rbInputStallAt.clear();
+          }
+          let blocked = null;
           for (const p of rbInputPeers) {
-            if (_peerPhantom[p.slot]) continue;
-            if (rbApplyFrame < _admissionInputFloor(p.slot)) continue;
+            if (_peerPhantom[p.slot] || rbApplyFrame < _admissionInputFloor(p.slot)) {
+              _rbInputStallAt.delete(p.slot);
+              continue;
+            }
             const peerFrame = _lastRemoteFramePerSlot[p.slot] ?? -1;
             const windowEdge = _frameNum - DELAY_FRAMES - KN_MAX_VISIBLE_ROLLBACK_DEPTH;
             // Apply frames before init - delay ran in lockstep on the legacy
@@ -19130,13 +19136,10 @@
                   keptSlotWaitAt = nowRbInputStall;
                   _keptSlotFirstInputAt.set(p.slot, keptSlotWaitAt);
                 }
-                const rbStallKey = `${p.slot}:${rbApplyFrame}`;
-                if (_rbInputStallKey !== rbStallKey) {
-                  _rbInputStallKey = rbStallKey;
-                  _rbInputStallStartTime = nowRbInputStall;
-                }
-                const stalledMs =
-                  nowRbInputStall - ((firstWait ? keptSlotWaitAt : undefined) ?? _rbInputStallStartTime);
+                const startedAt =
+                  (firstWait ? keptSlotWaitAt : undefined) ?? _rbInputStallAt.get(p.slot) ?? nowRbInputStall;
+                _rbInputStallAt.set(p.slot, startedAt);
+                const stalledMs = nowRbInputStall - startedAt;
                 if (stalledMs >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
                   markPeerPhantomForStallTimeout(
                     p.slot,
@@ -19147,30 +19150,34 @@
                     `RB-INPUT-STALL-TIMEOUT f=${_frameNum} apply=${rbApplyFrame} slot=${p.slot} ` +
                       `adv=${adv} stalledMs=${Math.round(stalledMs)} — force-releasing rollback input stall`,
                   );
-                  _rbInputStallKey = '';
-                  _rbInputStallStartTime = 0;
+                  _rbInputStallAt.delete(p.slot);
                   continue;
                 }
-                // Too far ahead — stall to let peer catch up, and ask for
-                // what it has already sent that this page does not hold.
+                // Each peer's budget expires independently, even when an
+                // earlier peer is the one currently blocking this frame.
                 _askForMissingInputs(p, rbApplyFrame, windowEdge);
-                if (!_rbStallLogged || _frameNum - _rbStallLogged >= 60) {
-                  _syncLog(
-                    `RB-INPUT-STALL f=${_frameNum} apply=${rbApplyFrame} slot=${p.slot} ` +
-                      `adv=${adv} stalledMs=${Math.round(stalledMs)} — stalling ` +
-                      (firstWait ? '(first input since the transport reset)' : '(rollback budget exhausted)'),
-                  );
-                  _rbStallLogged = _frameNum;
-                }
-                _pushTickProfile({ f: _frameNum, path: 'stall', total: 0, gap: gapAtEdge ? 1 : 0, adv });
-                _markTickReturn('skip:rb-input-stall');
-                return;
+                blocked ??= { slot: p.slot, adv, stalledMs, firstWait, gapAtEdge };
+                continue;
               }
               // Within rollback budget — let C engine predict through it
             }
+            if (_rbInputStallAt.size) _rbInputStallAt.delete(p.slot);
           }
-          _rbInputStallKey = '';
-          _rbInputStallStartTime = 0;
+          if (blocked) {
+            const { slot, adv, stalledMs, firstWait, gapAtEdge } = blocked;
+            if (!_rbStallLogged || _frameNum - _rbStallLogged >= 60) {
+              _syncLog(
+                `RB-INPUT-STALL f=${_frameNum} apply=${rbApplyFrame} slot=${slot} ` +
+                  `adv=${adv} stalledMs=${Math.round(stalledMs)} — stalling ` +
+                  (firstWait ? '(first input since the transport reset)' : '(rollback budget exhausted)'),
+              );
+              _rbStallLogged = _frameNum;
+            }
+            _pushTickProfile({ f: _frameNum, path: 'stall', total: 0, gap: gapAtEdge ? 1 : 0, adv });
+            _markTickReturn('skip:rb-input-stall');
+            return;
+          }
+          if (_rbInputStallAt.size) _rbInputStallAt.clear();
           _checkPredictedKnown(rbInputPeers, rbApplyFrame);
         }
 
@@ -22454,7 +22461,14 @@
       const mod = gm.Module;
       mod.HEAPU8.set(bytes, _syncBufPtr);
       const lt0 = performance.now();
-      const result = mod._kn_sync_write(_syncBufPtr, bytes.length);
+      let result;
+      try {
+        result = mod._kn_sync_write(_syncBufPtr, bytes.length);
+      } catch (error) {
+        // A native trap may have already mutated live state.
+        _handleCoreFatal('kn-sync-write', error);
+        return;
+      }
       const lt1 = performance.now();
 
       if (result !== 0) {
@@ -22797,6 +22811,8 @@
     _predictionsPaused = false;
     _lockstepWaitFrame = -1;
     _lockstepWaitAt.clear();
+    _rbInputStallFrame = -1;
+    _rbInputStallAt.clear();
     _hudRollbackEvents = 0;
     _predictedKnownCount = 0;
     _hudRollbackDepthSamples = [];
@@ -23087,7 +23103,7 @@
   const _currentStallMs = (now) => {
     const starts = [
       _stallStart,
-      _rbInputStallStartTime,
+      ..._rbInputStallAt.values(),
       _rollbackStallStart,
       _pacingThrottleStartAt,
       _awaitingResyncAt,

@@ -687,6 +687,7 @@ if (LATE_JOIN) {
       }
       if (lateJoin.stateDropped) lateJoin.reopened = true;
       const server = socket.connectToServer();
+      socket.onMessage((message) => server.send(message));
       server.onMessage((message) => {
         if (!lateJoin.stateDropped && String(message).includes('"late-join-state"')) {
           lateJoin.stateDropped = true;

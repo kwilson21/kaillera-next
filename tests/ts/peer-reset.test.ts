@@ -231,20 +231,21 @@ const keptRuntime = () => {
     const RB_WORKER_COPROC=false,_syncQueueEpoch=1;
     ${reconnectProofSource(src)}
     const _maskMatchScheduled=false,_inputSettledBefore={},_admissionInputFloor=()=>0,_inputFloor=()=>30;
-    let resets=0,sent=0,present=true;
+    let resets=0,sent=0,present=true,rollbackPeers=[{slot:SLOT}];
     const mod={_kn_rollback_slot_reset(){resets++},_kn_feed_input(){sent++}};
     const window={KNCore,EJS_emulator:{gameManager:{Module:mod}},dispatchEvent(){}};
     const CustomEvent=class {};
     const _config={matchId:"match"};
     const _syncLog=()=>{},_testRunPastEdgeFrame=()=>-1,_pushTickProfile=()=>{},_markTickReturn=()=>{};
-    let _rbInputStallKey='',_rbInputStallStartTime=0,_rbStallLogged=0,_predictedKnownCount=0;
+    let _rbInputStallFrame=50,_rbStallLogged=0,_predictedKnownCount=0;
+    const _rbInputStallAt=new Map();
     let _lockstepWaitFrame=-1,_lockstepWaitLastLogAt=0,_stallStart=0;
     const _lockstepWaitAt=new Map();
     ${part('  const clearPeerStallTimers =', '  const resetPeerRollbackTransport =')}
     const _lastRemoteFramePerSlot={},_inputDroppedAheadUpTo={},_rbInputStallThreshold=()=>8;
     const _frameNum=52,DELAY_FRAMES=2,KN_MAX_VISIBLE_ROLLBACK_DEPTH=7,RB_TRUE_ROLLBACK=true;
     const MAX_STALL_MS=3000,RESEND_TIMEOUT_MS=2000,_askForMissingInputs=()=>{};
-    const getInputPeers=()=>present?[{slot:SLOT}]:[];
+    const getInputPeers=()=>present?rollbackPeers:[];
     const _pendingCInputsSortFn=(a,b)=>a.frame-b.frame;
     const _primeLateJoinInactiveInput=()=>{};
     const _feedWatched=(m,s,t,feed)=>feed();
@@ -268,8 +269,10 @@ const keptRuntime = () => {
       ${part('        // for ever. A replay already queued runs', '        // ── Pre-tick:')}
       return true;
     };
-    globalThis.armRollback=(slot)=>{_rbInputStallKey=slot+':50';_rbInputStallStartTime=now};
-    globalThis.rollbackStart=()=>_rbInputStallStartTime;
+    globalThis.enableSecondRollbackPeer=()=>{rollbackPeers.push({slot:2});_lastRemoteFramePerSlot[2]=40};
+    globalThis.supplyFirstSlotInput=()=>{_remoteInputs[SLOT]={50:{buttons:1}};delete _awaitFirstInputAfterReset[SLOT];_keptSlotFirstInputAt.delete(SLOT)};
+    globalThis.armRollback=(slot)=>{_rbInputStallAt.set(slot,now)};
+    globalThis.rollbackStart=(slot)=>_rbInputStallAt.get(slot);
     globalThis.isSlotPhantom=(slot)=>!!_peerPhantom[slot];
     globalThis.setNow=(ms)=>{now=ms};
     globalThis.setPresent=(v)=>{present=v};
@@ -288,8 +291,10 @@ const keptRuntime = () => {
   const runtime: {
     tick: () => true | undefined;
     lockstepTick: () => true | undefined;
+    enableSecondRollbackPeer: () => void;
+    supplyFirstSlotInput: () => void;
     armRollback: (slot: number) => void;
-    rollbackStart: () => number;
+    rollbackStart: (slot: number) => number | undefined;
     isSlotPhantom: (slot: number) => boolean;
     resentSlots: () => string;
     setNow: (ms: number) => void;
@@ -377,10 +382,10 @@ test('resetting a peer only clears its own rollback wait', () => {
   const r = keptRuntime();
   r.armRollback(2);
   r.reset('reconnect');
-  assert.equal(r.rollbackStart(), 100);
+  assert.equal(r.rollbackStart(2), 100);
   r.armRollback(SLOT);
   r.reset('reconnect');
-  assert.equal(r.rollbackStart(), 0);
+  assert.equal(r.rollbackStart(SLOT), undefined);
 });
 
 test('lockstep releases the older blocker on time and gives the reset slot its own deadline', () => {
@@ -397,4 +402,20 @@ test('lockstep releases the older blocker on time and gives the reset slot its o
   r.setNow(9900);
   assert.equal(r.lockstepTick(), true);
   assert.equal(r.isSlotPhantom(SLOT), true);
+});
+
+test('rollback keeps an older blocker deadline while a reset slot also waits', () => {
+  const r = keptRuntime();
+  r.enableSecondRollbackPeer();
+  r.supplyFirstSlotInput();
+  assert.equal(r.tick(), undefined);
+  r.setNow(4900);
+  r.reset('reconnect');
+  assert.equal(r.tick(), undefined);
+  r.setNow(5100);
+  assert.equal(r.tick(), undefined);
+  assert.equal(r.isSlotPhantom(2), true);
+  assert.equal(r.isSlotPhantom(SLOT), false);
+  r.supplyFirstSlotInput();
+  assert.equal(r.tick(), true);
 });

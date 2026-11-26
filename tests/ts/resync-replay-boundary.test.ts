@@ -19,22 +19,27 @@ type Tick = (
   installed?: number;
   writeWhileReplaying?: boolean;
   target: number;
+  fatalBranch?: string;
+  canContinue: boolean;
 };
 
 const fixture = (
   target: number,
   stateFrame: number,
-  { warnAt = Infinity, capacity = 8, nativeResult = 0 } = {},
+  { warnAt = Infinity, capacity = 8, nativeResult = 0, nativeThrows = false } = {},
 ): Tick =>
   runInNewContext(
     `
     let now = 100, _frameNum = 100, replaying = true;
     const performance = {now: () => now};
-    let installed, writeWhileReplaying;
+    let installed, writeWhileReplaying, fatalBranch;
+    let _coreFatalError = false;
+    const _handleCoreFatal = (branch) => { fatalBranch = branch; _coreFatalError = true; };
     const mod = {
       HEAPU8: new Uint8Array(16),
       _kn_sync_write: () => {
         writeWhileReplaying = replaying;
+        if (nativeThrows) throw Error("native write trapped after mutation");
         return nativeResult;
       },
       _kn_set_frame: (frame) => {
@@ -68,19 +73,24 @@ const fixture = (
     ${from('  const _syncStateCanInstall =', '  // -- Init / Stop API')}
     ${from('  let _cancelSyncTargetClock', '  // A resync state at most')}
     ${from('  const SYNC_APPLY_REPLAY_WAIT_MS', '  // Coordinated sync dispatch')}
-    const tick = (ms, frame) => {
-      now = ms;
-      _frameNum = frame;
+    const applyAtBoundary = () => {
       try {
         ${from('    const pending = _pendingResyncState;\n    const atSyncBoundary =', '    if (_coreFatalError) return; // sync application')}
       } catch (error) {
         if (error.message !== 'settled-test-boundary') throw error;
       }
-      return { replaying, installed, writeWhileReplaying, target: _syncTargetFrame };
+      if (_coreFatalError) return false;
+      return true;
+    };
+    const tick = (ms, frame) => {
+      now = ms;
+      _frameNum = frame;
+      const canContinue = !_coreFatalError && applyAtBoundary();
+      return { replaying, installed, writeWhileReplaying, target: _syncTargetFrame, fatalBranch, canContinue };
     };
     tick;
     `,
-    { target, stateFrame, warnAt, capacity, nativeResult },
+    { target, stateFrame, warnAt, capacity, nativeResult, nativeThrows },
   );
 
 test('a coordinated future snapshot keeps pending replay until its install boundary', () => {
@@ -419,4 +429,15 @@ test('an expired guest clock cannot release a replacement or reset match hold', 
   clock('advance', 4000);
   assert.equal(clock('stale', 4000, 1).target, 102);
   assert.equal(clock('advance', 6100).target, -1);
+});
+
+test('a trap during native resync terminates the match before replay can step', () => {
+  const tick = fixture(100, 100, { nativeThrows: true });
+  assert.equal(tick(100, 100).replaying, true);
+  const trapped = tick(1100, 100);
+  assert.equal(trapped.writeWhileReplaying, true);
+  assert.equal(trapped.installed, undefined);
+  assert.equal(trapped.fatalBranch, 'kn-sync-write');
+  assert.equal(trapped.canContinue, false);
+  assert.equal(tick(1200, 100).canContinue, false);
 });
