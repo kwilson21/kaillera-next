@@ -7,18 +7,28 @@ import { decodeCheckpoint, type CheckpointWire } from '../../web/src/checkpoint-
 import type { Input } from '../../web/src/owner-proof.ts';
 
 type Filter = (from: number, m: CheckpointWire) => boolean;
+type TestPeer = {
+  frame: number;
+  scope: boolean;
+  route: boolean;
+  restores: number;
+  steps: number;
+  resumed: number;
+  logged: string[];
+  wake: (() => void) | null;
+};
 async function match(allow: Filter = () => true, size = 3) {
   const members = Array.from({ length: size }, (_, slot) => ({ slot, sid: 'player-' + slot }));
   const scope = { match: 'session', mask: (1 << size) - 1, fingerprint: 'core-rom', members };
-  const state = members.map(() => ({
+  const state = members.map((): TestPeer => ({
     frame: 0,
     scope: true,
     route: true,
     restores: 0,
     steps: 0,
     resumed: 0,
-    logged: Array<string>(),
-    wake: null as (() => void) | null,
+    logged: [],
+    wake: null,
   }));
   const queue: { from: number; msg: CheckpointWire }[] = [];
   const traffic: { from: number; msg: CheckpointWire }[] = [];
