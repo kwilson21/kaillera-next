@@ -122,3 +122,53 @@ module reconnect_settle_unguarded {
     .then(request).then(receive).then(drain).then(takeDirect).then(deliver)
     .expect(not(directSettlementIsConfirmed))
 }
+
+// Model wall-clock wakes while the frame pump is idle. Native readiness
+// means the current owner's input has been replayed at an aligned frame.
+module host_reconnect_clock {
+  const RECOVERY_CLOCK: bool
+  pure val LIMIT = 3
+  var asks: int
+  var outcome: str
+  var confirmed: bool
+
+  action init = all { asks' = 0, outcome' = "waiting", confirmed' = false }
+  action wake(at: int, frameTick: bool, nativeReady: bool): bool = {
+    val service = (RECOVERY_CLOCK or frameTick) and outcome == "waiting"
+    all {
+      asks' = if (service and at < LIMIT and not(nativeReady) and asks < at) asks + 1 else asks,
+      outcome' =
+        if (not(service)) outcome
+        else if (at >= LIMIT) "expired"
+        else if (nativeReady) "captured"
+        else "waiting",
+      confirmed' = (confirmed or (service and (at < LIMIT) and nativeReady)),
+    }
+  }
+  action step = {
+    nondet at = 1.to(LIMIT).oneOf()
+    nondet frameTick = Set(false, true).oneOf()
+    nondet nativeReady = Set(false, true).oneOf()
+    wake(at, frameTick, nativeReady)
+  }
+  val noCaptureBeforeProof = outcome != "captured" or confirmed
+
+  run stoppedFramesStillRetryAndExpireTest =
+    init.then(wake(1, false, false)).then(wake(2, false, false)).then(wake(3, false, false))
+      .expect(outcome == (if (RECOVERY_CLOCK) "expired" else "waiting") and asks == (if (RECOVERY_CLOCK) 2 else 0))
+      .then(wake(3, false, true))
+      .expect(outcome != "captured")
+
+  run stoppedFramesCanSettleAfterReplayTest =
+    init.then(wake(1, false, false)).expect(outcome == "waiting")
+      .then(wake(2, false, true))
+      .expect(outcome == (if (RECOVERY_CLOCK) "captured" else "waiting"))
+}
+
+module host_reconnect_clock_before {
+  import host_reconnect_clock(RECOVERY_CLOCK = false).*
+}
+
+module host_reconnect_clock_fixed {
+  import host_reconnect_clock(RECOVERY_CLOCK = true).*
+}

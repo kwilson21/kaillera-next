@@ -329,7 +329,7 @@ def test_the_push_deadline_runs_only_on_the_pushs_own_hand_over():
     flush = flush[: flush.index("\n  };\n")]
     assert "if (now - log.lastAt < INPUT_OOR_LOG_EVERY_MS) continue;" in flush
     assert "Object.entries" not in flush
-    assert "_serviceReconnectHostAnswers();\n    _flushResendLogs();" in src
+    assert "_creditLocalFreeze();\n    _flushResendLogs();" in src
 
 
 def test_an_escalation_push_is_a_full_state_and_the_counter_is_per_match():

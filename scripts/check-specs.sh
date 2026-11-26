@@ -462,6 +462,13 @@ $QUINT typecheck "$RECONNECT_DEBT"
 for variant in reconnect_answer_debt protected_reconnect_clock_before protected_reconnect_clock_fixed; do
   $QUINT test "$RECONNECT_DEBT" --main="$variant" --backend="$BACKEND"
 done
+HOST_RECONNECT_CLOCK=specs/reconnect_settle.qnt
+$QUINT typecheck "$HOST_RECONNECT_CLOCK"
+for variant in host_reconnect_clock_before host_reconnect_clock_fixed; do
+  $QUINT test "$HOST_RECONNECT_CLOCK" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$HOST_RECONNECT_CLOCK" --main=host_reconnect_clock_fixed --invariant=noCaptureBeforeProof \
+  --max-samples=1000 --max-steps=8 --backend="$BACKEND"
 for variant in coordinated_guest_hold_clock_before coordinated_guest_hold_clock_fixed; do
   $QUINT test "$FLOW" --main="$variant" --backend="$BACKEND"
 done

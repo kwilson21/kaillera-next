@@ -554,6 +554,15 @@
         "specs/resync_flow.qnt"
       ]
     },
+    "host-reconnect-proof-clock": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _armHostReconnectClock =",
+      "line": 8644,
+      "coverage": [
+        "tests/test_reconnect_settle_source.py",
+        "specs/reconnect_settle.qnt"
+      ]
+    },
     "guest-protected-reconnect-clock": {
       "path": "web/static/netplay-rollback.js",
       "anchor": "const _armReconnectAnswerClock =",
@@ -1165,14 +1174,15 @@
         "fr": "FR-recovery",
         "dp": "DP-pacing",
         "kind": "necessary",
-        "mechanism": "Frame ticks still service host protected reconnect proof and verified-checkpoint recovery. A pacing timeout can mark a peer phantom and end its recovery attempt. Coordinated installation observes frame progression. Host escalation delivery, guest hold expiry, and guest protected reconnect deadlines run on recovery-owned timers.",
+        "mechanism": "Frame ticks still service verified-checkpoint recovery. Host protected reconnect proof retries, expiry, and dispatch use the recovery clock. A pacing timeout can mark a peer phantom and end its recovery attempt. Coordinated installation observes frame progression. Host escalation delivery, guest hold expiry, and guest protected reconnect deadlines run on recovery-owned timers.",
         "evidence": [
           "tick",
           "recovery-apply",
           "coordinated-capture-clock",
           "escalation-clock",
           "guest-coordinated-hold-clock",
-          "guest-protected-reconnect-clock"
+          "guest-protected-reconnect-clock",
+          "host-reconnect-proof-clock"
         ]
       }
     ],

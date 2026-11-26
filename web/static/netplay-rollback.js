@@ -8086,6 +8086,7 @@
     _syncChainMovedAt = {};
     _hostReconnectFenceVersion++;
     _hostReconnectDebts.clear();
+    _cancelHostReconnectClock();
     _hostAuthoredReceipts.clear();
     _deferredPhantomRecovery.clear();
     _pendingResyncState = null;
@@ -8474,6 +8475,7 @@
       _markHostMatchUnverified(debt, 'participant became phantom');
     }
     _hostReconnectDebts.set(slot, debt);
+    _armHostReconnectClock();
   };
   const _recordHostReconnectReceipt = (word) => {
     const { slot, frame, author } = word;
@@ -8632,6 +8634,37 @@
       `peer-recovery resync: host scheduled full sync for slot=${peer.slot} at f=${_frameNum} ` +
         `guests=${targets.map((sid) => _peers[sid]?.slot ?? '?').join(',')}`,
     );
+  };
+  let _stopHostReconnectClock = null;
+  const _cancelHostReconnectClock = () => {
+    const stop = _stopHostReconnectClock;
+    _stopHostReconnectClock = null;
+    stop?.();
+  };
+  const _armHostReconnectClock = () => {
+    if (_stopHostReconnectClock) return;
+    const epoch = _syncQueueEpoch;
+    const stop = window.KNCore.startEvery(() => {
+      if (_stopHostReconnectClock !== stop) return;
+      if (
+        epoch !== _syncQueueEpoch ||
+        _phase !== PHASE_RUNNING ||
+        _hostMatchUnverified() ||
+        (!_hostReconnectDebts.size && !_deferredPhantomRecovery.size)
+      ) {
+        _cancelHostReconnectClock();
+        return;
+      }
+      if (_checkpoint?.busy || (_config?.matchReturn && !_config.matchReturn.playing)) return;
+      // A timer runs between native steps. The proof and capture gates
+      // still check the current frame, authored inputs and pending replay.
+      try {
+        _serviceReconnectHostAnswers();
+      } catch (error) {
+        _syncLog(`reconnect proof wake failed: ${error}`);
+      }
+    }, 16);
+    _stopHostReconnectClock = stop;
   };
   const _serviceReconnectHostAnswers = () => {
     if (_hostMatchUnverified()) return;
@@ -11453,6 +11486,7 @@
               epoch: _syncQueueEpoch,
               gen: _syncQueueGen[remoteSid] || 0,
             });
+            _armHostReconnectClock();
           } else _scheduleRecoveredHostGuest(remoteSid, peer);
         } else if (recoveryStep === 'ask') {
           // Another guest, which this page held as a phantom: it ran that
@@ -17667,6 +17701,7 @@
     _reconnectAnswerDebt = null;
     _cancelReconnectAnswerClock();
     _hostReconnectDebts.clear();
+    _cancelHostReconnectClock();
     _hostAuthoredReceipts.clear();
     _deferredPhantomRecovery.clear();
     _reconnectProofPeers.clear();
@@ -18379,7 +18414,6 @@
       return;
     }
     _creditLocalFreeze();
-    _serviceReconnectHostAnswers();
     _flushResendLogs();
     _checkStateTransition();
     _chk('post-state-transition');

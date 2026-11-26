@@ -72,7 +72,12 @@ def _race(*, transport, order, tag):
         if (frame < _frameNum - DELAY_FRAMES && buttons !== nativeButtons) replayOwed = true;
       }
     };
-    const window = {KNCore: {syncFollowUp}, EJS_emulator: {gameManager: {Module: tickMod}}};
+    let recoveryWake;
+    const startEvery = (run) => {
+      recoveryWake = run;
+      return () => { recoveryWake = undefined; };
+    };
+    const window = {KNCore: {syncFollowUp, startEvery}, EJS_emulator: {gameManager: {Module: tickMod}}};
     const finishReplay = () => {
       if (replayOwed) nativeButtons = 128;
       replayOwed = false;
@@ -97,7 +102,8 @@ def _race(*, transport, order, tag):
       ? _answerDirectSyncRequest('M', 9, {transport: fixture.transport})
       : _receiveReconnectProofRequest('M', 9, fixture.transport);
     const service = async () => {
-      _serviceReconnectHostAnswers();
+      if (fixture.order === 'recovery-clock' || fixture.order === 'recovery-expiry' || recoveryWake) recoveryWake?.();
+      else _serviceReconnectHostAnswers();
       await Promise.resolve();
       await Promise.resolve();
     };
@@ -124,7 +130,13 @@ def _race(*, transport, order, tag):
     await service();
     const capturesBeforeLateInput = captures.length;
     let capturesAfterDrain = null;
-    if (['request-first', 'expiry', 'reset', 'overlap', 'window-loss', 'native-failure', 'unowned', 'stale-input'].includes(fixture.order)) {
+    if (fixture.order === 'recovery-expiry') {
+      now = 600;
+      await service();
+      now = 24100;
+      await service();
+    }
+    if (['request-first', 'expiry', 'reset', 'overlap', 'window-loss', 'native-failure', 'unowned', 'stale-input', 'recovery-clock'].includes(fixture.order)) {
       if (fixture.order === 'expiry') {
         now = 24100;
         await service();
@@ -227,3 +239,17 @@ def test_protected_requests_without_current_authored_proof_never_capture(transpo
     result = _race(transport=transport, order=order, tag=96)
     assert result["captures"] == []
     assert result["cutoff"] is None
+
+
+def test_host_recovery_clock_resends_and_captures_only_after_native_replay_without_ticks():
+    actual = _race(transport="dc", order="recovery-clock", tag=96)
+    assert actual["asks"] == ["resend:96"]
+    assert (actual["capturesBeforeLateInput"], actual["capturesAfterDrain"]) == (0, 0)
+    assert actual["captures"] == [{"sid": "M", "buttons": 128, "transport": "dc"}]
+
+
+def test_host_recovery_clock_expires_missing_proof_without_ticks():
+    actual = _race(transport="dc", order="recovery-expiry", tag=96)
+    assert actual["asks"] == ["resend:96", "resend:96"]
+    assert actual["captures"] == []
+    assert sum("reason=reconnect input proof expired" in line for line in actual["logs"]) == 1
