@@ -842,7 +842,7 @@ def test_guest_delay_preference_readable(browser, server_url):
             "value": "0",
             "hidden": True,
             "effective": "(solo: no delay)",
-            "summary": "Resync on · ROM sharing off · Solo · no delay",
+            "summary": "Resync on · Dual input on · ROM sharing off · Solo · no delay",
         }
 
         guest.goto(f"{server_url}/play.html?room=DLYS4{_R}&name=Guest")
@@ -909,7 +909,7 @@ def test_guest_delay_preference_readable(browser, server_url):
             "value": "2",
             "delay": 2,
             "effective": "(Excellent)",
-            "summary": "Resync on · ROM sharing off · Fixed 2",
+            "summary": "Resync on · Dual input on · ROM sharing off · Fixed 2",
         }
     finally:
         host.close()

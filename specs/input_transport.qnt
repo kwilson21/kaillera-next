@@ -420,9 +420,12 @@ module input_transport_fixed {
 }
 
 // One connected peer in dual mode. A successful send queues the current
-// input on the reliable channel; its optional history is represented by
-// the previous frame. The bare copy can be skipped, lost, or arrive first.
-module input_transport_dual {
+// input on the reliable channel. On the fast channel, the history is
+// represented by the previous frame and ignores the highest-frame ack,
+// which can advance past a hole.
+module input_transport_dual_model {
+  const REPEAT_FAST_HISTORY: bool
+  const QUEUE_FAST_FIRST: bool
   var made: int
   var ordered: List[Set[int]]
   var fast: Set[int]
@@ -443,7 +446,9 @@ module input_transport_dual {
     ordered.length() > 0, receive(ordered.head()), ordered' = ordered.tail(), fast' = fast,
   }
   action deliverFast(frame: int): bool = all {
-    fast.contains(frame), receive(Set(frame)), fast' = fast.exclude(Set(frame)), ordered' = ordered,
+    fast.contains(frame),
+    receive(if (REPEAT_FAST_HISTORY and frame > 0) Set(frame - 1, frame) else Set(frame)),
+    fast' = fast.exclude(Set(frame)), ordered' = ordered,
   }
   // Losing an unordered copy, including the last one before the DC closes.
   action loseFast(frame: int): bool = all {
@@ -459,10 +464,50 @@ module input_transport_dual {
     got.contains(f) or ordered.indices().exists(i => ordered[i].contains(f)))
 
   run fastOvertakesReliableTest = init.then(send(false)).then(send(true)).then(deliverFast(1))
-    .expect(got == Set(1) and feeds == 1)
+    .expect(got == (if (REPEAT_FAST_HISTORY) Set(0, 1) else Set(1)) and feeds == got.size())
     .then(deliverOrdered).then(deliverOrdered).expect(got == Set(0, 1) and feeds == 2)
   run reliableArrivesFirstTest = init.then(send(true)).then(deliverOrdered).then(deliverFast(0))
     .expect(got == Set(0) and feeds == 1)
   run fastLostOrUnavailableTest = init.then(send(true)).then(loseFast(0)).then(send(false))
     .then(deliverOrdered).then(deliverOrdered).expect(got == Set(0, 1) and feeds == 2)
+
+  // The first fast packet is lost and the ordered channel is held. A later
+  // fast packet can fill the hole before the ordered channel unblocks.
+  run lostFastPacketWhileOrderedWaitsTest = init.then(send(true)).then(loseFast(0))
+    .then(send(true)).then(deliverFast(1))
+    .expect(got.contains(0) == REPEAT_FAST_HISTORY and got.contains(1) and feeds == got.size())
+
+  // This is the order of send() calls within a tick. Delivery can still
+  // race across channels. The ordered channel keeps its retries first.
+  type SendPeer = { slot: int, canSendFast: bool, retries: List[int] }
+  type Write = { slot: int, fast: bool, frame: int }
+
+  pure def enqueueFast(queued: List[Write], peer: SendPeer, frame: int): List[Write] =
+    if (peer.canSendFast) queued.append({ slot: peer.slot, fast: true, frame: frame }) else queued
+
+  pure def enqueueOrdered(queued: List[Write], peer: SendPeer, frame: int): List[Write] =
+    peer.retries.append(frame).foldl(queued, (writes, tag) =>
+      writes.append({ slot: peer.slot, fast: false, frame: tag }))
+
+  def enqueueDual(peers: List[SendPeer], frame: int): List[Write] =
+    if (QUEUE_FAST_FIRST)
+      peers.foldl(peers.foldl(List(), (queued, p) => enqueueFast(queued, p, frame)),
+        (queued, p) => enqueueOrdered(queued, p, frame))
+    else peers.foldl(List(), (queued, p) => enqueueFast(enqueueOrdered(queued, p, frame), p, frame))
+
+  run fastForEveryPeerQueuesBeforeOrderedRetriesTest = {
+    val queued = enqueueDual(List(
+      { slot: 1, canSendFast: true, retries: List(3, 4) },
+      { slot: 2, canSendFast: true, retries: List() }
+    ), 5)
+    assert((queued.nth(0).fast and queued.nth(1).fast) == QUEUE_FAST_FIRST)
+  }
+}
+
+module input_transport_dual_bare {
+  import input_transport_dual_model(REPEAT_FAST_HISTORY = false, QUEUE_FAST_FIRST = false).*
+}
+
+module input_transport_dual {
+  import input_transport_dual_model(REPEAT_FAST_HISTORY = true, QUEUE_FAST_FIRST = true).*
 }

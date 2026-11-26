@@ -1037,7 +1037,7 @@ def test_dual_input_mode_is_a_host_choice_for_the_room(browser, server_url, room
         summary = host.locator("#host-controls .advanced-options > summary")
         summary.click()
         option = host.get_by_role("checkbox", name="Dual input mode", exact=True)
-        expect(option).not_to_be_checked()
+        expect(option).to_be_checked()
         expect(guest.locator("#opt-dual-input")).to_be_hidden()
         expect(host.get_by_role("button", name="About dual input mode")).to_have_count(0)
         help_text = host.locator("#dual-input-hint")
@@ -1056,9 +1056,9 @@ def test_dual_input_mode_is_a_host_choice_for_the_room(browser, server_url, room
         host.locator("#opt-resync").press("Tab")
         expect(option).to_be_focused()
         expect(help_text).to_be_visible()
-        if enabled:
+        if not enabled:
             option.press("Space")
-            expect(option).to_be_checked()
+            expect(option).not_to_be_checked()
         option.press("Tab")
         expect(help_text).to_be_hidden()
         host.select_option("#mode-select", "streaming")

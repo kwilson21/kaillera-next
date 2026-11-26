@@ -210,6 +210,49 @@ test('decodeInput reads packets the way the plain-JavaScript decoder did', () =>
   }
 });
 
+test('compact history sends seven lossless records in 80 bytes with a readable legacy header', () => {
+  const current = { buttons: 31, lx: 4, ly: -1, cx: -3, cy: 44 };
+  const history = Array.from({ length: 7 }, (_, i) => ({
+    frame: 93 + i,
+    buttons: 0xffffff - i,
+    lx: -128 + i,
+    ly: 127 - i,
+    cx: -83 + i,
+    cy: 83 - i,
+  }));
+  const packet = encodeInput(100, current, 95, history, true);
+  assert.equal(packet.byteLength, 80);
+  assert.deepEqual(decodeInput(packet.buffer), { frame: 100, ...current, ackFrame: 95, redundant: history });
+  assert.deepEqual(decodeWords(Array.from(packet)), { frame: 100, ...current, ackFrame: 95, redundant: [] });
+});
+
+test('compact history falls back to full-width records when a value does not fit', () => {
+  const current = { buttons: 31, lx: 4, ly: -1, cx: -3, cy: 44 };
+  const past = { frame: 295, ...current };
+  for (const record of [
+    { ...past, lx: 128 },
+    { ...past, buttons: 0x1000000 },
+    { ...past, frame: 44 },
+  ]) {
+    assert.deepEqual(encodeInput(300, current, 245, [record], true), encodeInput(300, current, 245, [record]));
+  }
+});
+
+test('compact history reads whole records from a truncated packet', () => {
+  const current = { buttons: 1, lx: -4, ly: 1, cx: 0, cy: 12 };
+  const history = [
+    { frame: 41, ...current },
+    { frame: 43, ...current },
+  ];
+  const packet = encodeInput(44, current, -1, history, true);
+  assert.deepEqual(decodeInput(packet.slice(0, -1).buffer), {
+    frame: 44,
+    ...current,
+    ackFrame: -1,
+    redundant: [history[0]],
+  });
+});
+
 test('a packet without redundancy has no redundant field at all', () => {
   assert.equal('redundant' in decodeInput(encodeInput(1, { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 }).buffer), false);
 });
