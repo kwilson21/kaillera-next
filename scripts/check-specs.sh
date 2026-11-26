@@ -426,9 +426,12 @@ $QUINT run specs/emulator_boot.qnt --main=emulator_boot_fixed --invariant=oneCur
 PAUSE=specs/late_join_pause.qnt
 $QUINT typecheck "$PAUSE"
 for variant in late_join_pause_before late_join_pause_host_side late_join_pause_before_resync \
-  late_join_pause_marker_at_send late_join_pause_current; do
+  late_join_pause_marker_at_send late_join_pause_current \
+  late_join_serve_failure_before late_join_serve_failure_fixed; do
   $QUINT test "$PAUSE" --main="$variant" --backend="$BACKEND"
 done
+$QUINT run "$PAUSE" --main=late_join_serve_failure_fixed --invariant=obsoleteFailurePreservesReplacement \
+  --max-samples=2000 --max-steps=8 --backend="$BACKEND"
 # Today: the game stays paused while a joiner has yet to load, a joiner who
 # is playing is never disconnected, the host's pause has a deadline that a
 # repeated request does not push back, a paused guest resumes on the host's
@@ -456,9 +459,13 @@ $QUINT run "$PAUSE" --main=late_join_pause_before_resync --invariant=holdBeforeT
 FLOW=specs/resync_flow.qnt
 $QUINT typecheck "$FLOW"
 for variant in resync_flow_before resync_flow_any_answer resync_flow_frame_named resync_flow_drop_older \
-  resync_flow_asked_from resync_flow_unnumbered resync_flow_rewinds resync_flow_current; do
+  resync_flow_asked_from resync_flow_unnumbered resync_flow_rewinds resync_flow_current \
+  resync_replay_boundary_before resync_replay_boundary_revoked_before \
+  resync_replay_boundary_native_before resync_replay_boundary_fixed; do
   $QUINT test "$FLOW" --main="$variant" --backend="$BACKEND"
 done
+$QUINT run "$FLOW" --main=resync_replay_boundary_fixed --invariants futureStateHasNoReplayDeadline rejectedStateKeepsReplay \
+  --max-samples=2000 --max-steps=10 --backend="$BACKEND"
 # A guest stopped at its target has a deadline, a state no newer than the
 # last one applied is never applied, and a request that is out can always
 # end. The last was violated before the request had a deadline of its own
@@ -1051,7 +1058,8 @@ $QUINT run "$BOOT_CONTINUATION" --main=late_join_boot_continuation_fixed --invar
 # ── Which controllers the game sees as plugged in, frame by frame ─────────
 MASK=specs/controller_mask.qnt
 $QUINT typecheck "$MASK"
-for variant in controller_mask_before controller_mask_unversioned controller_mask_fixed; do
+for variant in controller_mask_before controller_mask_unversioned controller_mask_fixed \
+  roster_prelude_lane_before roster_prelude_lane_fixed; do
   $QUINT test "$MASK" --main="$variant" --backend="$BACKEND"
 done
 # Before, each page set the mask when it heard the roster: pages ran the
@@ -1066,6 +1074,10 @@ done
 # every player page can.
 $QUINT run "$MASK" --main=controller_mask_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
+# An incomplete roster prelude never follows a replacement primary channel.
+$QUINT run "$MASK" --main=roster_prelude_lane_fixed --invariant=rosterPreludeStaysOnItsLane \
+  --max-samples=2000 --max-steps=10 --backend="$BACKEND"
 
 # ── What a removed player's slot is fed with, frame by frame ──────────────
 REMOVED=specs/removed_input.qnt
@@ -1115,11 +1127,14 @@ done
 # (session_log_store_unrecorded; evictionIsRecordedTest). No flush adds more
 # than its bound of rows (rowsPerFlushBounded): VIOLATED with one row per run
 # and no bound (session_log_store_unbounded; alternatingLinesTest).
-for variant in session_log_page_exit_before session_log_page_exit_current; do
+for variant in session_log_page_exit_before session_log_page_exit_current \
+  session_log_native_sample_before session_log_native_sample_fixed; do
   $QUINT test "$STORE" --main="$variant" --backend="$BACKEND"
 done
 $QUINT run "$STORE" --main=session_log_page_exit_current --invariant=newestWasSubmitted \
   --max-samples=1000 --max-steps=5 --backend="$BACKEND"
+$QUINT run "$STORE" --main=session_log_native_sample_fixed --invariant=submissionPreservesBufferedRecords \
+  --max-samples=1000 --max-steps=6 --backend="$BACKEND"
 $QUINT run "$STORE" --main=session_log_store_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 

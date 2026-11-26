@@ -10,7 +10,7 @@ Suh's Independence Axiom asks whether an FR can be maintained while adjusting an
 
 ## Independence Axiom
 
-| Metric | Baseline | v0.73.4 |
+| Metric | Baseline | v0.73.5 |
 | --- | ---: | ---: |
 | FRs × DPs | 14 × 14 | 14 × 14 |
 | Nonzero entries | 50 | 48 |
@@ -49,7 +49,7 @@ flowchart LR
 
 | Boundary | Observed constraint and ownership |
 | --- | --- |
-| Rollback and resynchronization | C tracks pending rollback and replay. JavaScript stages host snapshots. `_replayBlocksSyncApply` defers install, then can discard replay at its deadline. Applying a snapshot updates input settlement and invalidates the C ring's saved-state baseline. |
+| Rollback and resynchronization | C owns pending rollback and replay. JavaScript stages and validates host snapshots. A successful native write can supersede replay after the bounded wait and before frame alignment and input settlement. |
 | Reconnect and prediction | Identity and primary attempt changes reach `resetPeerState`. JavaScript clears its live frontier, while C can keep a safe same-owner slot and its predictions. A replacement owner or unsafe phantom history requires a reset. |
 | Late join and frame progression | The host publishes one pause and serves per-joiner leases. It resumes once each applicable serve ends. The joiner attaches a state, input bridge, and roster to the same host frame. Guest-side expiry gives a missing host pause a bounded release. |
 | Transport failure and recovery | A primary outage affects identity and answer debt. The recovery actor tracks delivery by recipient. The optional channel can disappear while reliable delivery continues. Letting that event mutate the simulation wait gave it an unrelated release decision. |
@@ -64,7 +64,13 @@ flowchart LR
 2. **P2 · Session teardown could lose the tail of a diagnostic upload.** Document exit now hands off the newest buffered tail in one bounded keepalive request. Acknowledgements still govern the live drain. The browser regression closes the document with a delayed collector. [PR #349](https://github.com/kwilson21/kaillera-next/pull/349)
 3. **P3 · Full peer reset could extend another slot's input wait.** A reset now clears only the affected slot's wait. The room's host-reservation policy can still gate frame progression, so this narrows the existing peer-to-pacing entry. The production-path regression and Quint's `otherWaitsStayArmed` cover the two-blocker case. [PR #350](https://github.com/kwilson21/kaillera-next/pull/350)
 
-Preserve the existing XState ownership for page, peer, boot, and per-recipient recovery lifecycles. Keep transport effects and retry schedules at that boundary. Route decoded input and attempt changes into simulation by slot, frame, and epoch. Keep hot frame execution synchronous, with C owning frame, state ring, and prediction history. The next useful recovery boundary is a single checked commit of state, frame, input floor, and replay disposition before publishing completion. Use an existing actor or Effect scope for asynchronous retries. Any change to roster cuts or late join must preserve host ordering and shared frame boundaries.
+The follow-ups on v0.73.5 preserve pending replay through a refused native write, preserve buffered diagnostics when optional native counters fail, and fence obsolete admission and roster messages by serve and channel. The diagnostics failure was outside the declared 48 current cells. The roster and recovery relationships still carry necessary authority. [PR #351](https://github.com/kwilson21/kaillera-next/pull/351) · [PR #352](https://github.com/kwilson21/kaillera-next/pull/352) · [PR #353](https://github.com/kwilson21/kaillera-next/pull/353) · [PR #354](https://github.com/kwilson21/kaillera-next/pull/354)
+
+### Recovery and pacing independence
+
+The v0.73.5 frame loop both services generic guest resync request deadlines and credits gaps in its own ticks to those request clocks. The acceptance test varies frame scheduling while keeping recovery inputs fixed. Retries and give-up must follow the same timeline, and snapshot install must still wait for a safe frame boundary.
+
+The candidate gives numbered generic requests a recovery-owned browser timer. Its production-path test retries at 8 and 16 seconds and gives up at 24 seconds with either regular or absent frame ticks. The v0.73.5 stopped-frame case never retries. Quint records the historical violation and bounded fixed property. The matrix cell remains for coordinated capture, installation and other recovery clocks that still depend on the frame loop. The candidate stays open while real-ROM delayed-answer hash verification is investigated. [PR #355](https://github.com/kwilson21/kaillera-next/pull/355)
 
 ## Verification
 

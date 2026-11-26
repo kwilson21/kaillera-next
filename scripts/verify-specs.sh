@@ -208,6 +208,8 @@ streaming_connection() {
 
 late_join_pause() {
   local PAUSE=specs/late_join_pause.qnt
+  verify "$PAUSE" late_join_serve_failure_fixed obsoleteFailurePreservesReplacement init 6
+  expect_violation "$PAUSE" late_join_serve_failure_before obsoleteFailurePreservesReplacement 3
   verify "$PAUSE" late_join_pause_current allHold
   verify "$PAUSE" late_join_pause_marker_at_send holdBeforeTheResyncFix
   verify "$PAUSE" late_join_pause_before_resync holdBeforeTheResyncFix
@@ -229,6 +231,11 @@ late_join_pause() {
 
 resync_flow() {
   local FLOW=specs/resync_flow.qnt
+  verify "$FLOW" resync_replay_boundary_fixed futureStateHasNoReplayDeadline init 8
+  expect_violation "$FLOW" resync_replay_boundary_before futureStateHasNoReplayDeadline 3
+  verify "$FLOW" resync_replay_boundary_fixed rejectedStateKeepsReplay init 8
+  expect_violation "$FLOW" resync_replay_boundary_revoked_before rejectedStateKeepsReplay 6
+  expect_violation "$FLOW" resync_replay_boundary_native_before rejectedStateKeepsReplay 6
   verify "$FLOW" resync_flow_current allHold
   verify "$FLOW" resync_flow_any_answer holdWithoutNumbers
   expect_violation "$FLOW" resync_flow_before aRequestCanAlwaysEnd
@@ -703,6 +710,8 @@ session_log_store() {
   verify "$STORE" session_log_store_current allHold
   verify "$STORE" session_log_page_exit_current newestWasSubmitted init 4
   expect_violation "$STORE" session_log_page_exit_before newestWasSubmitted 2
+  verify "$STORE" session_log_native_sample_fixed submissionPreservesBufferedRecords init 3
+  expect_violation "$STORE" session_log_native_sample_before submissionPreservesBufferedRecords 2
   # The shortest in one store: four lines in one flush, one row over the
   # store's cap, taking the other kind's line with it (5 steps). Over two
   # flushes it is 6 (jsLinesPushACLineOutTest, cLinesPushAJsLineOutTest).

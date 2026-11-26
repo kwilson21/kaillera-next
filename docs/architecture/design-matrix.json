@@ -490,6 +490,42 @@
         "tests/ts/peer-reset.test.ts",
         "specs/tick_deadlines.qnt"
       ]
+    },
+    "resync-replay-step": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _syncApplyReplayStep =",
+      "line": 17835,
+      "coverage": [
+        "tests/ts/resync-replay-boundary.test.ts",
+        "specs/resync_flow.qnt"
+      ]
+    },
+    "late-join-serve-owner": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const ownsServe = () =>",
+      "line": 14764,
+      "coverage": [
+        "tests/ts/late-join-serve-failure.test.ts",
+        "specs/late_join_pause.qnt"
+      ]
+    },
+    "roster-prelude-owner": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "Roster preludes belong to the selected ordered channel.",
+      "line": 11412,
+      "coverage": [
+        "tests/ts/controller-mask-rule.test.ts",
+        "specs/controller_mask.qnt"
+      ]
+    },
+    "optional-native-log-stats": {
+      "path": "web/static/netplay-rollback.js",
+      "anchor": "const _buildRollbackStats =",
+      "line": 7092,
+      "coverage": [
+        "tests/ts/rollback-session-log.test.ts",
+        "specs/session_log_store.qnt"
+      ]
     }
   },
   "baseline": {
@@ -1032,6 +1068,62 @@
           "peer-reset",
           "peer-wait-reset"
         ]
+      },
+      {
+        "fr": "FR-replay",
+        "dp": "DP-recovery",
+        "kind": "necessary",
+        "mechanism": "A successful native snapshot write can preempt pending replay after the bounded wait. Commit aligns the frame, invalidates the ring baseline, and reconciles the input floor.",
+        "evidence": [
+          "recovery-apply",
+          "native-frame-authority",
+          "resync-replay-step"
+        ]
+      },
+      {
+        "fr": "FR-recovery",
+        "dp": "DP-replay",
+        "kind": "necessary",
+        "mechanism": "Snapshot capture respects replay. Install waits for its frame and checks eligibility and buffer readiness before considering replay preemption. Native rejection preserves replay.",
+        "evidence": [
+          "resync-replay-step",
+          "native-frame-authority",
+          "recovery-apply"
+        ]
+      },
+      {
+        "fr": "FR-roster",
+        "dp": "DP-admission",
+        "kind": "necessary",
+        "mechanism": "Host admission completion and roster publication grant controller ownership. Failure can release only a pending slot still owned by its serve.",
+        "evidence": [
+          "admission-release",
+          "roster-frame-mask",
+          "late-join-serve-owner"
+        ]
+      },
+      {
+        "fr": "FR-roster",
+        "dp": "DP-peers",
+        "kind": "necessary",
+        "mechanism": "Exhausting primary peer recovery can publish a controller cut. The selected host channel carries mask announcements and cuts until its roster consumes them.",
+        "evidence": [
+          "close-primary",
+          "peer-ejection",
+          "roster-cut",
+          "roster-prelude-owner"
+        ]
+      },
+      {
+        "fr": "FR-diagnostics",
+        "dp": "DP-diagnostics",
+        "kind": "necessary",
+        "mechanism": "The page batches buffered events and the server ingests them by match and sequence. Live native counters are optional enrichment.",
+        "evidence": [
+          "log-drain",
+          "log-ingest",
+          "optional-native-log-stats"
+        ]
       }
     ],
     "remove": [
@@ -1046,6 +1138,26 @@
       {
         "fr": "FR-pacing",
         "dp": "DP-peers"
+      },
+      {
+        "fr": "FR-replay",
+        "dp": "DP-recovery"
+      },
+      {
+        "fr": "FR-recovery",
+        "dp": "DP-replay"
+      },
+      {
+        "fr": "FR-roster",
+        "dp": "DP-admission"
+      },
+      {
+        "fr": "FR-roster",
+        "dp": "DP-peers"
+      },
+      {
+        "fr": "FR-diagnostics",
+        "dp": "DP-diagnostics"
       }
     ]
   }
