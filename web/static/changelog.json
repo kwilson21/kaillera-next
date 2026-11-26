@@ -1,5 +1,27 @@
 [
   {
+    "version": "0.73.5",
+    "date": "2026-11-26",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "defer replay preemption until native resync commits (#351)"
+      },
+      {
+        "type": "fix",
+        "message": "preserve buffered diagnostics when native counters fail (#352)"
+      },
+      {
+        "type": "fix",
+        "message": "scope stale late-join failures to their own serve (#353)"
+      },
+      {
+        "type": "fix",
+        "message": "scope pending roster metadata to the active host channel (#354)"
+      }
+    ]
+  },
+  {
     "version": "0.73.4",
     "date": "2026-11-26",
     "changes": [
