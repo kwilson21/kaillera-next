@@ -864,3 +864,70 @@ module peer_staleness_any_input {
 module peer_staleness_current {
   import peer_staleness(COUNT_NEW_INPUTS = true, ANY_INPUT = false).*
 }
+
+// One frame can wait for several players. Resetting a connection starts a
+// new wait only for that slot. The tick can release an older blocker while
+// continuing to wait for a player that came back more recently.
+module peer_reset_wait {
+  const RESET_ALL: bool
+  pure val SLOTS = Set(1, 2)
+  pure val LIMIT = 5
+  pure val IDLE = -1
+  var now: int
+  var started: int -> int
+  var dropped: Set[int]
+  var disturbed: bool
+
+  action init = all {
+    now' = 0, started' = SLOTS.mapBy(_ => IDLE), dropped' = Set(), disturbed' = false,
+  }
+  action second = all {
+    now' = now + 1, started' = started, dropped' = dropped, disturbed' = disturbed,
+  }
+  action waitFor(slot: int): bool = all {
+    started.get(slot) == IDLE,
+    not(dropped.contains(slot)),
+    now' = now, started' = started.set(slot, now), dropped' = dropped, disturbed' = disturbed,
+  }
+  action resetPeer(slot: int): bool = {
+    val nextStarts = if (RESET_ALL) SLOTS.mapBy(_ => IDLE) else started.set(slot, IDLE)
+    all {
+      now' = now,
+      started' = nextStarts,
+      dropped' = dropped,
+      disturbed' = (disturbed or SLOTS.exists(other => other != slot and started.get(other) != nextStarts.get(other))),
+    }
+  }
+  def isDue(slot: int): bool = started.get(slot) != IDLE and now - started.get(slot) >= LIMIT
+
+  action expire(slot: int): bool = all {
+    isDue(slot),
+    now' = now, started' = started.set(slot, IDLE), dropped' = dropped.union(Set(slot)), disturbed' = disturbed,
+  }
+  action step = any {
+    second,
+    nondet slot = SLOTS.oneOf()
+    any { waitFor(slot), resetPeer(slot), expire(slot) },
+  }
+  val otherWaitsStayArmed = not(disturbed)
+
+  run deadlineSurvivesAnotherResetTest =
+    init.then(waitFor(1)).then(3.reps(_ => second)).then(resetPeer(2))
+      .then(waitFor(2)).then(2.reps(_ => second))
+      .expect(isDue(1) == not(RESET_ALL) and not(isDue(2)))
+      .then(if (RESET_ALL) second else expire(1))
+      .expect(dropped.contains(1) == not(RESET_ALL) and not(dropped.contains(2)))
+
+  run resetBlockerGetsItsOwnNewWaitTest =
+    init.then(waitFor(1)).then(waitFor(2)).then(4.reps(_ => second)).then(resetPeer(2))
+      .then(waitFor(2)).then(second)
+      .expect(isDue(1) == not(RESET_ALL) and not(isDue(2)))
+}
+
+module peer_reset_wait_before {
+  import peer_reset_wait(RESET_ALL = true).*
+}
+
+module peer_reset_wait_fixed {
+  import peer_reset_wait(RESET_ALL = false).*
+}
