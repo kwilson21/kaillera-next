@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 type Pair = { fr: string; dp: string };
 type Entry = Pair & { kind: 'necessary' | 'accidental'; mechanism: string; evidence: string[] };
@@ -250,7 +250,7 @@ function main(args: string[]) {
   requireValid(!introduced.some(({ kind }) => kind === 'accidental'), 'New accidental coupling');
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (import.meta.main) {
   try {
     main(process.argv.slice(2));
   } catch (error) {
