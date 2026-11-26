@@ -8522,7 +8522,6 @@
       return 'unresolved';
     };
     if (performance.now() >= debt.deadline) return fail('reconnect input proof expired');
-    if (_peerPhantom[debt.slot]) return fail('participant became phantom');
     if (mod?._kn_get_failed_rollbacks?.() !== debt.failed) return fail('native rollback failed');
     debt.through = Math.max(debt.through, _frameNum - 1 - DELAY_FRAMES);
     while (debt.from <= debt.through && debt.receipts.delete(debt.from)) debt.from++;
@@ -8587,11 +8586,11 @@
       !peer ||
       !_requestIdFrom(id) ||
       !_activeRoster?.has(peer.slot) ||
-      _peerPhantom[peer.slot] ||
       _reconnectProofStatus(sid) !== true
     )
       return;
-    const route = _unsafeCheckpointRoutes.get(peer.slot);
+    // A phantom can retry only through an existing, current receipt debt.
+    const route = _peerPhantom[peer.slot] ? null : _unsafeCheckpointRoutes.get(peer.slot);
     if (
       transport === 'dc' &&
       route?.key === sid &&
@@ -8735,7 +8734,10 @@
     const inputs = new Set(peers.map((peer) => peer.slot));
     for (const slot of _activeRoster) {
       if (slot === _playerSlot) continue;
-      if (!inputs.has(slot) || _peerPhantom[slot] || _corePhantomHistory.has(slot)) return false;
+      if (!inputs.has(slot)) return false;
+      // The returning owner's ledger above checks every consumed tag that
+      // accrued after its kept-slot reset. Other slots have no such proof.
+      if (slot !== debt.slot && (_peerPhantom[slot] || _corePhantomHistory.has(slot))) return false;
     }
     // Reset discarded the returning slot's JS input map. Its validated
     // native receipt ledger already proves those older inputs.

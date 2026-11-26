@@ -464,7 +464,7 @@ for variant in reconnect_answer_debt protected_reconnect_clock_before protected_
 done
 HOST_RECONNECT_CLOCK=specs/reconnect_settle.qnt
 $QUINT typecheck "$HOST_RECONNECT_CLOCK"
-for variant in host_reconnect_clock_before host_reconnect_clock_fixed; do
+for variant in host_reconnect_clock_before host_reconnect_clock_fixed host_reconnect_pacing_proof_before host_reconnect_pacing_proof_fixed; do
   $QUINT test "$HOST_RECONNECT_CLOCK" --main="$variant" --backend="$BACKEND"
 done
 $QUINT run "$HOST_RECONNECT_CLOCK" --main=host_reconnect_clock_fixed --invariant=noCaptureBeforeProof \

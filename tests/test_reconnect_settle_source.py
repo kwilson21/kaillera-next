@@ -26,6 +26,7 @@ def _race(*, transport, order, tag):
             _between(source, "  const _drainPendingCInputs =", "  const _formatInputBrief"),
             _between(source, "  // A reconnect receipt", "  const _requestIdFrom ="),
             _between(source, "  const _answerDirectSyncRequest =", "  // True when this peer"),
+            _between(source, "  const _setPacingPhantom =", "  const markPeerPhantomForStallTimeout ="),
             _between(source, "  const _liveStateConfirmed =", "  // The earliest consumed remote input"),
         )
     )
@@ -121,14 +122,23 @@ def _race(*, transport, order, tag):
       _syncQueueGen.M++;
       _remoteInputs[1] = {}; // normal reset clears JS input state
     }
-    if (fixture.order === 'inputs-first') {
+    if (['inputs-first', 'pacing-phantom-before-capture', 'pacing-phantom-after-advance', 'bystander-phantom', 'pacing-phantom-retry', 'pacing-phantom-stale-retry'].includes(fixture.order)) {
       receive();
       _drainPendingCInputs(tickMod);
       finishReplay();
     }
     ask();
+    if (fixture.order.startsWith('pacing-phantom-')) _setPacingPhantom(1);
+    if (fixture.order === 'pacing-phantom-after-advance') _frameNum += 2;
+    if (fixture.order === 'bystander-phantom') _setPacingPhantom(2);
     await service();
     const capturesBeforeLateInput = captures.length;
+    if (fixture.order.endsWith('phantom-retry') || fixture.order.endsWith('phantom-stale-retry')) {
+      if (fixture.order.endsWith('stale-retry')) _syncQueueGen.M++;
+      now = 601;
+      _receiveReconnectProofRequest('M', 10, fixture.transport);
+      await service();
+    }
     let capturesAfterDrain = null;
     if (fixture.order === 'recovery-expiry') {
       now = 600;
@@ -253,3 +263,36 @@ def test_host_recovery_clock_expires_missing_proof_without_ticks():
     assert actual["asks"] == ["resend:96", "resend:96"]
     assert actual["captures"] == []
     assert sum("reason=reconnect input proof expired" in line for line in actual["logs"]) == 1
+
+
+def test_pacing_marker_cannot_invalidate_unchanged_confirmed_native_history():
+    normal = _race(transport="dc", order="inputs-first", tag=96)
+    phantom = _race(transport="dc", order="pacing-phantom-before-capture", tag=96)
+    assert normal["feeds"] == phantom["feeds"]
+    assert normal["captures"] == [{"sid": "M", "buttons": 128, "transport": "dc"}]
+    assert phantom["captures"] == normal["captures"]
+    assert phantom["cutoff"] == normal["cutoff"]
+
+
+def test_pacing_marker_does_not_authorize_newly_consumed_unproved_inputs():
+    phantom = _race(transport="dc", order="pacing-phantom-after-advance", tag=96)
+    assert phantom["captures"] == []
+    assert phantom["cutoff"] is None
+    assert "resend:98" in phantom["asks"]
+
+
+def test_returning_owner_proof_cannot_authorize_a_phantom_bystanders_history():
+    phantom = _race(transport="dc", order="bystander-phantom", tag=96)
+    assert phantom["captures"] == []
+    assert phantom["cutoff"] is None
+
+@pytest.mark.parametrize("transport", ["dc", "socket"])
+def test_returning_phantom_can_retry_a_handoff_on_its_current_route(transport):
+    result = _race(transport=transport, order="pacing-phantom-retry", tag=96)
+    assert result["capturesBeforeLateInput"] == 1
+    assert result["captures"] == [{"sid": "M", "buttons": 128, "transport": transport}] * 2
+
+
+def test_returning_phantom_cannot_retry_the_previous_route():
+    result = _race(transport="dc", order="pacing-phantom-stale-retry", tag=96)
+    assert len(result["captures"]) == 1
