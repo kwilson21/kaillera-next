@@ -644,9 +644,11 @@ $QUINT run "$INPUTS" --main=input_transport_current --invariant=noInputIsLostFor
 REASK=specs/resync_reask.qnt
 $QUINT typecheck "$REASK"
 for variant in resync_reask_current resync_reask_unguarded resync_reask_guard_lets_go resync_reask_coordinated_let_go \
-  resync_reask_fixed; do
+  resync_reask_fixed resync_retry_clock_before resync_retry_clock_fixed; do
   $QUINT test "$REASK" --main="$variant" --backend="$BACKEND"
 done
+$QUINT run "$REASK" --main=resync_retry_clock_fixed --invariant=retriesFollowRecoveryClock \
+  --max-samples=2000 --max-steps=12 --backend="$BACKEND"
 # With the fix: an owed resync is asked for again or given up visibly, the
 # deadline does not cut an answer being decoded, and the asks again are
 # bounded. Today the deadline let the request go and asked nothing

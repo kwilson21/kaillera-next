@@ -7568,6 +7568,39 @@
     else if (step === 'askAgain') _askAgainForOwedResync();
     else if (step === 'stopAsking') _stopAskingForOwedResync('its asks again went unanswered');
   };
+  const RESYNC_DEADLINE_POLL_MS = 250;
+  let _resyncDeadlineTimer = null;
+  const _cancelResyncDeadline = () => {
+    if (_resyncDeadlineTimer !== null) clearTimeout(_resyncDeadlineTimer);
+    _resyncDeadlineTimer = null;
+  };
+
+  const _scheduleResyncDeadline = (requestId) => {
+    _cancelResyncDeadline();
+    const dueAt = performance.now() + RESYNC_DEADLINE_POLL_MS;
+    _resyncDeadlineTimer = setTimeout(() => {
+      if (_resyncRequestId !== requestId) return;
+      _resyncDeadlineTimer = null;
+      if (!_resyncRequestInFlight) return;
+      // Credit a stalled browser, measured against this timer's own wakeup.
+      // Hidden pages can process messages despite intentionally slower timers.
+      const now = performance.now();
+      const lateBy = now - dueAt;
+      if (lateBy >= LOCAL_FREEZE_CREDIT_MS && !(typeof document !== 'undefined' && document.hidden)) {
+        _resyncRequestSentAt = Math.min(now, _resyncRequestSentAt + lateBy);
+      }
+      if (
+        _phase === PHASE_RUNNING &&
+        !_checkpoint?.busy &&
+        !(_config?.matchReturn && !_config.matchReturn.playing) &&
+        !(_playerSlot > 0 && !_isSpectator && _lastUsersUpdated?.hostReturnDeadline && !hostGameConnected())
+      ) {
+        _checkResyncRequestDeadline();
+      }
+      if (_resyncRequestInFlight && _resyncRequestId === requestId) _scheduleResyncDeadline(requestId);
+    }, RESYNC_DEADLINE_POLL_MS);
+  };
+
   const _stopAskingForOwedResync = (why) => {
     const asks = _owedResyncAsksAgain;
     _owedResync = false;
@@ -8607,6 +8640,7 @@
     _resyncRequestSentAt = performance.now();
     _resyncRequestId++;
     _resyncRequestAt = at;
+    _scheduleResyncDeadline(_resyncRequestId);
     if (!again) {
       _owedResync = true;
       _owedResyncAsksAgain = 0;
@@ -17521,6 +17555,7 @@
 
   const stopSync = () => {
     _phase = PHASE_STOPPED;
+    _cancelResyncDeadline();
     _endCatchUp(window.EJS_emulator?.gameManager?.Module ?? {}, 'the match stopped');
     // Every connection is about to close; each machine is told, and its per-match state goes.
     _peerDriver()?.sessionEnded();
@@ -18184,10 +18219,6 @@
     // tick before the throttle can end (specs/tick_deadlines.qnt): a page
     // that froze while held back would drop a peer that never stopped sending.
     if (_pacingThrottleStartAt > 0) _pacingThrottleStartAt = Math.min(now, _pacingThrottleStartAt + gap);
-    // A request for a resync that went out before the freeze: the answer
-    // could not have been handled while this page stood still, so the
-    // freeze does not count against it.
-    if (_resyncRequestInFlight) _resyncRequestSentAt = Math.min(now, _resyncRequestSentAt + gap);
     // The escalation push's clocks: the guest's answer could not be handled
     // while this page stood still (specs/escalation_push.qnt, CREDIT_FREEZE).
     _recovery.freeze(gap, now);
@@ -18222,7 +18253,6 @@
     _creditLocalFreeze();
     if (!_checkpoint?.busy) _checkReconnectAnswerDebt();
     _serviceReconnectHostAnswers();
-    _checkResyncRequestDeadline();
     _checkOverduePushes();
     _flushResendLogs();
     // Deadline-only pass: a tick that stalls returns before the per-frame

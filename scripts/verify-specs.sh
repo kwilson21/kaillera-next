@@ -336,6 +336,8 @@ input_transport() {
 
 resync_reask() {
   local REASK=specs/resync_reask.qnt
+  verify "$REASK" resync_retry_clock_fixed retriesFollowRecoveryClock init 8
+  expect_violation "$REASK" resync_retry_clock_before retriesFollowRecoveryClock 3
   # A lost request asked again at its deadline twice and then given up: 10 steps.
   verify "$REASK" resync_reask_fixed allHold init 10
   verify "$REASK" resync_reask_unguarded anOwedResyncIsNotForgotten

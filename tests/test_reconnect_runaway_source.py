@@ -92,7 +92,7 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     assert "pushDeadlineStep(" in machine
     assert "_recovery.event(attempt," in pushes
     assert "_inputSettledBefore[slot]" not in pushes
-    assert "_checkResyncRequestDeadline();\n    _checkOverduePushes();" in src
+    assert "_serviceReconnectHostAnswers();\n    _checkOverduePushes();" in src
     assert "hardDisconnectPeer(sid, { tell: 'desync' });" in src
     assert "could not be brought back in sync and was dropped" in src
     # Every ask that goes out is counted.
