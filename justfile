@@ -135,7 +135,21 @@ deploy commit notes:
     set -euo pipefail
     gh workflow run version-bump.yml --ref main -f "commit=$1" -F "player_notes=@$2"
 
-# Preview the commits that an explicit release of main would include.
+# Queue player-facing notes for the weekly release of this exact main commit.
+[positional-arguments]
+queue-release commit notes:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    git fetch --quiet origin main
+    if [[ "$(git rev-parse origin/main)" != "$1" ]]; then
+      echo "Use the full SHA of the current main commit." >&2
+      exit 1
+    fi
+    batch=$(jq -ne --arg commit "$1" --rawfile player_notes "$2" \
+      'select($player_notes | test("[^[:space:]]")) | {commit: $commit, player_notes: $player_notes}')
+    printf '%s\n' "$batch" | gh variable set SCHEDULED_RELEASE
+
+# Preview the commits in the next main release.
 deploy-dry:
     #!/usr/bin/env bash
     set -euo pipefail

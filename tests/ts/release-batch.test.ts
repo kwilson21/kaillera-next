@@ -84,17 +84,24 @@ test('a fresh release rejects stale main while a retry selects the already-publi
   const source = git('rev-parse', 'HEAD');
   assert.equal(bump('Fixed a long pause.').status, 0);
   const published = git('rev-parse', 'HEAD');
-  add('fix: merged after the batch');
-  const newerTip = git('rev-parse', 'HEAD');
   const output = join(cwd, 'action-output');
-  const select = (sha: string, attempt: string) =>
+  const select = (sha: string, attempt: string, event = 'workflow_dispatch') =>
     run('bash', ['-ec', workflowStep('Select the release commit')], {
       RELEASE_SHA: sha,
       GITHUB_RUN_ATTEMPT: attempt,
+      GITHUB_EVENT_NAME: event,
       GITHUB_OUTPUT: output,
     });
+  const noChanges = select(published, '1', 'schedule');
+  assert.equal(noChanges.status, 0);
+  assert.match(noChanges.stdout, /no unreleased changes/);
+  add('fix: merged after the batch');
+  const newerTip = git('rev-parse', 'HEAD');
   assert.equal(select(source, '1').status, 1);
   assert.equal(git('rev-parse', 'HEAD'), newerTip);
+  const skipped = select(source, '1', 'schedule');
+  assert.equal(skipped.status, 0);
+  assert.match(skipped.stdout, /scheduled commit is stale/);
   assert.equal(select(newerTip, '1').status, 0);
   assert.equal(readFileSync(output, 'utf8'), 'bump=true\n');
   assert.equal(select(source, '2').status, 0);
@@ -103,7 +110,7 @@ test('a fresh release rejects stale main while a retry selects the already-publi
 });
 
 test('each required check must pass for the selected main SHA', (t) => {
-  const { run, git } = repo(t);
+  const { cwd, run, git } = repo(t);
   const gate = `
     gh() {
       [[ "$*" == *"--branch main --event push --commit $RELEASE_SHA "* ]] || return 2
@@ -112,11 +119,55 @@ test('each required check must pass for the selected main SHA', (t) => {
     }
     ${workflowStep('Require successful main checks')}
   `;
-  const env = { RELEASE_SHA: git('rev-parse', 'HEAD'), GITHUB_REPOSITORY: 'test/kaillera-next' };
+  const output = join(cwd, 'gate-output');
+  const env = {
+    RELEASE_SHA: git('rev-parse', 'HEAD'),
+    GITHUB_REPOSITORY: 'test/kaillera-next',
+    GITHUB_EVENT_NAME: 'workflow_dispatch',
+    GITHUB_OUTPUT: output,
+  };
   assert.equal(run('bash', ['-ec', gate], { ...env, MISSING_CHECK: 'none' }).status, 0);
+  assert.equal(readFileSync(output, 'utf8'), 'ready=true\n');
   for (const workflow of ['lint.yml', 'browser.yml', 'capture-privacy.yml']) {
     const result = run('bash', ['-ec', gate], { ...env, MISSING_CHECK: workflow });
     assert.equal(result.status, 1);
     assert.ok(result.stdout.includes(`${workflow} has no successful run`));
+    const scheduled = run('bash', ['-ec', gate], {
+      ...env,
+      GITHUB_EVENT_NAME: 'schedule',
+      MISSING_CHECK: workflow,
+    });
+    assert.equal(scheduled.status, 0);
+    assert.match(scheduled.stdout, /No release/);
   }
+  assert.equal(readFileSync(output, 'utf8'), 'ready=true\n');
+});
+
+test('a scheduled batch only uses nonempty notes for its exact commit', (t) => {
+  const { cwd, git, run } = repo(t);
+  const sha = git('rev-parse', 'HEAD');
+  const playerNotes = 'Friends can join mid-match.\nA lost resume message no longer keeps a player waiting.';
+  const output = join(cwd, 'scheduled-notes');
+  const selectNotes = (data: string, event = 'schedule') =>
+    run('bash', ['-ec', workflowStep('Select player notes')], {
+      GITHUB_EVENT_NAME: event,
+      RELEASE_SHA: sha,
+      SCHEDULED_RELEASE: data,
+      MANUAL_NOTES: playerNotes,
+      GITHUB_OUTPUT: output,
+    });
+  for (const data of [
+    '',
+    '{invalid',
+    JSON.stringify({ commit: 'different', player_notes: playerNotes }),
+    JSON.stringify({ commit: sha, player_notes: '  ' }),
+  ]) {
+    const skipped = selectNotes(data);
+    assert.equal(skipped.status, 0);
+    assert.match(skipped.stdout, /No release/);
+  }
+  assert.equal(selectNotes(JSON.stringify({ commit: sha, player_notes: playerNotes })).status, 0);
+  assert.equal(selectNotes('', 'workflow_dispatch').status, 0);
+  const expected = `player_notes_json=${JSON.stringify(playerNotes)}\n`;
+  assert.equal(readFileSync(output, 'utf8'), expected.repeat(2));
 });

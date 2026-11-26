@@ -35,13 +35,20 @@ whichever server the hostname points to.
 
 ## Deploys
 
-Merges to `main` accumulate for the next release. When the batch is ready:
+Merges to `main` accumulate for the next release. The scheduled release runs Tuesdays
+at 11:15 a.m. Eastern. Each run uses the latest `main` commit at its scheduled start and
+ships when that commit has unreleased changes, passing CI, and matching player notes.
+
+To queue a batch:
 
 1. Run `just deploy-dry` to preview the main commit and unreleased changes.
 2. Wait for Lint, types, specs and proofs, Browser suites, and Capture privacy to pass for that commit.
 3. Write one line per player-facing improvement in a text file. Describe what changes for players.
-4. Run `just deploy <sha> path/to/notes.txt`. You can also dispatch **Release batch** in GitHub Actions
-   with the full verified main commit SHA and the notes.
+4. Run `just queue-release <sha> path/to/notes.txt`. If `main` advances before the slot,
+   update the notes for the new commit and queue it again.
+
+To release immediately, use `just deploy <sha> path/to/notes.txt` or dispatch **Release batch**
+in GitHub Actions with the full verified main commit SHA and the notes.
 
 The workflow requires successful main checks, writes one version commit and tag, and requests
 deployment of that exact commit on Render and the landing Worker. Render auto-deploy stays off.
