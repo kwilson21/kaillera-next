@@ -11,6 +11,7 @@ Run: pytest tests/test_room_overlay.py -v
 import os
 import tempfile
 
+import pytest
 from playwright.sync_api import expect
 
 
@@ -446,7 +447,8 @@ def test_spectator_without_emulator_features_cannot_claim_rollback_slot(browser,
         ctx.close()
 
 
-def test_streaming_guest_without_emulator_features_is_released_on_rollback(browser, server_url, room):
+@pytest.mark.parametrize("mode", ["Rollback", "Classic"])
+def test_streaming_guest_without_emulator_features_is_released_on_mode_switch(browser, server_url, room, mode):
     host = browser.new_page()
     ctx = browser.new_context()
     ctx.add_init_script("Object.defineProperty(self, 'crossOriginIsolated', { value: false, configurable: true });")
@@ -458,8 +460,8 @@ def test_streaming_guest_without_emulator_features_is_released_on_rollback(brows
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
         expect(host.locator('.player-slot[data-slot="1"] .name')).to_contain_text("Guest", timeout=10000)
 
-        host.locator("#mode-select").select_option("rollback")
-        expect(guest.locator("#toast-container")).to_contain_text("host switched to rollback", timeout=10000)
+        host.locator("#mode-select").select_option(mode.lower())
+        expect(guest.locator("#toast-container")).to_contain_text(f"host switched to {mode}", timeout=10000)
         expect(host.locator("#spectator-list")).to_contain_text("Guest", timeout=10000)
         expect(host.locator('.player-slot[data-slot="1"] .name')).not_to_contain_text("Guest")
     finally:

@@ -265,7 +265,7 @@ test('a lockstep match is labelled lockstep, and its delay is felt: no predictio
       true,
     ),
     {
-      header: 'Lockstep | Gamepad',
+      header: 'Classic | Gamepad',
       stats: 'FPS: 60 | Ping: 33ms | Delay: 8f | Players: 2 | Resyncs: 1',
       peers: 'P2: 33ms',
     },

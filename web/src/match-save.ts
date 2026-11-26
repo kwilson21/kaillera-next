@@ -2,6 +2,7 @@ import { Effect, Result, Schema } from 'effect';
 import type { Input } from './owner-proof.ts';
 import { digestBytes, sameInput } from './checkpoint-journal.ts';
 import { GameMode, type RoomPlayer } from './protocol.ts';
+import { canonicalMode } from './play/mode.ts';
 
 const cadence = 3000;
 const maxAge = 120_000 + cadence * 3;
@@ -78,7 +79,7 @@ function valid(s: Save, query: Query | Scope, checkTime: boolean): boolean {
     p.room !== query.room ||
     p.matchId !== query.matchId ||
     p.hostId !== query.hostId ||
-    p.mode !== query.mode ||
+    canonicalMode(p.mode) !== canonicalMode(query.mode) ||
     p.romHash !== query.romHash ||
     (checkTime && !fresh(s.capturedAt))
   )

@@ -728,14 +728,16 @@ const noteRunState = (page: ReturnType<typeof openDemo>): string => {
 const compareVisit = async (visit: Visit, steps: readonly Step[]): Promise<void> => {
   // The old script only checks that a core is there; it calls none of it.
   const before = openDemo(OLD_SCRIPT, {}, visit);
+  const expected = () =>
+    before.snapshot().replaceAll(/Lockstep(?= makes| feels)|(?<=Mode: )Lockstep|(?<=Switched to )lockstep/g, 'Classic');
   const after = openDemo(NEW_SCRIPT, { demo, ejs }, visit);
   noteRunState(after);
-  assert.equal(after.snapshot(), before.snapshot(), `on load: ${show(visit)}`);
+  assert.equal(after.snapshot(), expected(), `on load: ${show(visit)}`);
   // A cached ROM is restored on load: let both pages finish reading and hashing it.
   if (visit.cached !== undefined) {
     await settle([before.pending, after.pending]);
     noteRunState(after);
-    assert.equal(after.snapshot(), before.snapshot(), `after restoring the cached ROM: ${show(visit)}`);
+    assert.equal(after.snapshot(), expected(), `after restoring the cached ROM: ${show(visit)}`);
   }
   let done = 0;
   for (const step of steps) {
@@ -743,12 +745,12 @@ const compareVisit = async (visit: Visit, steps: readonly Step[]): Promise<void>
     await after.apply(step);
     done++;
     const state = noteRunState(after);
-    assert.equal(after.snapshot(), before.snapshot(), `step ${done} ${show(step)} of ${show(visit)}`);
+    assert.equal(after.snapshot(), expected(), `step ${done} ${show(step)} of ${show(visit)}`);
     // Stop or Reset: the page is reloading, and a browser runs nothing more of
     // it. Both pages finish asking for the reload, and the visit ends there.
     if (state === 'leaving') {
       await settle([before.pending, after.pending]);
-      assert.equal(after.snapshot(), before.snapshot(), `reloading after step ${done} of ${show(visit)}`);
+      assert.equal(after.snapshot(), expected(), `reloading after step ${done} of ${show(visit)}`);
       return;
     }
   }
@@ -1264,7 +1266,7 @@ test('the pill for every tier and delay, in both modes', () => {
   const oldPill = (rollbackEnabled: boolean, tier: { label: string }, effectiveDelay: number): string =>
     rollbackEnabled
       ? `Rollback feels <strong>${tier.label}</strong> &middot; Effective delay: <strong>${effectiveDelay} frame${effectiveDelay === 1 ? '' : 's'}</strong>`
-      : `Lockstep feels <strong>${tier.label}</strong> &middot; Effective delay: <strong>${effectiveDelay} frame${effectiveDelay === 1 ? '' : 's'}</strong>`;
+      : `Classic feels <strong>${tier.label}</strong> &middot; Effective delay: <strong>${effectiveDelay} frame${effectiveDelay === 1 ? '' : 's'}</strong>`;
   for (const delay of [0, 1, 2, 3, 7, 0.5, -1, NaN]) {
     for (const on of [true, false]) {
       const tier = demo.hud.connectionTier(delay);

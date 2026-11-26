@@ -91,12 +91,13 @@
   let mySlot = null;
   let coreFatal = false;
 
-  // The mode at every intake (URL, dropdown, users-updated, game-started,
-  // REST, data-message): rollback, lockstep or streaming, anything else
-  // rollback (web/src/play/mode.ts). Rollback and lockstep both run the game
-  // on every page; only streaming does not.
-  const normalizeMode = window.KNCore.play.mode.normalizeMode;
-  const everyoneRunsTheGame = window.KNCore.play.mode.everyoneRunsTheGame;
+  const { compatibilityMode, everyoneRunsTheGame, modeLabel, normalizeMode } = window.KNCore.play.mode;
+
+  const publishRoomMode = () => {
+    const wireMode = compatibilityMode(mode);
+    socket.emit('data-message', { type: 'mode-select', mode: wireMode });
+    socket.emit('set-mode', { mode: wireMode });
+  };
 
   const emulatorMissing = () => {
     const missing = [];
@@ -1183,10 +1184,7 @@
         // An end delivered by this open-room belongs to a room that already existed.
         if (_lastHandledGameEndMatchId === lastEndBeforeOpen) KNEvent('room_created', '', { mode });
         sendDeviceType();
-        {
-          socket.emit('data-message', { type: 'mode-select', mode });
-          socket.emit('set-mode', { mode });
-        }
+        publishRoomMode();
         // If ROM was already loaded from cache, notify server immediately
         if (isReconnect) tellRomAfterRejoin();
         else notifyRomReady();
@@ -1354,6 +1352,7 @@
             keepRoomAddress();
             const hostShares = joinData?.romSharing ?? roomData.rom_sharing;
             mode = normalizeMode(joinData?.mode ?? roomData.mode ?? mode);
+            renderModeControls();
             _takeRoomGameId(joinData?.gameId ?? joinData?.game_id);
             applyHostRomFromData(joinData || roomData);
 
@@ -1679,7 +1678,9 @@
     }
 
     if (!isHost && !isSpectator && nowPlayer && mode !== 'streaming') {
-      releaseUnsupportedPlayer(`The host switched to ${mode}, which this browser can't run — you're now watching.`);
+      releaseUnsupportedPlayer(
+        `The host switched to ${modeLabel(mode)}, which this browser can't run — you're now watching.`,
+      );
     }
 
     if (!isGameRunning()) {
@@ -1774,7 +1775,7 @@
       `romBlobUrl=${!!_romBlobUrl}`,
       `gameRunning=${isGameRunning()}`,
     );
-    mode = data.mode || mode;
+    mode = normalizeMode(data.mode ?? mode);
     _gameResyncEnabled = data.resyncEnabled !== false;
     _gameDualInputEnabled = data.dualInputEnabled === true;
     _takeRoomGameId(data.gameId);
@@ -2077,7 +2078,9 @@
       updateRomSharingUI();
       if (lastUsersData) updateStartButton(lastUsersData.players || {});
       if (mode !== 'streaming' && !isHost && !isSpectator) {
-        releaseUnsupportedPlayer(`The host switched to ${mode}, which this browser can't run — you're now watching.`);
+        releaseUnsupportedPlayer(
+          `The host switched to ${modeLabel(mode)}, which this browser can't run — you're now watching.`,
+        );
       }
     }
     if (data.type === 'rom-accepted' && isHost && _romSharingEnabled && data.sender) {
@@ -3876,7 +3879,7 @@
       socket,
       sessionId: roomCode,
       matchId: KNState.matchId,
-      mode,
+      mode: compatibilityMode(mode),
       resumeFromMatchId: savedStart?.source ?? null,
       matchReturn: savedStart,
       playerSlot: isSpectator ? null : mySlot,
@@ -3887,9 +3890,7 @@
       gameElement: document.getElementById('game'),
       resyncEnabled,
       dualInputEnabled: _gameDualInputEnabled,
-      // Lockstep: the rollback engine with nothing predicted (every frame
-      // waits for every player's input).
-      lockstep: mode === 'lockstep',
+      lockstep: mode === 'classic',
       romHash: _romHash ?? null,
       gameId: _gameId ?? null,
       uploadToken: _uploadToken,
@@ -4118,7 +4119,7 @@
     socket.emit(
       'start-game',
       {
-        mode: selectedMode,
+        mode: compatibilityMode(normalizeMode(selectedMode)),
         resyncEnabled: optResync ? optResync.checked : true,
         dualInputEnabled: dualInputSelected(),
         romHash: _romHash ?? null,
@@ -5074,7 +5075,14 @@
 
   const renderModeControls = () => {
     const select = document.getElementById('mode-select');
-    if (select) select.value = mode;
+    const classicHint = document.getElementById('classic-mode-hint');
+    const classic = mode === 'classic';
+    if (classicHint) classicHint.hidden = !classic;
+    if (select) {
+      select.value = mode;
+      if (classic && classicHint) select.setAttribute('aria-describedby', classicHint.id);
+      else select.removeAttribute('aria-describedby');
+    }
     const isRollback = everyoneRunsTheGame(mode);
     const rollbackOpts = document.getElementById('rollback-options');
     if (rollbackOpts) rollbackOpts.style.display = isRollback ? '' : 'none';
@@ -5606,11 +5614,7 @@
         if (!isHost) updateRomSharingUI();
         if (lastUsersData) updateStartButton(lastUsersData.players || {});
         // Broadcast mode to guests so they can update ROM/sharing UI for the new mode
-        if (socket?.connected) {
-          socket.emit('data-message', { type: 'mode-select', mode: modeSelect.value });
-          // Also set on server for users-updated payload (requires server restart)
-          socket.emit('set-mode', { mode: modeSelect.value });
-        }
+        if (socket?.connected) publishRoomMode();
       });
       renderModeControls();
       if (!isHost) updateRomSharingUI();

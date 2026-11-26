@@ -88,7 +88,7 @@ export const inputFeel = (rollbackEnabled: boolean, isInMatch: boolean, delayFra
   }
   return {
     text: `${delayMs.toFixed(0)} ms LATE`,
-    sub: `Lockstep makes you feel the full ${delay}-frame delay because it can't predict the peer's input. Visuals stay smooth (no rewinds), but every press is delayed.`,
+    sub: `Classic makes you feel the full ${delay}-frame delay because it can't predict the peer's input. Visuals stay smooth (no rewinds), but every press is delayed.`,
     state: 'late',
     showTier: true,
     effectiveDelay: delay,
@@ -104,7 +104,7 @@ export const idlePillHtml = (isInMatch: boolean): string =>
 
 /** The pill's markup for a tier at the delay the player feels. */
 export const tierPillHtml = (rollbackEnabled: boolean, tier: ConnectionTier, effectiveDelay: number): string =>
-  `${rollbackEnabled ? 'Rollback' : 'Lockstep'} feels <strong>${tier.label}</strong> &middot; Effective delay: <strong>${effectiveDelay} frame${effectiveDelay === 1 ? '' : 's'}</strong>`;
+  `${rollbackEnabled ? 'Rollback' : 'Classic'} feels <strong>${tier.label}</strong> &middot; Effective delay: <strong>${effectiveDelay} frame${effectiveDelay === 1 ? '' : 's'}</strong>`;
 
 /**
  * The line of small print under the card: engine state, mode, RTT,
@@ -116,7 +116,7 @@ export const detailsText = (
   rollbackEnabled: boolean,
   rtt: number,
 ): string => {
-  const mode = rollbackEnabled ? 'Rollback' : 'Lockstep';
+  const mode = rollbackEnabled ? 'Rollback' : 'Classic';
   const frame = counters?.currentFrame ?? 0;
   const cEngine = counters?.isCRollback ? 'Active' : 'Waiting (start a match)';
   const rollbacks = counters?.rollbackEventsTotal ?? 0;
@@ -209,7 +209,7 @@ export type ModeSwitchLabel = { readonly title: string; readonly sub: string };
 export const modeSwitchLabel = (toRollback: boolean, delay: number): ModeSwitchLabel => {
   const ms = Math.round(delay * FRAME_MS);
   return {
-    title: toRollback ? 'Switched to rollback' : 'Switched to lockstep',
+    title: toRollback ? 'Switched to rollback' : 'Switched to Classic',
     sub: toRollback
       ? `${delay}-frame input delay (${ms} ms) — predicts the opponent, rewinds on a wrong guess`
       : `${delay}-frame input delay (${ms} ms) — waits for the opponent's input every frame`,

@@ -100,7 +100,9 @@ from src.api.payloads import (
     SetModePayload,
     SetNamePayload,
     StartGamePayload,
+    canonical_game_mode,
     checked,
+    compatible_game_mode,
     validated,
 )
 from src.dbbackend import BackendError
@@ -1615,7 +1617,7 @@ async def _start_game_locked(
     if room.status == "playing":
         return None  # A queued Start is already satisfied by the live match.
 
-    mode = payload.mode if payload.mode in _VALID_MODES else "rollback"
+    mode = compatible_game_mode(payload.mode)
 
     # The host's new ROM is still being hashed: the start would carry the
     # previous ROM's hash, and no guest has been held to the new one
@@ -1693,11 +1695,12 @@ async def _start_game_locked(
         room=session_id,
     )
     await state.save_room(session_id, room)
-    log.info("Game started in room %s (mode=%s)", session_id, room.mode)
+    reported_mode = canonical_game_mode(room.mode)
+    log.info("Game started in room %s (mode=%s)", session_id, reported_mode)
     event = {
         "type": "server_game_started",
-        "message": room.mode,
-        "meta": json.dumps({"match_id": room.match_id, "mode": room.mode}),
+        "message": reported_mode,
+        "meta": json.dumps({"match_id": room.match_id, "mode": reported_mode}),
         "room": session_id,
         "slot": -1,
         "ip_hash": "",
@@ -1803,7 +1806,7 @@ async def match_recovery_unverified(sid: str, payload: MatchRecoveryUnverifiedPa
         if not current_player or not may_report:
             return "Only the host or active player 1 can report unverified match recovery"
         if room.status != "playing" or room.mode not in ("rollback", "lockstep") or room.match_id != payload.matchId:
-            return "Not the current rollback or lockstep match"
+            return "Not the current Rollback or Classic match"
         if room.recovery_unverified_match_id == room.match_id:
             return None
         if room.resume_deadline is not None:
@@ -1934,7 +1937,7 @@ async def set_mode(sid: str, payload: SetModePayload) -> str | None:
         if room.status != "lobby":
             return "Cannot change mode during game"
 
-        mode = payload.mode if payload.mode in _VALID_MODES else "rollback"
+        mode = compatible_game_mode(payload.mode)
         room.mode = mode
         await _emit("users-updated", _players_payload(room), room=session_id)
         await state.save_room(session_id, room)
@@ -2606,7 +2609,7 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | No
             "room": session_id,
             "slot": slot,
             "player_name": room.players.get(player_id, {}).get("playerName", "")[:32],
-            "mode": room.mode,
+            "mode": canonical_game_mode(room.mode),
             "entries": entries,
             "epoch": payload.epoch,
             "summary": summary_str,

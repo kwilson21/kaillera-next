@@ -173,6 +173,7 @@ const issueOf = (event: string, data: Parameters<typeof checkRelay>[1]): string 
 test('data-message relays match by type', () => {
   assert.equal(issueOf('data-message', { type: 'mode-select', mode: 'streaming' }), null);
   assert.equal(issueOf('data-message', { type: 'mode-select', mode: 'lockstep' }), null);
+  assert.equal(issueOf('data-message', { type: 'mode-select', mode: 'classic' }), null);
   assert.notEqual(issueOf('data-message', { type: 'mode-select', mode: 'turbo' }), null);
   assert.equal(issueOf('data-message', { type: 'rom-accepted', sender: 'sid-guest' }), null);
   assert.equal(issueOf('data-message', { type: 'request-late-join', requesterSid: 'sid-guest' }), null);

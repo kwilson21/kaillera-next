@@ -60,9 +60,10 @@ def _serialize_room(room) -> str:
 
 def _deserialize_room(d: dict):
     """Reconstruct Room from a parsed JSON dict."""
+    from src.api.payloads import compatible_game_mode
     from src.api.signaling import Room
 
-    mode_value = d.get("mode")
+    mode_value = compatible_game_mode(d.get("mode"))
 
     return Room(
         owner=d["owner"],

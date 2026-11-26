@@ -1,18 +1,11 @@
-"""The three ways a match is played, as the server takes them.
-
-rollback, lockstep and streaming are each their own mode. "lockstep" was also
-the name rollback had before it was renamed; the server used to read it as
-rollback. Pages reload on every deploy and rooms last hours, so nothing sends
-it in that sense any more, and it now means the lockstep mode a host picks.
-
-Run: cd server && uv run pytest ../tests/test_mode_coercion.py -v
-"""
+"""Classic and legacy mode values at the room protocol and Redis boundaries."""
 
 import json
 
+import pytest
 from src import state
 from src.api import signaling
-from src.api.payloads import SetModePayload, StartGamePayload
+from src.api.payloads import SetModePayload, StartGamePayload, compatible_game_mode
 
 
 def test_payloads_default_to_rollback():
@@ -21,14 +14,25 @@ def test_payloads_default_to_rollback():
 
 
 def test_every_mode_is_taken_as_itself():
-    for mode in ("rollback", "lockstep", "streaming"):
+    for mode in ("rollback", "classic", "lockstep", "streaming"):
         assert StartGamePayload.model_validate({"mode": mode}).mode == mode
         assert SetModePayload.model_validate({"mode": mode}).mode == mode
 
 
-def test_the_server_keeps_a_lockstep_room_lockstep():
-    assert "lockstep" in signaling._VALID_MODES
-    room = signaling.Room(owner="sid-host", room_name="Test", game_id="ssb64", password=None, max_players=4)
-    room.mode = "lockstep"
+@pytest.mark.parametrize("value", ["classic", "lockstep"])
+def test_classic_room_mode_round_trips(value):
+    room = signaling.Room(
+        owner="sid-host",
+        room_name="Test",
+        game_id="ssb64",
+        password=None,
+        max_players=4,
+    )
+    room.mode = value
     restored = state._deserialize_room(json.loads(state._serialize_room(room)))
     assert restored.mode == "lockstep"
+
+
+@pytest.mark.parametrize("value", ["classic", "lockstep"])
+def test_classic_remains_readable_by_old_tabs(value):
+    assert compatible_game_mode(value) == "lockstep"

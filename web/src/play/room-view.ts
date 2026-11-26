@@ -1,3 +1,4 @@
+import { modeLabel, normalizeMode } from './mode.ts';
 /**
  * What the room shows about its players and its game: each player slot, the
  * line of spectators, the Start button, and the in-game info panel. Moved
@@ -115,7 +116,7 @@ export const startButton = (
 
 /** What the engine reports about the match (`engine.getInfo()`). */
 export type EngineInfo = {
-  /** 'rollback', 'lockstep' or 'streaming'. */
+  /** The engine's reported game mode. */
   readonly mode: string;
   readonly fps?: number | null | undefined;
   readonly ping?: number | null | undefined;
@@ -150,15 +151,12 @@ const rollbackStats = (info: EngineInfo): string[] => [
   ...resyncStats(info),
 ];
 
-// Lockstep predicts nothing: the delay is felt, and there are no rollbacks.
-const lockstepStats = (info: EngineInfo): string[] => [
+// In Classic, players feel the full frame delay.
+const classicStats = (info: EngineInfo): string[] => [
   `Delay: ${info.frameDelay}f`,
   `Players: ${info.playerCount}`,
   ...resyncStats(info),
 ];
-
-const modeLabel = (mode: string): string =>
-  mode === 'streaming' ? 'Streaming' : mode === 'lockstep' ? 'Lockstep' : 'Rollback';
 
 const streamingStats = (info: EngineInfo): string[] => [
   ...(info.codec && info.codec !== '?' ? [info.codec] : []),
@@ -179,16 +177,15 @@ const streamingDetail = (info: EngineInfo): string[] => [
  */
 export const infoPanel = (info: EngineInfo | null, usesGamepad: boolean): InfoPanel => {
   if (info === null) return { header: '', stats: 'FPS: -- | Ping: --', peers: '' };
-  // Anything that is not streaming runs the rollback engine, lockstep with
-  // its predictions off.
-  const streaming = info.mode === 'streaming';
-  const modeStats = streaming ? streamingStats : info.mode === 'lockstep' ? lockstepStats : rollbackStats;
+  const mode = normalizeMode(info.mode);
+  const streaming = mode === 'streaming';
+  const modeStats = streaming ? streamingStats : mode === 'classic' ? classicStats : rollbackStats;
   const stats = [`FPS: ${info.fps || 0}`, `Ping: ${milliseconds(info.ping)}`, ...modeStats(info)];
   const peers = streaming
     ? streamingDetail(info)
     : (info.peers ?? []).map((peer) => `P${peer.slot + 1}: ${milliseconds(peer.rtt)}`);
   return {
-    header: `${modeLabel(info.mode)} | ${usesGamepad ? 'Gamepad' : 'Keyboard'}`,
+    header: `${modeLabel(mode)} | ${usesGamepad ? 'Gamepad' : 'Keyboard'}`,
     stats: stats.join(' | '),
     peers: peers.join(' | '),
   };

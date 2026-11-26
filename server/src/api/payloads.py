@@ -24,14 +24,18 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 log = logging.getLogger(__name__)
 
-# How a match is played. rollback: every player runs the game, predicts the
-# others' late inputs and replays when a guess was wrong. lockstep: every
-# player runs the game and a frame runs only once every player's input for it
-# is here (no prediction). streaming: the host runs the game and streams it.
-# ("lockstep" was also the old name of rollback, until the rename; pages
-# reload on every deploy and rooms last hours, so nothing sends it in that
-# sense any more.)
-GameMode = Literal["rollback", "lockstep", "streaming"]
+# Classic waits for every player's input before advancing a frame.
+GameMode = Literal["rollback", "classic", "lockstep", "streaming"]
+
+
+def canonical_game_mode(mode: str | None) -> str | None:
+    return "classic" if mode == "lockstep" else mode
+
+
+def compatible_game_mode(mode: GameMode | None) -> GameMode | None:
+    """Keep room state readable by tabs and servers from before Classic."""
+    return "lockstep" if mode == "classic" else mode
+
 
 # ── Decorator ────────────────────────────────────────────────────────────────
 

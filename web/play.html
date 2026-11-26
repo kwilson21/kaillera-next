@@ -153,10 +153,10 @@
             <label for="mode-select" class="mode-label">Mode:</label>
             <select
               id="mode-select"
-              title="Rollback: every player runs the game and late inputs are corrected by replay (recommended). Lockstep: every player runs the game and each frame waits for every player's input, so nothing is guessed (feels slower on a long connection). Streaming: host runs the emulator, guests watch a video stream."
+              title="Rollback: every player runs the game and late inputs are corrected by replay (recommended). Streaming: host runs the emulator and guests play through a video stream."
             >
               <option value="rollback">Rollback</option>
-              <option value="lockstep">Lockstep</option>
+              <option value="classic">Classic</option>
               <option value="streaming">Streaming</option>
             </select>
           </div>
@@ -213,6 +213,11 @@
           </details>
           <button id="start-btn" disabled>Start Game (need 2+)</button>
         </div>
+
+        <p id="classic-mode-hint" class="opt-hint" role="status" hidden>
+          <strong>Classic</strong> brings back the original Kaillera feel. Every frame waits for all players’ inputs, so
+          there’s no rollback. Slower connections can add input delay.
+        </p>
 
         <div class="card-section" id="player-controls" style="display: none">
           <details class="advanced-options">

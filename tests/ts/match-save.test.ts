@@ -78,25 +78,26 @@ const stamp = Date.now();
 const hash = (value: Uint8Array | string) => createHash('sha256').update(value).digest('hex');
 const sectionHashes = Object.values(snapshot).map((x) => hash(new Uint8Array(x.buffer)));
 const inputRuntime = '[2,true,"retro"]';
-const seal = hash(
-  JSON.stringify([
-    1,
-    'room',
-    'source-fight',
-    'host',
-    'rollback',
-    'rom',
-    'core',
-    identity.roster,
-    1234,
-    stamp,
-    123,
-    inputRuntime,
-    1,
-    rows,
-    sectionHashes,
-  ]),
-);
+const sealFor = (mode: string) =>
+  hash(
+    JSON.stringify([
+      1,
+      'room',
+      'source-fight',
+      'host',
+      mode,
+      'rom',
+      'core',
+      identity.roster,
+      1234,
+      stamp,
+      123,
+      inputRuntime,
+      1,
+      rows,
+      sectionHashes,
+    ]),
+  );
 const save = {
   scope: identity,
   frame: 1234,
@@ -105,7 +106,7 @@ const save = {
   inputRuntime,
   delay: 1,
   rows,
-  seal,
+  seal: sealFor(identity.mode),
   snapshot,
 };
 test('only the complete signed frame, roster, history and cartridge memory install', async () => {
@@ -130,6 +131,15 @@ test('only the complete signed frame, roster, history and cartridge memory insta
     await matchSave.verify({ ...save, snapshot: { ...snapshot, hidden: new Uint32Array(17) } }, identity),
     false,
   );
+});
+
+test('legacy Classic saves verify with their original mode in the seal', async () => {
+  const scope = { ...identity, mode: 'lockstep' as const };
+  const classic = { ...scope, mode: 'classic' as const };
+  const legacy = { ...save, scope, seal: sealFor(scope.mode) };
+  assert.equal(await matchSave.verify(legacy, classic), true);
+  assert.equal(await matchSave.verify(legacy, identity), false);
+  assert.equal(await matchSave.verify({ ...legacy, scope: classic }, classic), false);
 });
 
 test('a predicted capture becomes eligible only after every consumed owner tuple agrees', () => {

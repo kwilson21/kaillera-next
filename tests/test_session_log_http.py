@@ -291,21 +291,66 @@ def test_admin_input_audit_tolerates_non_integer_frames(client, monkeypatch):
 # ── GET /admin/api/session-logs?mode= ─────────────────────────────────────────
 
 
-@pytest.mark.parametrize("mode", ["rollback", "lockstep", "streaming"])
-def test_admin_session_logs_mode_filter_takes_only_that_mode(audit_client, monkeypatch, mode):
-    """Lockstep is a mode of its own: the rollback filter no longer takes its rows."""
-    import src.db as db
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("rollback", [1, 5]),
+        ("classic", [3, 4]),
+        ("lockstep", [3, 4]),
+        ("streaming", [6]),
+    ],
+)
+def test_admin_session_logs_filter_uses_the_mode_at_the_time(audit_client, monkeypatch, mode, expected):
+    from sqlalchemy import create_engine, insert
+    from src import db
+    from src.schema import SessionLog
 
     http, fetch = audit_client
     fetch.return_value = []
     count = AsyncMock(return_value=0)
     monkeypatch.setattr(db, "count", count)
 
-    r = http.get(f"/admin/api/session-logs?mode={mode}", headers={"X-Admin-Key": "k"})
+    r = http.get(f"/admin/api/session-logs?mode={mode}&days=36500", headers={"X-Admin-Key": "k"})
     assert r.status_code == 200
-    sql = str(count.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
-    assert f"session_logs.mode = '{mode}'" in sql
-    assert " IN (" not in sql
+    query = count.await_args.args[0]
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        SessionLog.__table__.create(connection)
+        for id_, (recorded, created) in enumerate(
+            [
+                ("lockstep", "2026-09-25"),
+                ("lockstep", "2026-10-01"),
+                ("lockstep", "2026-11-20"),
+                ("classic", "2026-11-20"),
+                ("rollback", "2026-11-20"),
+                ("streaming", "2026-11-20"),
+            ],
+            start=1,
+        ):
+            connection.execute(
+                insert(SessionLog),
+                {
+                    "id": id_,
+                    "mode": recorded,
+                    "created_at": created,
+                    "match_id": str(id_),
+                    "room": "R",
+                    "last_seq": 0,
+                    "log_epoch": "",
+                    "audit_last_seq": -1,
+                    "audit_epoch": "",
+                },
+            )
+        results = connection.execute(query).mappings().all()
+    assert sorted(row["id"] for row in results) == expected
+    assert {row["reported_mode"] for row in results} == {"classic" if mode == "lockstep" else mode}
+
+
+@pytest.mark.parametrize("mode", ["classic", "lockstep"])
+def test_http_fallback_records_classic(client, mode):
+    http, append, _ = client
+    assert _post(http, {**BODY, "mode": mode}).status_code == 200
+    assert append.await_args.args[0]["mode"] == "classic"
 
 
 def test_admin_session_summary_selects_only_metadata(audit_client, monkeypatch):
@@ -442,6 +487,7 @@ def test_admin_legacy_detail_and_explicit_export_still_bundle_raw_data(audit_cli
 
 def test_admin_compact_verdicts_keep_outcomes_without_replay_or_payload_blobs(audit_client):
     http, fetch = audit_client
+
     def rows():
         return [
             {
