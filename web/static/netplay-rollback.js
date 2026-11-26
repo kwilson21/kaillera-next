@@ -7205,21 +7205,21 @@
     }
   };
 
-  const _KEEPALIVE_BUDGET = 60 * 1024;
   const _logEncoder = new TextEncoder();
-  const _flushViaHttp = async (payload, { url, final }) => {
+  const _flushViaHttp = async (payload, { url, final, keepalive }) => {
     if (!url) return false;
     try {
-      const body = JSON.stringify(payload);
+      const body = keepalive ? window.KNCore.sessionLogKeepaliveBody(payload, keepalive) : JSON.stringify(payload);
+      if (body === null) return false;
       const options = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body,
-        keepalive: final && _logEncoder.encode(body).length <= _KEEPALIVE_BUDGET,
+        keepalive: !!keepalive,
       };
       let response = await fetch(url, options);
       // A concurrent socket append may hold this slot's DB writer briefly.
-      if (final && response.status === 429) {
+      if (final && !keepalive && response.status === 429) {
         await new Promise((resolve) => setTimeout(resolve, 500));
         response = await fetch(url, options);
       }
@@ -7250,7 +7250,7 @@
   const _flushFinalLog = async (payload, target) => {
     let logOffset = 0;
     let auditOffset = 0;
-    const budget = target.keepalive ? _KEEPALIVE_BUDGET : 2 * 1024 * 1024;
+    const budget = 2 * 1024 * 1024;
     // The envelope contains the same frozen summary and context on every batch.
     const empty = { ...payload, entries: [], audit: { ...payload.audit, entries: [] } };
     const available = budget - _logEncoder.encode(JSON.stringify(empty)).length;
@@ -7311,19 +7311,20 @@
       }
     } catch (_) {}
   };
-  const _flushSyncLog = ({ final = false, keepalive = false } = {}) => {
+  const _flushSyncLog = ({ final = false, keepalive = false, hidden = false } = {}) => {
     const matchId = _cachedMatchId || KNState.matchId;
     if (!matchId) return;
     const token = _cachedUploadToken || KNState.uploadToken;
     const room = _cachedRoom || KNState.room;
     const url =
       token && room ? `/api/session-log?token=${encodeURIComponent(token)}&room=${encodeURIComponent(room)}` : null;
-    const target = { url, keepalive, final: final || keepalive };
+    const target = { url, final, keepalive: keepalive ? 'exit' : hidden ? 'hidden' : null };
     // Drain the C debug log into JS sync log BEFORE building the flush
     // payload so the new entries are included.
     _drainCDebugLog();
     try {
-      const payload = _buildFlushPayload(target.final);
+      const payload = _buildFlushPayload(final || keepalive);
+      if (target.keepalive) return _flushViaHttp(payload, target);
       if (target.final) return _flushFinalLog(payload, target);
       if (socket?.connected) {
         let acked = false;
@@ -17182,7 +17183,7 @@
     // only signal an app switch with visibilitychange.
     if (!_unloadVisChangeHandler) {
       _unloadVisChangeHandler = () => {
-        if (document.visibilityState === 'hidden') void _flushSyncLog({ keepalive: true });
+        if (document.visibilityState === 'hidden') void _flushSyncLog({ hidden: true });
       };
       document.addEventListener('visibilitychange', _unloadVisChangeHandler);
     }

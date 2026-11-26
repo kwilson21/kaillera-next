@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import vm from 'node:vm';
 import { createSyncLogRing } from '../../web/src/sync-log-ring.ts';
 import { createBoundary } from '../../web/src/socket-boundary.ts';
+import { sessionLogKeepaliveBody } from '../../web/src/session-log-keepalive.ts';
 
 const engine = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
 const source = engine.slice(engine.indexOf('  const _buildFlushPayload'), engine.indexOf('  // -- Canvas pixel hash'));
@@ -12,7 +13,7 @@ interface Body {
   epoch: string;
   entries: { seq: number }[];
   audit: { epoch: string; entries: { seq: number }[] };
-  summary: { frames: number };
+  summary: { frames: number; omittedOnExit?: { logEntries: number; auditEntries: number } };
 }
 
 function page(cap: number) {
@@ -24,7 +25,7 @@ function page(cap: number) {
   const deadlines: (() => void)[] = [];
   let busy = false;
   const ctx = vm.createContext({
-    window: { _playerSlot: 0 },
+    window: { _playerSlot: 0, KNCore: { sessionLogKeepaliveBody } },
     navigator: { userAgent: 'test' },
     performance,
     TextEncoder,
@@ -72,10 +73,8 @@ function page(cap: number) {
       };
     },
   });
-  const flush: (options?: { keepalive?: boolean; final?: boolean }) => Promise<void> | undefined = vm.runInContext(
-    source + '\n_flushSyncLog',
-    ctx,
-  );
+  const flush: (options?: { keepalive?: boolean; final?: boolean; hidden?: boolean }) => Promise<void> | undefined =
+    vm.runInContext(source + '\n_flushSyncLog', ctx);
   return {
     ring,
     posts,
@@ -134,25 +133,56 @@ test('stop freezes log, audit and credentials across a busy retry, late socket r
   assert.equal(p.ctx._socketFlushFails, 0);
 });
 
-test('pagehide sends ordered, byte-bounded HTTP keepalives including audit records', async () => {
+test('pagehide starts one byte-bounded upload of the newest logs and audit', async () => {
   const p = page(5000);
   for (let i = 0; i < 12; i++) {
     p.ring.push({ t: i, f: i, msg: '漢\u0000'.repeat(1400) });
-    p.ctx._auditPending.push({ seq: i });
+    p.ctx._auditPending.push({ seq: i, detail: '漢'.repeat(1000) });
   }
-  await p.flush({ keepalive: true });
+  const done = p.flush({ keepalive: true });
+  assert.equal(p.posts.length, 1);
+  const [post] = p.posts;
+  assert.ok(post!.keepalive && post!.bytes <= 56 * 1024);
+  for (const [key, rows] of [
+    ['logEntries', post!.body.entries],
+    ['auditEntries', post!.body.audit.entries],
+  ] as const) {
+    assert.ok(rows.length > 0 && rows.length < 12);
+    assert.deepEqual(
+      rows.map(({ seq }) => seq),
+      Array.from({ length: rows.length }, (_, i) => 12 - rows.length + i),
+    );
+    assert.equal(post!.body.summary.omittedOnExit?.[key], 12 - rows.length);
+  }
+  await done;
+  assert.equal(p.posts.length, 1);
   assert.equal(p.replies.length, 0);
-  assert.ok(p.posts.length > 1);
-  assert.ok(p.posts.every((r) => r.keepalive && r.bytes <= 60 * 1024));
-  const seqs = Array.from({ length: 12 }, (_, i) => i);
+});
+
+test('a hidden page sends an old prefix and may drain the rest after resuming', async () => {
+  const p = page(5000);
+  for (let i = 0; i < 10; i++) p.ring.push({ t: i, f: i, msg: 'x'.repeat(750) });
+  await p.flush({ hidden: true });
+  const [post] = p.posts;
+  assert.ok(post!.keepalive && post!.bytes <= 4 * 1024);
+  const prefix = post!.body.entries.map(({ seq }) => seq);
+  assert.ok(prefix.length > 0 && prefix.length < 10);
   assert.deepEqual(
-    p.posts.flatMap((r) => r.body.entries.map((v) => v.seq)),
-    seqs,
+    prefix,
+    Array.from({ length: prefix.length }, (_, i) => i),
   );
+  await p.flush({ final: true });
   assert.deepEqual(
-    p.posts.flatMap((r) => r.body.audit.entries.map((v) => v.seq)),
-    seqs,
+    p.posts.flatMap(({ body }) => body.entries.map(({ seq }) => seq)),
+    Array.from({ length: 10 }, (_, i) => i),
   );
-  assert.equal(p.ctx._syncLogAckedSeq, 11);
-  assert.equal(p.ctx._auditAckedSeq, 11);
+});
+
+test('pagehide does not wait and retry a declined request', async () => {
+  const p = page(10);
+  p.ring.push({ t: 1, f: 1, msg: 'final row' });
+  p.rejectOnce();
+  await p.flush({ keepalive: true });
+  assert.equal(p.posts.length, 1);
+  assert.equal(p.ctx._syncLogAckedSeq, -1);
 });

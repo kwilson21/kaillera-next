@@ -5,12 +5,12 @@ import { startLogUpload } from '../../web/src/streaming/session-log.ts';
 
 test('retry keeps the same ordered delta, and teardown delivers the tail while the socket ack is pending', async () => {
   const ring = createSyncLogRing(10);
-  const seen: Array<[boolean, string, number[]]> = [];
+  const seen: Array<[string, string, number[]]> = [];
   let complete: (seq: number) => void = () => assert.fail('socket flush was never sent');
   let calls = 0;
-  const writer = startLogUpload(ring, async (epoch, entries, closing) => {
-    seen.push([closing, epoch, entries.map((e) => e.seq)]);
-    if (closing) return entries.at(-1)!.seq;
+  const writer = startLogUpload(ring, async (epoch, entries, mode) => {
+    seen.push([mode, epoch, entries.map((e) => e.seq)]);
+    if (mode === 'stop') return entries.at(-1)!.seq;
     if (++calls === 1) return -1;
     return new Promise<number>((resolve) => {
       complete = resolve;
@@ -21,24 +21,24 @@ test('retry keeps the same ordered delta, and teardown delivers the tail while t
   const sent = writer.flush();
   ring.push({ t: 3, f: 12, msg: 'guest connected' });
   const stopped = writer.stop();
-  const duplicate = writer.flush(true);
+  const duplicate = writer.stop();
   await stopped;
   await duplicate;
   complete(0);
   await sent;
   assert.deepEqual(seen, [
-    [false, ring.epoch, [0]],
-    [false, ring.epoch, [0]],
-    [true, ring.epoch, [0, 1]],
+    ['regular', ring.epoch, [0]],
+    ['regular', ring.epoch, [0]],
+    ['stop', ring.epoch, [0, 1]],
   ]);
 });
 
 test('a declined final chunk is retried with the same epoch, then larger backlogs drain in sequence', async () => {
   const ring = createSyncLogRing(20);
   const chunks: number[][] = [];
-  const writer = startLogUpload(ring, async (epoch, entries, closing) => {
+  const writer = startLogUpload(ring, async (epoch, entries, mode) => {
     assert.equal(epoch, ring.epoch);
-    assert.ok(closing);
+    assert.equal(mode, 'stop');
     chunks.push(entries.map((e) => e.seq));
     return chunks.length === 1 ? -1 : entries.at(-1)!.seq;
   });
@@ -49,4 +49,21 @@ test('a declined final chunk is retried with the same epoch, then larger backlog
     chunks.slice(1).flat(),
     Array.from({ length: 10 }, (_, i) => i),
   );
+});
+
+test('pagehide submits all pending entries to the bounded sender once, even before a live ack', async () => {
+  const ring = createSyncLogRing(30);
+  const calls: string[] = [];
+  const writer = startLogUpload(ring, async (epoch, entries, mode) => {
+    calls.push(mode);
+    assert.equal(epoch, ring.epoch);
+    if (mode === 'exit') assert.equal(entries.length, 12);
+    return mode === 'stop' ? entries.at(-1)!.seq : -1;
+  });
+  for (let i = 0; i < 12; i++) ring.push({ t: i, f: i, msg: 'x'.repeat(10000) });
+  const sent = writer.flush(true);
+  assert.deepEqual(calls, ['exit']);
+  await sent;
+  assert.deepEqual(calls, ['exit']);
+  await writer.stop();
 });
