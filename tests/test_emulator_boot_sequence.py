@@ -108,7 +108,10 @@ def test_smash_remix_startup_uses_c_normalized_kn_sync_before_hidden_sidecar_fal
 
     late_join_idx = source.find("const handleLateJoinState = async (msg) =>")
     assert late_join_idx != -1
-    late_join_window = source[late_join_idx : late_join_idx + 5200]
+    late_join_window = source[late_join_idx : source.index("\n  };\n", late_join_idx)]
+    assert late_join_window.index("mod.knWaitForManualSchedulerIdle(") < late_join_window.index(
+        "mod._kn_load_state_immediate("
+    )
     hidden_idx = late_join_window.find("_restoreHiddenStateWords(")
     audio_idx = late_join_window.find("_restoreAudioFifoState(")
     assert hidden_idx != -1

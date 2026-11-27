@@ -384,8 +384,12 @@ def test_resync_settles_the_inputs_before_its_frame():
     # over a DataChannel once every chunk is handed over (the per-guest
     # transfer body, _sendSyncChunksTo), over Socket.IO once it is emitted.
     send_idx = src.index("const _sendSyncChunksTo = async (")
-    assert "_settleInputsBefore(target.slot, frame);" in src[send_idx:]
-    assert "_settleInputsBefore(_peers[targetSid].slot, frame);" in src
+    assert "_settleSentSnapshotInputs(t.sid, target.slot, frame);" in src[send_idx:]
+    socket_body = src.split("if (encoded.data.length <= SOCKET_SYNC_B64_SOFT_LIMIT) {", 1)[1]
+    socket_body = socket_body.split("} else {", 1)[0]
+    emit = socket_body.index("_signalSocket.emit('data-message', {")
+    delivered = socket_body.index("_settleSentSnapshotInputs(targetSid, _peers[targetSid].slot, frame);")
+    assert "type: 'sync-state-socket'" in socket_body[emit:delivered]
 
     # I2: the floor is per-peer state.
     reset_idx = src.index("const resetPeerState = (slot, reason, opts = {}) => {")

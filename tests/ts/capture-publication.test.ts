@@ -140,6 +140,9 @@ function room(realTransfer = false) {
     ${part('  // Experimental fault-only owner path.', '  const _ownedCaptureScope =')}
     ${fn('onDataMessage')}
     ${fn('_escalateLostInput')}
+    ${fn('_captureSentSnapshotInputs')}
+    ${fn('_sentSnapshotInputsConfirmed')}
+    ${fn('_settleSentSnapshotInputs')}
     ${fn('pushSyncState')}
     ${fn('_answerDirectSyncRequest')}
     ${fn('sendSyncChunks')}

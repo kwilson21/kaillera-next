@@ -568,6 +568,7 @@
       // peers did; they don't send it, so pairing with one is refused.
       inputModel: KN_INPUT_MODEL,
       stateBackend,
+      startupDrain: typeof mod?.knWaitForManualSchedulerIdle === 'function',
       // Always true now. Tabs from before the Remix menu lockstep was
       // removed still refuse a peer that doesn't send it.
       remixMenuRollback: true,
@@ -5196,7 +5197,7 @@
   // that state, the delay it ran under, and whether an input that ran before
   // it has since differed from its prediction (specs/sync_follow_up.qnt).
   // Set as the state is taken.
-  const _followUpWatches = new Map(); // sid -> {frame, delay, changed, delivered}
+  const _followUpWatches = new Map();
   // Host: per guest, the newest direct answer (_answerDirectSyncRequest). Only
   // its completion schedules the follow-up; resetPeerState clears it (I2).
   const _directAnswerNewest = new Map(); // sid -> token
@@ -10707,7 +10708,9 @@
   })();
   // The next run comes no sooner than this after the last.
   const START_LOAD_RECHECK_MIN_MS = 1000;
+  const INITIAL_CORE_WAIT_MS = 5000;
   let _startLoadWait = null;
+  let _initialCoreWait = null;
   const _armStartLoadDeadline = (deadlineMs = START_LOAD_DEADLINE_MS) => {
     if (_startLoadWait || _isSpectator || _playerSlot !== 0 || _phase >= PHASE_RUNNING) return;
     if (!_startArmedAt) _startArmedAt = performance.now();
@@ -10723,6 +10726,8 @@
   };
   // `loaded`: the match runs; otherwise the engine stopped.
   const _endStartLoadWait = (loaded) => {
+    _initialCoreWait?.cancel();
+    _initialCoreWait = null;
     const wait = _startLoadWait;
     _startLoadWait = null;
     if (!wait) return;
@@ -13871,12 +13876,58 @@
         _config?.onToast?.('Core version mismatch -- reload both players');
         return;
       }
+      if (
+        !_config?.resumeFromMatchId &&
+        localCaps.trueRollback &&
+        (!localCaps.startupDrain || peerCaps.startupDrain !== true)
+      ) {
+        _syncLog(
+          `CORE-CAP-MISMATCH sid=${sid} localStartupDrain=${Number(localCaps.startupDrain)} ` +
+            `peerStartupDrain=${Number(peerCaps.startupDrain === true)} — refusing rollback start`,
+        );
+        setStatus('Core version mismatch -- reload both players');
+        _config?.onToast?.('Core version mismatch -- reload both players');
+        return;
+      }
       // A tab from before rollback ran through the Remix menus keeps them in
       // lockstep; the two timelines would split at the first menu input.
       if (_isSmashRemix() && !peerCaps.remixMenuRollback) {
         _syncLog(`CORE-CAP-MISMATCH sid=${sid} peerRemixMenuRollback=0 — refusing rollback start`);
         setStatus('Version mismatch -- reload both players');
         _config?.onToast?.('Version mismatch -- reload both players');
+        return;
+      }
+    }
+
+    const gm = window.EJS_emulator?.gameManager;
+    if (!gm) return;
+    const mod = gm.Module;
+    if (!_config?.resumeFromMatchId && !syntheticOnlyDemo && mod?.knWaitForManualSchedulerIdle) {
+      // A suspended free-running frame can resume after scheduler takeover.
+      enterManualMode();
+      if (_initialCoreWait) return;
+      const session = _sessionId;
+      let wait;
+      if (
+        mod.knWaitForManualSchedulerIdle(() => {
+          if (_initialCoreWait !== wait || session !== _sessionId) return;
+          _initialCoreWait = null;
+          wait.done();
+          if (_phase !== PHASE_LOCKSTEP_READY || window.EJS_emulator?.gameManager?.Module !== mod) return;
+          _syncLog('initial state: previous emulator frame finished');
+          checkAllLockstepReady();
+        })
+      ) {
+        wait = window.KNCore.startGroup.startDeadline({
+          deadlineMs: INITIAL_CORE_WAIT_MS,
+          onDeadline: () => {
+            if (_initialCoreWait !== wait || session !== _sessionId) return;
+            _initialCoreWait = null;
+            if (_phase === PHASE_LOCKSTEP_READY) _stopAtStart('core', { pendingInitialFrame: true });
+          },
+        });
+        _initialCoreWait = wait;
+        _syncLog('initial state: waiting for the previous emulator frame');
         return;
       }
     }
@@ -13947,9 +13998,6 @@
     }
 
     _syncLog(`${readyCount + 1} players lockstep-ready -- GO`);
-
-    const gm = window.EJS_emulator?.gameManager;
-    if (!gm) return;
 
     if (_config?.resumeFromMatchId) {
       if (!_savedGame || !_saveMembersPresent(_savedGame.scope)) return _returnFailed('Original players unavailable');
@@ -15170,6 +15218,8 @@
       return;
     }
     _isApplyingLateJoinState = true;
+    const session = _sessionId;
+    const phase = _phase;
     const bridgeEpoch = _syncQueueEpoch;
     // The host sent a bridge only where its rule offers one (bridgeOffered).
     const bridgePeers =
@@ -15214,6 +15264,8 @@
         _syncLog('gameManager not ready');
         return;
       }
+      const stillJoining = () => session === _sessionId && phase === _phase && gm === window.EJS_emulator?.gameManager;
+      if (!stillJoining()) return;
 
       if (msg.effectiveDelay !== undefined && msg.effectiveDelay !== null) {
         const parsedDelay = parseInt(msg.effectiveDelay, 10);
@@ -15225,6 +15277,7 @@
       // Write SAVE_RAM before enterManualMode so boot frame reads host's EEPROM
       const mod = gm.Module;
       const saveRam = await _decodeSaveRam(msg);
+      if (!stillJoining()) return;
       _writeSaveRam(mod, saveRam, 'late-join-state');
 
       // Bounds-check the late-join blob before writing into WASM memory.
@@ -15246,6 +15299,23 @@
         );
         return;
       }
+      if (mod?.knWaitForManualSchedulerIdle) {
+        // A paused joiner can still have an Asyncify frame outstanding.
+        enterManualMode();
+        let wait;
+        if (mod.knWaitForManualSchedulerIdle(() => wait.done())) {
+          wait = window.KNCore.startGroup.startDeadline({
+            deadlineMs: INITIAL_CORE_WAIT_MS,
+            onDeadline: () => {
+              if (stillJoining()) _syncLog('late-join state: previous emulator frame timed out');
+            },
+          });
+          _syncLog('late-join state: waiting for the previous emulator frame');
+          if ((await wait.outcome) !== 'done' || !stillJoining()) return;
+          _syncLog('late-join state: previous emulator frame finished');
+        }
+      }
+
       // Load state synchronously if available, else async
       if (mod?._kn_load_state_immediate) {
         const statePtr = mod._malloc(bytes.length);
@@ -15441,7 +15511,7 @@
     } catch (err) {
       _syncLog(`failed to handle state: ${err}`);
     } finally {
-      _isApplyingLateJoinState = false;
+      if (session === _sessionId) _isApplyingLateJoinState = false;
     }
   };
 
@@ -18271,36 +18341,30 @@
     // Confirmation skips phantom peers, so for a follow-up (below) it proves
     // nothing while the follow-up's own target is a phantom.
     const confirmedFor = (r) => confirmed && !(r.followUp && _peerPhantom[_peers[r.targetSid]?.slot]);
-    const ready = _scheduledSyncRequests.filter(
-      (r) => ((confirmedFor(r) && r.targetFrame <= _frameNum) || pastDeadline(r)) && reachable(r),
-    );
-    // A follow-up whose frame is now confirmed goes out only if an input at
-    // or before the frame of the state already sent differed from its
-    // prediction: otherwise the guest has the right state already
-    // (specs/sync_follow_up.qnt). One due at its deadline unconfirmed cannot
-    // know yet, and goes out.
-    // Watched only once its state was handed over whole (`delivered`): a
-    // transfer that stalled, failed or was dropped left the guest without
-    // it. Confirmed only while no player is a phantom: confirmation skips
-    // phantoms, whose predicted inputs can still change the frame.
+    const readyToSend = (r) => ((confirmedFor(r) && r.targetFrame <= _frameNum) || pastDeadline(r)) && reachable(r);
+    // The state already sent can settle while the host predicts newer inputs.
+    // A follow-up that still needs a new state keeps the live-frame gate.
     const anyPhantom = Object.values(_peerPhantom).some(Boolean);
-    const unchanged = ready.filter((r) =>
-      window.KNCore.syncFollowUp.followUpIsUnneeded(
-        r.followUp || 0,
-        !!r.watch?.delivered,
-        !!r.watch?.changed,
-        confirmedFor(r) && !anyPhantom,
-      ),
-    );
+    const snapshotConfirmed = (watch) => !!isConfirmed && _sentSnapshotInputsConfirmed(watch);
+    const unchanged = _scheduledSyncRequests.filter((r) => {
+      if (anyPhantom || !r.followUp || !r.watch?.delivered || r.watch.changed) return false;
+      return window.KNCore.syncFollowUp.followUpIsUnneeded(
+        r.followUp,
+        r.watch.delivered,
+        r.watch.changed,
+        snapshotConfirmed(r.watch) || (confirmedFor(r) && readyToSend(r)),
+      );
+    });
     for (const r of unchanged) {
       _syncLog(
         `SYNC-FOLLOW-UP-SKIPPED target=${r.targetSid} frame=${r.watch.frame} request=${r.requestId || 0} ` +
-          `follow-up=${r.followUp}: no input that ran before it differed from its prediction`,
+          `follow-up=${r.followUp} confirmation=${snapshotConfirmed(r.watch) ? 'snapshot' : 'live'}: ` +
+          'no input that ran before it differed from its prediction',
       );
       if (_followUpWatches.get(r.targetSid) === r.watch) _followUpWatches.delete(r.targetSid);
     }
     if (unchanged.length > 0) _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => !unchanged.includes(r));
-    const due = ready.filter((r) => !unchanged.includes(r));
+    const due = _scheduledSyncRequests.filter(readyToSend);
     if (due.length === 0) return;
     for (const r of due) {
       if (r.targetFrame > _frameNum || !confirmed) {
@@ -18486,6 +18550,44 @@
       });
       _armScheduledSyncClock();
     });
+  };
+
+  const _captureSentSnapshotInputs = (frame, delay) => {
+    const through = frame - 1 - delay;
+    // Keep the live rollback window even if a prior delay admits newer inputs.
+    const start = frame - 1 - DELAY_FRAMES - KN_MAX_VISIBLE_ROLLBACK_DEPTH - DELAY_FRAMES;
+    const peers = getInputPeers().map((peer) => {
+      const { slot } = peer;
+      return { peer, slot, dc: peer.dc, history: _remoteInputs[slot], floor: _inputFloor(slot) };
+    });
+    return { through, start, peers, nativeInit: _rbInitFrame, confirmedAtHandoff: false };
+  };
+
+  const _sentSnapshotInputsConfirmed = ({ frame, inputs }, atHandoff = false) => {
+    if (!inputs || frame > _frameNum || inputs.nativeInit !== _rbInitFrame) return false;
+    if (!atHandoff && !inputs.confirmedAtHandoff) return false;
+    const { through, start, peers } = inputs;
+    const currentPeers = getInputPeers();
+    if (currentPeers.length !== peers.length || _pendingCInputs.some((input) => input.frame <= through)) return false;
+    for (const { peer, slot, dc, history, floor } of peers) {
+      if (!currentPeers.includes(peer) || peer.slot !== slot || peer.dc !== dc || _peerPhantom[slot]) return false;
+      if (!history || history !== _remoteInputs[slot]) return false;
+      if (!atHandoff) continue;
+      if (floor !== _inputFloor(slot)) return false;
+      for (let f = Math.max(floor, start); f <= through; f++) {
+        if (history[f] === undefined || history[f] === KNShared.ZERO_INPUT) return false;
+      }
+    }
+    return true;
+  };
+
+  const _settleSentSnapshotInputs = (sid, slot, frame) => {
+    const watch = _followUpWatches.get(sid);
+    // After the floor advances, new packets below it need not reach C.
+    if (watch?.frame === frame && !watch.changed && _sentSnapshotInputsConfirmed(watch, true)) {
+      watch.inputs.confirmedAtHandoff = true;
+    }
+    _settleInputsBefore(slot, frame);
   };
 
   // True when this peer's live state at the start of _frameNum is final: no
@@ -21754,8 +21856,12 @@
               !!_workerCoprocPending?.deferred,
             );
           const captureWatches = new Map();
+          const inputs =
+            watchFor.length && !owed && !capturedPublication && _useCRollback && owedMod?._kn_get_frame?.() === frame
+              ? _captureSentSnapshotInputs(frame, delay)
+              : null;
           for (const sid of watchFor) {
-            const watch = { frame, delay, changed: owed, delivered: false };
+            const watch = { frame, delay, changed: owed, delivered: false, inputs };
             _followUpWatches.set(sid, watch);
             captureWatches.set(sid, watch);
             _syncLog(
@@ -21905,7 +22011,7 @@
                 // The hidden words and HLE state; absent when the core has neither.
                 ..._resyncExtrasFields(extras),
               });
-              _settleInputsBefore(_peers[targetSid].slot, frame);
+              _settleSentSnapshotInputs(targetSid, _peers[targetSid].slot, frame);
               // Handed over whole: a follow-up may be skipped if nothing
               // changed (specs/sync_follow_up.qnt, SOCKET_DELIVERED).
               const watch = _followUpWatches.get(targetSid);
@@ -22159,7 +22265,7 @@
         // over: a transfer given up leaves the guest without the state, and
         // its late inputs from before that frame must still be fed
         // (specs/tick_deadlines.qnt, inputsAreSettledOnlyForADeliveredState).
-        _settleInputsBefore(target.slot, frame);
+        _settleSentSnapshotInputs(t.sid, target.slot, frame);
         _syncLog(`sync sent to slot=${target.slot}: header + ${numChunks} chunks`);
         return 'sent';
       }

@@ -75,7 +75,8 @@
     return;
   }
 
-  const { installEjsGlobals, applyEjsGraphicsProfile } = window.KNCore.ejs;
+  const { installEjsGlobals, applyEjsGraphicsProfile, earlyVideoPresentationEnabled, setEarlyVideoPresentation } =
+    window.KNCore.ejs;
   installEjsGlobals(window, window.location.search, 'kaillera-next');
 
   const { safeGet: _safeGet, safeSet: _safeSet, safeRemove: _safeRemove } = KNState;
@@ -1707,7 +1708,7 @@
         if (hostControls) hostControls.style.display = 'none';
         if (guestStatus) guestStatus.style.display = '';
       }
-      syncDelayPickerPlacement();
+      syncAdvancedPlayerOptions();
     }
     if (
       data.resumePending &&
@@ -5092,7 +5093,7 @@
     const disclaimer = document.getElementById('rom-sharing-disclaimer');
     if (disclaimer)
       disclaimer.style.display = canShare && document.getElementById('opt-rom-sharing')?.checked ? '' : 'none';
-    syncDelayPickerPlacement(isRollback);
+    syncAdvancedPlayerOptions(isRollback);
   };
 
   const updatePlayerControlsVisibility = (isRollbackMode = selectedModeIsRollback()) => {
@@ -5100,24 +5101,20 @@
     if (playerControls) playerControls.style.display = !isHost && !isSpectator && isRollbackMode ? '' : 'none';
   };
 
-  const updateDelayPickerVisibility = (isRollbackMode = selectedModeIsRollback()) => {
-    const delayPicker = document.getElementById('delay-picker');
-    if (delayPicker) delayPicker.style.display = !isSpectator && isRollbackMode ? '' : 'none';
-  };
-
   const getDelaySummaryText = () =>
     _delay.delaySummary(delayPickerNow(), document.getElementById('delay-effective')?.textContent);
 
-  const syncDelayPickerPlacement = (isRollbackMode = selectedModeIsRollback()) => {
+  const syncAdvancedPlayerOptions = (isRollbackMode = selectedModeIsRollback()) => {
     const hostDetails = document.querySelector('#host-controls .advanced-options');
     const playerDetails = document.querySelector('#player-controls .advanced-options');
-    const delayPicker = document.getElementById('delay-picker');
     const targetDetails = isHost ? hostDetails : playerDetails;
-    if (delayPicker && targetDetails && delayPicker.parentElement !== targetDetails) {
-      targetDetails.appendChild(delayPicker);
+    for (const id of ['delay-picker', 'early-video-option']) {
+      const option = document.getElementById(id);
+      if (!option) continue;
+      if (targetDetails && option.parentElement !== targetDetails) targetDetails.appendChild(option);
+      option.style.display = !isSpectator && isRollbackMode ? '' : 'none';
     }
     updatePlayerControlsVisibility(isRollbackMode);
-    updateDelayPickerVisibility(isRollbackMode);
     updateDelayEffectiveHintFromPicker();
   };
 
@@ -5169,7 +5166,7 @@
       ensureAdvancedSummary(delayDetails);
     }
     normalizeDelaySelectOptions();
-    syncDelayPickerPlacement();
+    syncAdvancedPlayerOptions();
   };
 
   const normalizeGamepadControlsMarkup = () => {
@@ -5670,6 +5667,14 @@
         if (delayAuto.checked) delaySelect.value = String(currentAutoDelayValue());
         updateDelayEffectiveHintFromPicker();
       });
+    }
+    const earlyVideo = document.getElementById('opt-early-video');
+    if (earlyVideo) {
+      earlyVideo.checked = earlyVideoPresentationEnabled(window);
+      const apply = () => setEarlyVideoPresentation(window, earlyVideo.checked);
+      earlyVideo.addEventListener('change', apply);
+      // EmulatorJS restores its saved core settings before emitting start.
+      window.EJS_onGameStart = apply;
     }
     wireAdvancedSummaryStatus();
     wireDualInputHelp();

@@ -709,6 +709,14 @@ done
 $QUINT run "$FOLLOW" --main=sync_follow_up_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# A newer prediction does not invalidate evidence for the snapshot already sent.
+for variant in sent_snapshot_confirmation_before sent_snapshot_confirmation_fixed; do
+  $QUINT test "$FOLLOW" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$FOLLOW" --main=sent_snapshot_confirmation_fixed \
+  --invariants onlyKnownUnchangedIsSkipped noFollowUpForAConfirmedSnapshot \
+  --max-samples=2000 --max-steps=6 --backend="$BACKEND"
+
 # Async transfer admission can reach the native capture during a replay.
 for variant in sync_capture_boundary_before sync_capture_boundary_fixed; do
   $QUINT test "$FOLLOW" --main="$variant" --backend="$BACKEND"
@@ -912,6 +920,15 @@ done
 $QUINT run "$REPLAY" --main=replay_preemption_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+VIDEO=specs/early_video_presentation.qnt
+$QUINT typecheck "$VIDEO"
+for variant in early_video_presentation_before early_video_presentation_headless_only early_video_presentation_fixed; do
+  $QUINT test "$VIDEO" --main="$variant" --backend="$BACKEND"
+done
+# Repeated full sync can promote an old buffer. The legacy last replay paint can run with headless off.
+$QUINT run "$VIDEO" --main=early_video_presentation_fixed --invariant=earlyPresentationSafe \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
 # ── The ring while a page plays alone ──────────────────────────────────────
 SOLO=specs/solo_save.qnt
 $QUINT typecheck "$SOLO"
@@ -936,6 +953,14 @@ for variant in core_archive_before core_archive_fixed; do
 done
 $QUINT run "$ARCHIVE" --main=core_archive_fixed --invariant=allHold \
   --max-samples=10000 --max-steps=20 --backend="$BACKEND"
+
+HANDOFF=specs/manual_scheduler_handoff.qnt
+$QUINT typecheck "$HANDOFF"
+for variant in manual_scheduler_handoff_before manual_scheduler_handoff_late_join_before manual_scheduler_handoff_fixed; do
+  $QUINT test "$HANDOFF" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$HANDOFF" --main=manual_scheduler_handoff_fixed --invariant=safeHandoff \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
 START=specs/engine_start.qnt
 $QUINT typecheck "$START"

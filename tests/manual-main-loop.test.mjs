@@ -9,12 +9,15 @@ const scheduler = glue.slice(glue.indexOf('var _emscripten_set_main_loop_timing=
 
 function fixture(mode) {
   const queued = [];
+  const microtasks = [];
   let steps = 0;
   let pending;
   const enqueue = (fn) => queued.push(fn);
   const ctx = {
     Module: {},
     ABORT: false,
+    Asyncify: { currData: null, state: 0, State: { Normal: 0 } },
+    queueMicrotask: (fn) => microtasks.push(fn),
     setTimeout: enqueue,
     requestAnimationFrame: enqueue,
     setImmediate: enqueue,
@@ -33,7 +36,7 @@ function fixture(mode) {
     });
     loop.resume();
   }
-  return { ctx, loop, queued, own, steps: () => steps, tick: () => pending() };
+  return { ctx, loop, queued, microtasks, own, steps: () => steps, tick: () => pending() };
 }
 
 for (const [mode, name] of ['timer', 'rAF', 'immediate'].entries()) {
@@ -91,6 +94,47 @@ test('a vetoed iteration does not report dispatch and other modules keep running
   other.loop.scheduler();
   other.queued.shift()();
   assert.equal(other.steps(), 1);
+});
+
+test('the manual scheduler wakes its state loader after the suspended frame finishes', () => {
+  const f = fixture(1);
+  f.own();
+  const { Asyncify, Module } = f.ctx;
+  let wakes = 0;
+  assert.equal(
+    Module.knWaitForManualSchedulerIdle(() => wakes++),
+    false,
+  );
+  Asyncify.currData = 128;
+  assert.equal(
+    Module.knWaitForManualSchedulerIdle(() => wakes++),
+    true,
+  );
+  f.loop.notifyManualIdle();
+  assert.equal(f.microtasks.length, 0);
+  Asyncify.currData = null;
+  f.loop.notifyManualIdle();
+  f.loop.notifyManualIdle();
+  assert.equal(wakes, 0);
+  assert.equal(f.microtasks.length, 1);
+  f.microtasks.shift()();
+  assert.equal(wakes, 1);
+});
+
+test('an idle notification queued by an old owner cannot wake a new owner', () => {
+  const f = fixture(1);
+  f.own();
+  const { Asyncify, Module } = f.ctx;
+  Asyncify.currData = 128;
+  assert.equal(
+    Module.knWaitForManualSchedulerIdle(() => assert.fail('old owner woke')),
+    true,
+  );
+  Asyncify.currData = null;
+  f.loop.notifyManualIdle();
+  Module.knSetManualScheduler(null);
+  f.own();
+  f.microtasks.shift()();
 });
 
 test('lockstep requires dispatch and cycle progress on its owned module', () => {
