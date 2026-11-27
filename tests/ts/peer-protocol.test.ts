@@ -146,6 +146,10 @@ test('JSON messages on the lockstep channel match by type', () => {
   ok('lockstep', JSON.stringify({ type: 'delay-pong', ts: 15234.3 }));
   const caps = { rdpReplaySkip: true, trueRollback: true, inputModel: 2, stateBackend: 'split-rdram' };
   ok('lockstep', JSON.stringify({ type: 'lockstep-ready', delay: 2, extraDelay: 0, caps }));
+  ok(
+    'lockstep',
+    JSON.stringify({ type: 'lockstep-ready', delay: 2, extraDelay: 0, caps: { ...caps, startupDrain: true } }),
+  );
   ok('lockstep', JSON.stringify({ type: 'digest', frame: 600, hashes: [1, 2, 3], replayMeta: null }));
   ok('lockstep', JSON.stringify({ type: 'rom-accepted' }));
   bad('lockstep', JSON.stringify({ type: 'delay-ping' }));

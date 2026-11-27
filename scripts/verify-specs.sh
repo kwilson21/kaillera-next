@@ -381,6 +381,9 @@ sync_follow_up() {
   # correction ran: 6 steps. Today's rule as well as the delay rule alone.
   expect_violation "$FOLLOW" sync_follow_up_owed_unflagged theGuestEndsOnTheHostsState 6
   expect_violation "$FOLLOW" sync_follow_up_delay_unaware theGuestEndsOnTheHostsState 6
+  verify "$FOLLOW" sent_snapshot_confirmation_fixed onlyKnownUnchangedIsSkipped init 6
+  verify "$FOLLOW" sent_snapshot_confirmation_fixed noFollowUpForAConfirmedSnapshot init 6
+  expect_violation "$FOLLOW" sent_snapshot_confirmation_before noFollowUpForAConfirmedSnapshot 4
   verify "$FOLLOW" sync_capture_boundary_fixed onlyStableSnapshots init 8
   expect_violation "$FOLLOW" sync_capture_boundary_before onlyStableSnapshots 4
   verify "$FOLLOW" sync_publication_boundary_fixed onlyCurrentSnapshotsStart init 8
@@ -688,6 +691,16 @@ solo_save() {
 }
 
 engine_start() {
+  local archive=specs/core_archive.qnt
+  verify "$archive" core_archive_fixed allHold init 6
+  expect_violation "$archive" core_archive_before startedArchiveMatches 3
+  expect_violation "$archive" core_archive_before unknownSkipsCache 2
+  expect_violation "$archive" core_archive_before workerHasKnownIdentity 4
+  local HANDOFF=specs/manual_scheduler_handoff.qnt
+  verify "$HANDOFF" manual_scheduler_handoff_fixed safeHandoff init 8
+  expect_violation "$HANDOFF" manual_scheduler_handoff_before noOldWorkAfterLoad 4
+  expect_violation "$HANDOFF" manual_scheduler_handoff_late_join_before noOldWorkAfterLoad 5
+
   local archive=specs/core_archive.qnt
   verify "$archive" core_archive_fixed allHold init 6
   expect_violation "$archive" core_archive_before startedArchiveMatches 3

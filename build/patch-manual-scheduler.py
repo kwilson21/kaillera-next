@@ -19,8 +19,24 @@ def patch(glue):
     ):
         replace(native, f"if(MainLoop.manualScheduler)MainLoop.manualScheduler(MainLoop.runner);else {native}")
 
-    replace("var MainLoop={running:false", "var MainLoop={manualScheduler:null,running:false")
-    replace("var AL={", 'Module["knSetManualScheduler"]=owner=>{MainLoop.manualScheduler=owner};var AL={')
+    replace("var MainLoop={running:false", "var MainLoop={manualScheduler:null,manualIdle:null,running:false")
+    replace(
+        "var AL={",
+        'Module["knSetManualScheduler"]=owner=>{'
+        "if(MainLoop.manualScheduler!==owner)MainLoop.manualIdle=null;MainLoop.manualScheduler=owner};"
+        'Module["knWaitForManualSchedulerIdle"]=wake=>{'
+        "if(!MainLoop.manualScheduler||(Asyncify.state===Asyncify.State.Normal&&!Asyncify.currData))return false;"
+        "MainLoop.manualIdle=wake;return true};"
+        "MainLoop.notifyManualIdle=()=>{"
+        "if(!MainLoop.manualIdle||Asyncify.state!==Asyncify.State.Normal||Asyncify.currData)return;"
+        "const wake=MainLoop.manualIdle,owner=MainLoop.manualScheduler;MainLoop.manualIdle=null;"
+        "queueMicrotask(()=>{if(MainLoop.manualScheduler===owner)wake()})};var AL={",
+    )
+    # The outer rewind must return before a waiting owner can replace core state.
+    replace(
+        "if(isError&&!handled){throw asyncWasmReturnValue}",
+        "if(isError&&!handled){throw asyncWasmReturnValue}if(!isError)MainLoop?.notifyManualIdle?.();",
+    )
 
     # Paused generations must not drain the next generation's blocker queue.
     replace("if(ABORT)return;if(MainLoop.queue.length", "if(ABORT||!checkIsRunning())return false;if(MainLoop.queue.length")

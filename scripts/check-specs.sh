@@ -709,6 +709,14 @@ done
 $QUINT run "$FOLLOW" --main=sync_follow_up_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# A newer prediction does not invalidate evidence for the snapshot already sent.
+for variant in sent_snapshot_confirmation_before sent_snapshot_confirmation_fixed; do
+  $QUINT test "$FOLLOW" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$FOLLOW" --main=sent_snapshot_confirmation_fixed \
+  --invariants onlyKnownUnchangedIsSkipped noFollowUpForAConfirmedSnapshot \
+  --max-samples=2000 --max-steps=6 --backend="$BACKEND"
+
 # Async transfer admission can reach the native capture during a replay.
 for variant in sync_capture_boundary_before sync_capture_boundary_fixed; do
   $QUINT test "$FOLLOW" --main="$variant" --backend="$BACKEND"
@@ -936,6 +944,14 @@ for variant in core_archive_before core_archive_fixed; do
 done
 $QUINT run "$ARCHIVE" --main=core_archive_fixed --invariant=allHold \
   --max-samples=10000 --max-steps=20 --backend="$BACKEND"
+
+HANDOFF=specs/manual_scheduler_handoff.qnt
+$QUINT typecheck "$HANDOFF"
+for variant in manual_scheduler_handoff_before manual_scheduler_handoff_late_join_before manual_scheduler_handoff_fixed; do
+  $QUINT test "$HANDOFF" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$HANDOFF" --main=manual_scheduler_handoff_fixed --invariant=safeHandoff \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
 START=specs/engine_start.qnt
 $QUINT typecheck "$START"
