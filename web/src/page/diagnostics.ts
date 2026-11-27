@@ -87,6 +87,17 @@ export interface DiagInput {
 }
 
 type GlContext = WebGL2RenderingContext | WebGLRenderingContext;
+interface RenderReadback {
+  gl: WebGL2RenderingContext;
+  buffer: WebGLBuffer;
+  pixels: Uint8Array<ArrayBuffer>;
+  width: number;
+  height: number;
+  frame: number;
+  fence: WebGLSync | null;
+}
+const isWebGL2 = (gl: GlContext | null): gl is WebGL2RenderingContext =>
+  typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext;
 const TOUCH_EVENTS = ['touchstart', 'touchend', 'touchmove'] as const;
 interface TouchHook {
   el: HTMLElement;
@@ -144,6 +155,7 @@ export const createDiagnostics = () => {
   let renderLastHash = 0;
   let renderLastChangeFrame = 0;
   let renderStallLogged = false;
+  let renderReadback: RenderReadback | null = null;
   let inputLastNonZeroFrame = -1;
   let inputEverNonZero = false;
   let inputDeadLogged = false;
@@ -171,18 +183,22 @@ export const createDiagnostics = () => {
     sendScreenshot = ctx.sendScreenshot || null;
   };
 
+  const canvasGL = (canvas: HTMLCanvasElement): GlContext | null => {
+    if (!glCtxCache || glCtxCache.canvas !== canvas) {
+      glCtxCache =
+        canvas.getContext('webgl2', { preserveDrawingBuffer: true }) ||
+        canvas.getContext('webgl', { preserveDrawingBuffer: true });
+    }
+    return glCtxCache;
+  };
+
   const captureCanvasHash = (): number => {
     if (!captureAllowed()) return 0;
     const canvas = document.querySelector<HTMLCanvasElement>('#game canvas');
     if (!canvas || !canvas.width || !canvas.height) return 0;
     try {
       // Try WebGL direct readback (no intermediate canvas copy)
-      if (!glCtxCache || glCtxCache.canvas !== canvas) {
-        glCtxCache =
-          canvas.getContext('webgl2', { preserveDrawingBuffer: true }) ||
-          canvas.getContext('webgl', { preserveDrawingBuffer: true });
-      }
-      const gl = glCtxCache;
+      const gl = canvasGL(canvas);
       // GLideN64's color-buffer-to-RDRAM readback leaves a PIXEL_PACK_BUFFER
       // bound across the Emscripten event-loop yield. WebGL2 forbids the
       // typed-array form of readPixels while a PBO is bound — calling it
@@ -192,16 +208,9 @@ export const createDiagnostics = () => {
       // core's render pipeline and surfaced as a WASM OOB on match start
       // (see commits 51b180c, 0ed1399).
       //
-      // Detect-and-skip is cheap (getParameter is a synchronous query on
-      // driver-cached state, not a GPU sync) and never mutates state. The
-      // 2D-canvas drawImage fallback would also work, but drawImage from a
-      // WebGL canvas forces a full GPU→CPU sync that produced a visible
-      // ~once-per-second stutter on the main thread. Returning 0 instead
-      // tells the RENDER-STALL detector to skip this capture (see
-      // `if (renderHash !== 0)` at the call site) — the detector is the
-      // only consumer, so "skip" is the cheapest correct behavior.
-      const isWebGL2 = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext;
-      if (isWebGL2 && gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING)) return 0;
+      // Skipping an occupied binding also avoids a second GPU readback
+      // through a 2D canvas copy.
+      if (isWebGL2(gl) && gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING)) return 0;
       if (gl) {
         const w = gl.drawingBufferWidth;
         const h = gl.drawingBufferHeight;
@@ -439,8 +448,107 @@ export const createDiagnostics = () => {
 
   // -- Freeze detection (called from tick loop) --
 
+  const recordRenderHash = (hash: number, frame: number): void => {
+    if (!hash) return;
+    if (hash !== renderLastHash) {
+      renderLastHash = hash;
+      renderLastChangeFrame = frame;
+      renderStallLogged = false;
+    } else if (frame - renderLastChangeFrame >= 180 && !renderStallLogged) {
+      log(
+        `RENDER-STALL start=${renderLastChangeFrame} cur=${frame} ` +
+          `unchanged=${frame - renderLastChangeFrame}f hash=0x${hash.toString(16)}`,
+      );
+      checkCanvasHealth(frame, 'render-stall');
+      renderStallLogged = true;
+    }
+  };
+
+  const dropRenderReadback = (): void => {
+    const pending = renderReadback;
+    renderReadback = null;
+    if (!pending) return;
+    if (pending.fence) pending.gl.deleteSync(pending.fence);
+    pending.gl.deleteBuffer(pending.buffer);
+  };
+
+  const queueRenderHash = (gl: WebGL2RenderingContext, frame: number): void => {
+    // The core can retain its pack buffer across a yield. Borrow the binding
+    // only when it is free, and leave it clear before the next emulator step.
+    if (
+      gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING) ||
+      gl.getParameter(gl.PACK_ROW_LENGTH) !== 0 ||
+      gl.getParameter(gl.PACK_SKIP_PIXELS) !== 0 ||
+      gl.getParameter(gl.PACK_SKIP_ROWS) !== 0
+    )
+      return;
+    const { drawingBufferWidth: width, drawingBufferHeight: height } = gl;
+    const packAlignment: unknown = gl.getParameter(gl.PACK_ALIGNMENT);
+    if (!width || !height || typeof packAlignment !== 'number' || (width * 4) % packAlignment !== 0) return;
+    if (renderReadback?.gl !== gl || renderReadback.width !== width || renderReadback.height !== height) {
+      dropRenderReadback();
+      const buffer = gl.createBuffer();
+      if (!buffer) return;
+      renderReadback = { gl, buffer, pixels: new Uint8Array(width * height * 4), width, height, frame, fence: null };
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer);
+      try {
+        gl.bufferData(gl.PIXEL_PACK_BUFFER, renderReadback.pixels.byteLength, gl.STREAM_READ);
+      } finally {
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      }
+    }
+    if (renderReadback.fence) return;
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, renderReadback.buffer);
+    try {
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+      renderReadback.frame = frame;
+      renderReadback.fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    } finally {
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    }
+    gl.flush();
+  };
+
+  const collectRenderHash = (): void => {
+    const pending = renderReadback;
+    if (!pending?.fence) return;
+    const { gl, fence, buffer, frame, pixels } = pending;
+    if (
+      !captureAllowed() ||
+      isNativePaused?.() ||
+      gl.isContextLost() ||
+      gl.drawingBufferWidth !== pending.width ||
+      gl.drawingBufferHeight !== pending.height
+    ) {
+      dropRenderReadback();
+      return;
+    }
+    const result = gl.clientWaitSync(fence, 0, 0);
+    if (result === gl.WAIT_FAILED) {
+      dropRenderReadback();
+    } else if (
+      (result === gl.ALREADY_SIGNALED || result === gl.CONDITION_SATISFIED) &&
+      !gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING)
+    ) {
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer);
+      try {
+        gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, pixels);
+      } finally {
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+        gl.deleteSync(fence);
+        pending.fence = null;
+      }
+      recordRenderHash(hashPixels(pixels), frame);
+    }
+  };
+
   const checkFreeze = (localInput: DiagInput): void => {
     const frameNum = getFrame();
+    try {
+      collectRenderHash();
+    } catch (_) {
+      dropRenderReadback();
+    }
     // All diagnostic canvas reads share the image preference, including URL opt-outs.
     if (captureAllowed() && frameNum > 0 && frameNum <= 300 && frameNum % 60 === 0) {
       checkCanvasHealth(frameNum, 'early');
@@ -448,26 +556,22 @@ export const createDiagnostics = () => {
     if (frameNum % 60 !== 0 || frameNum <= 300) return;
 
     // 1. RENDER-STALL: canvas pixel hash unchanged for 180+ frames.
-    // WebGL readPixels is a GPU sync point, so determinism stress runs opt out.
     if (isNativePaused?.()) {
       renderLastHash = 0;
       renderLastChangeFrame = frameNum;
       renderStallLogged = false;
     } else if (captureAllowed()) {
-      const renderHash = captureCanvasHash();
-      if (renderHash !== 0) {
-        if (renderHash !== renderLastHash) {
-          renderLastHash = renderHash;
-          renderLastChangeFrame = frameNum;
-          renderStallLogged = false;
-        } else if (frameNum - renderLastChangeFrame >= 180 && !renderStallLogged) {
-          log(
-            `RENDER-STALL start=${renderLastChangeFrame} cur=${frameNum} ` +
-              `unchanged=${frameNum - renderLastChangeFrame}f hash=0x${renderHash.toString(16)}`,
-          );
-          checkCanvasHealth(frameNum, 'render-stall');
-          renderStallLogged = true;
+      try {
+        const canvas = document.querySelector<HTMLCanvasElement>('#game canvas');
+        const gl = canvas && canvasGL(canvas);
+        if (isWebGL2(gl)) {
+          queueRenderHash(gl, frameNum);
+        } else {
+          dropRenderReadback();
+          recordRenderHash(captureCanvasHash(), frameNum);
         }
+      } catch (_) {
+        dropRenderReadback();
       }
     }
 
@@ -518,6 +622,7 @@ export const createDiagnostics = () => {
   };
 
   const dropCanvasCaches = (): void => {
+    dropRenderReadback();
     glCtxCache = null;
     glPixelBuf = null;
     offscreenCanvas = null;
