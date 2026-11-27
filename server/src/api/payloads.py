@@ -32,11 +32,6 @@ def canonical_game_mode(mode: str | None) -> str | None:
     return "classic" if mode == "lockstep" else mode
 
 
-def compatible_game_mode(mode: GameMode | None) -> GameMode | None:
-    """Keep room state readable by tabs and servers from before Classic."""
-    return "lockstep" if mode == "classic" else mode
-
-
 # ── Decorator ────────────────────────────────────────────────────────────────
 
 

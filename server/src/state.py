@@ -60,10 +60,10 @@ def _serialize_room(room) -> str:
 
 def _deserialize_room(d: dict):
     """Reconstruct Room from a parsed JSON dict."""
-    from src.api.payloads import compatible_game_mode
+    from src.api.payloads import canonical_game_mode
     from src.api.signaling import Room
 
-    mode_value = compatible_game_mode(d.get("mode"))
+    mode_value = canonical_game_mode(d.get("mode"))
 
     return Room(
         owner=d["owner"],
@@ -94,7 +94,7 @@ def _deserialize_room(d: dict):
         recovery_unverified_match_id=(
             d.get("match_id")
             if d.get("status") == "playing"
-            and mode_value in ("rollback", "lockstep")
+            and mode_value in ("rollback", "classic")
             and d.get("recovery_unverified_match_id") == d.get("match_id")
             else None
         ),

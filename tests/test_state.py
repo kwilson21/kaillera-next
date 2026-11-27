@@ -115,11 +115,8 @@ def test_serialize_roundtrip_with_spectators():
     assert restored.slots[1] == "pid-2"
 
 
-def test_a_lockstep_room_is_restored_as_lockstep():
-    """A room saved in lockstep mode comes back in lockstep mode. ("lockstep"
-    was once the old name of rollback and was read as rollback; it is its own
-    mode now, and rooms last hours, so none is left saved in the old sense.)
-    """
+def test_a_legacy_lockstep_room_is_restored_as_classic():
+    """A legacy room is restored using the canonical Classic mode ID."""
     legacy_payload = {
         "owner": "sid-owner",
         "room_name": "Legacy Room",
@@ -136,7 +133,7 @@ def test_a_lockstep_room_is_restored_as_lockstep():
         "device_types": {},
     }
     restored = _deserialize_room(legacy_payload)
-    assert restored.mode == "lockstep"
+    assert restored.mode == "classic"
     assert restored.dual_input_enabled is False
 
 

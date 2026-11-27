@@ -410,7 +410,7 @@ def test_host_rejoins_just_before_deadline_and_cancels_closure(server, monkeypat
     run_async(scenario())
 
 
-@pytest.mark.parametrize("mode", ["rollback", "lockstep"])
+@pytest.mark.parametrize("mode", ["rollback", "classic"])
 @pytest.mark.parametrize("authority_owns_room", [True, False])
 def test_native_authority_leaves_before_another_player_joins(server, monkeypatch, mode, authority_owns_room):
     async def scenario():
@@ -759,7 +759,7 @@ def test_recovered_fight_requires_every_original_socket_before_release(server, m
             return
         epoch = room.match_id
         assert epoch and epoch != source and room.status == "playing"
-        assert room.mode == "lockstep" and not room.resync_enabled
+        assert room.mode == "classic" and not room.resync_enabled
         assert ack["resumeFromMatchId"] == source and ack["resumePending"] and not ack["resyncEnabled"]
         ended = sent.index(("game-ended", {"matchId": source, "reason": "host-rewind"}))
         started = next(

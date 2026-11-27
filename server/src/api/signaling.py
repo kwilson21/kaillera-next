@@ -102,7 +102,6 @@ from src.api.payloads import (
     StartGamePayload,
     canonical_game_mode,
     checked,
-    compatible_game_mode,
     validated,
 )
 from src.dbbackend import BackendError
@@ -122,7 +121,7 @@ log = logging.getLogger(__name__)
 _ALNUM_RE = re.compile(r"^[A-Za-z0-9]+$")
 _ALNUM_HYPHEN_RE = re.compile(r"^[A-Za-z0-9\-]+$")
 _ANGLE_RE = re.compile(r"[<>]")
-_VALID_MODES = {"rollback", "lockstep", "streaming"}
+_VALID_MODES = {"rollback", "classic", "streaming"}
 MAX_ROOMS = int(os.environ.get("MAX_ROOMS", "100"))
 MAX_SPECTATORS = int(os.environ.get("MAX_SPECTATORS", "20"))
 _PER_IP_SPECTATOR_CAP = int(os.environ.get("PER_IP_SPECTATOR_CAP", "3"))
@@ -965,7 +964,7 @@ async def _remove_member(sid: str, entry: tuple[str, str, bool], reason: str) ->
 
     # The emulator in native slot zero serves every rollback/lockstep join.
     ends_native_match = (
-        reason == "leave" and rm_slot == 0 and room.status == "playing" and room.mode in ("rollback", "lockstep")
+        reason == "leave" and rm_slot == 0 and room.status == "playing" and room.mode in ("rollback", "classic")
     )
     owner_left = room.owner == sid
     if owner_left:
@@ -1617,7 +1616,7 @@ async def _start_game_locked(
     if room.status == "playing":
         return None  # A queued Start is already satisfied by the live match.
 
-    mode = compatible_game_mode(payload.mode)
+    mode = canonical_game_mode(payload.mode)
 
     # The host's new ROM is still being hashed: the start would carry the
     # previous ROM's hash, and no guest has been held to the new one
@@ -1648,7 +1647,7 @@ async def _start_game_locked(
     room.recovery_unverified_match_id = None
     room.waiting_for_state = {pid for pid, info in room.players.items() if "returnDeadline" in info}
     room.resync_enabled = payload.resyncEnabled
-    room.dual_input_enabled = mode in ("rollback", "lockstep") and payload.dualInputEnabled
+    room.dual_input_enabled = mode in ("rollback", "classic") and payload.dualInputEnabled
     room.resume_from_match_id = resume_from
     if resume_from:
         room.resume_deadline = _now_ms() + HOST_RETURN_GRACE_SECONDS * 1000
@@ -1695,12 +1694,11 @@ async def _start_game_locked(
         room=session_id,
     )
     await state.save_room(session_id, room)
-    reported_mode = canonical_game_mode(room.mode)
-    log.info("Game started in room %s (mode=%s)", session_id, reported_mode)
+    log.info("Game started in room %s (mode=%s)", session_id, room.mode)
     event = {
         "type": "server_game_started",
-        "message": reported_mode,
-        "meta": json.dumps({"match_id": room.match_id, "mode": reported_mode}),
+        "message": room.mode,
+        "meta": json.dumps({"match_id": room.match_id, "mode": room.mode}),
         "room": session_id,
         "slot": -1,
         "ip_hash": "",
@@ -1805,7 +1803,7 @@ async def match_recovery_unverified(sid: str, payload: MatchRecoveryUnverifiedPa
         )
         if not current_player or not may_report:
             return "Only the host or active player 1 can report unverified match recovery"
-        if room.status != "playing" or room.mode not in ("rollback", "lockstep") or room.match_id != payload.matchId:
+        if room.status != "playing" or room.mode not in ("rollback", "classic") or room.match_id != payload.matchId:
             return "Not the current Rollback or Classic match"
         if room.recovery_unverified_match_id == room.match_id:
             return None
@@ -1937,7 +1935,7 @@ async def set_mode(sid: str, payload: SetModePayload) -> str | None:
         if room.status != "lobby":
             return "Cannot change mode during game"
 
-        mode = compatible_game_mode(payload.mode)
+        mode = canonical_game_mode(payload.mode)
         room.mode = mode
         await _emit("users-updated", _players_payload(room), room=session_id)
         await state.save_room(session_id, room)
@@ -2609,7 +2607,7 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | No
             "room": session_id,
             "slot": slot,
             "player_name": room.players.get(player_id, {}).get("playerName", "")[:32],
-            "mode": canonical_game_mode(room.mode),
+            "mode": room.mode,
             "entries": entries,
             "epoch": payload.epoch,
             "summary": summary_str,
