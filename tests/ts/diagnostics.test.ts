@@ -274,6 +274,128 @@ test('the render-stall window starts over on leaving a native pause', () => {
   assert.ok(messages.some((message) => message.startsWith('RENDER-STALL start=720 cur=900 ')));
 });
 
+test('the WebGL2 stall check waits for its own buffer without borrowing the core binding', () => {
+  const messages: string[] = [];
+  const game = { width: 4, height: 4, getContext: () => gl };
+  interface FakeBuffer {
+    owner: 'core' | 'diagnostics';
+  }
+  const coreBuffer: FakeBuffer = { owner: 'core' };
+  const readbackBuffer: FakeBuffer = { owner: 'diagnostics' };
+  const sync = { submitted: true };
+  const events = new Map<string, () => void>();
+  const calls: string[] = [];
+  let binding: FakeBuffer | null = coreBuffer;
+  let ready = false;
+  let allowed = true;
+  class Gl {
+    readonly canvas = game;
+    readonly drawingBufferWidth = game.width;
+    readonly drawingBufferHeight = game.height;
+    readonly PIXEL_PACK_BUFFER = 1;
+    readonly PIXEL_PACK_BUFFER_BINDING = 2;
+    readonly PACK_ALIGNMENT = 3;
+    readonly PACK_ROW_LENGTH = 4;
+    readonly PACK_SKIP_PIXELS = 5;
+    readonly PACK_SKIP_ROWS = 6;
+    readonly STREAM_READ = 7;
+    readonly RGBA = 8;
+    readonly UNSIGNED_BYTE = 9;
+    readonly SYNC_GPU_COMMANDS_COMPLETE = 10;
+    readonly ALREADY_SIGNALED = 11;
+    readonly CONDITION_SATISFIED = 12;
+    readonly TIMEOUT_EXPIRED = 13;
+    readonly WAIT_FAILED = 14;
+    getParameter = (param: number) =>
+      param === this.PIXEL_PACK_BUFFER_BINDING ? binding : param === this.PACK_ALIGNMENT ? 4 : 0;
+    createBuffer = () => readbackBuffer;
+    bindBuffer = (_target: number, value: FakeBuffer | null) => {
+      binding = value;
+    };
+    bufferData = () => undefined;
+    readPixels = (_x: number, _y: number, _w: number, _h: number, _format: number, _type: number, offset: number) => {
+      assert.equal(binding, readbackBuffer);
+      assert.equal(offset, 0);
+      calls.push('queue');
+    };
+    fenceSync = () => sync;
+    deleteSync = () => calls.push('delete-sync');
+    deleteBuffer = () => calls.push('delete-buffer');
+    flush = () => undefined;
+    isContextLost = () => false;
+    clientWaitSync = (_sync: typeof sync, _flags: number, timeout: number) => {
+      assert.equal(timeout, 0);
+      return ready ? this.ALREADY_SIGNALED : this.TIMEOUT_EXPIRED;
+    };
+    getBufferSubData = (_target: number, _offset: number, pixels: Uint8Array) => {
+      assert.equal(binding, readbackBuffer);
+      pixels.fill(120);
+      calls.push('collect');
+    };
+  }
+  const gl = new Gl();
+  const window: Pick<DiagWindow, 'location' | 'KNDiag' | 'KNCapture'> & {
+    addEventListener: (name: string, handler: () => void) => void;
+  } = {
+    location: { hostname: 'kaillera.example', search: '' },
+    KNCapture: { allowed: () => allowed },
+    addEventListener: (name: string, handler: () => void) => events.set(name, handler),
+  };
+  const document = {
+    querySelector: () => game,
+    createElement: () => ({
+      getContext: () => ({ drawImage: () => undefined, getImageData: () => ({ data: solid(50, 50, 100) }) }),
+    }),
+  };
+  vm.runInContext(
+    pageScript(),
+    vm.createContext({ window, document, URLSearchParams, navigator: {}, WebGL2RenderingContext: Gl }),
+  );
+  const diag = window.KNDiag ?? assert.fail('missing diagnostics');
+  const neutral = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
+  let frame = 360;
+  diag.init({ log: (line) => messages.push(line), getFrame: () => frame });
+
+  diag.checkFreeze(neutral);
+  assert.equal(binding, coreBuffer);
+  assert.deepEqual(calls, []);
+  binding = null;
+  frame = 420;
+  diag.checkFreeze(neutral);
+  assert.equal(binding, null);
+  frame++;
+  diag.checkFreeze(neutral);
+  assert.deepEqual(calls, ['queue']);
+
+  ready = true;
+  binding = coreBuffer;
+  frame++;
+  diag.checkFreeze(neutral);
+  assert.equal(binding, coreBuffer);
+  assert.deepEqual(calls, ['queue']);
+  binding = null;
+  frame++;
+  diag.checkFreeze(neutral);
+  assert.deepEqual(calls, ['queue', 'collect', 'delete-sync']);
+  for (const sample of [480, 540, 600]) {
+    frame = sample;
+    diag.checkFreeze(neutral);
+    frame++;
+    diag.checkFreeze(neutral);
+  }
+  assert.ok(messages.some((line) => line.startsWith('RENDER-STALL start=420 cur=600 ')));
+
+  frame = 660;
+  diag.checkFreeze(neutral);
+  allowed = false;
+  events.get('kn-capture-change')?.();
+  assert.deepEqual(calls.slice(-3), ['queue', 'delete-sync', 'delete-buffer']);
+  assert.equal(binding, null);
+  frame++;
+  diag.checkFreeze(neutral);
+  assert.equal(calls.at(-1), 'delete-buffer');
+});
+
 test('neutral input reports touch activity at the gap and when input resumes', () => {
   const window: DiagWindow = {
     location: { hostname: 'kaillera.example', search: '' },
