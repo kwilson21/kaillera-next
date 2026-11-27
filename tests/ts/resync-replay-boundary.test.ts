@@ -236,10 +236,16 @@ test('a host answer admitted after native replay starts cannot read the intermed
 
 for (const transport of ['channel', 'socket']) {
   test(`a predicted input that changes before ${transport} handoff invalidates the captured answer`, async () => {
-    const run: (transport: string, invalidate: boolean) => Promise<string> = runInNewContext(
-      `
+    const run: (transport: string, invalidate: boolean, missingAtHandoff?: boolean) => Promise<string> =
+      runInNewContext(
+        `
       const _checkpoint = null, _coreFatalError = false, _playerSlot = 0, _syncEnabled = true;
-      const _hasKnSync = true, _recovery = {}, _frameNum = 2189, DELAY_FRAMES = 2;
+      const _hasKnSync = true, _recovery = {}, _frameNum = 2189, DELAY_FRAMES = 2, _useCRollback = true;
+      const KN_MAX_VISIBLE_ROLLBACK_DEPTH = 7, _rbInitFrame = 2000, _pendingCInputs = [], _peerPhantom = {};
+      const KNShared = { ZERO_INPUT: {} };
+      let floor;
+      const _inputFloor = () => floor;
+      const _remoteInputs = { 1: {} };
       const _hostReconnectFenceVersion = 0, _workerCoprocPending = null, _syncQueueEpoch = 1;
       const _syncQueueGen = {}, _followUpWatches = new Map(), _syncSendChains = {}, _syncChainMovedAt = {};
       const _ranBeforeDelayChange = null, _queuedSyncPushes = new Map();
@@ -250,7 +256,9 @@ for (const transport of ['channel', 'socket']) {
       const guest = {slot: 1, syncDc: {readyState: 'open', send: (message) => sent.push(message)}};
       const _peers = {guest};
       const _signalSocket = { emit: (event) => sent.push(event) };
-      const _runQueuedSyncPush = () => {}, _syncLog = () => {}, _settleInputsBefore = () => {};
+      const _runQueuedSyncPush = () => {}, _syncLog = () => {};
+      const getInputPeers = () => [guest];
+      const _settleInputsBefore = (_slot, frame) => { floor = frame - DELAY_FRAMES; };
       const _isPeerPendingLateJoin = () => false, _onEscalationTransfer = () => {};
       const performance = { now: () => 0 }, _mispredTotal = () => mispredictions;
       const _admitReconnectNativeCapture = () => true, ensureSyncBuffer = () => {};
@@ -259,7 +267,7 @@ for (const transport of ['channel', 'socket']) {
       let finishCompression, releaseChain;
       const encode = () => new Promise((resolve) => { finishCompression = resolve; });
       const compressState = encode, compressAndEncode = encode;
-      const mod = { _kn_get_replay_depth: () => 0, _kn_peek_pending_rollback: () => -1,
+      const mod = { _kn_get_replay_depth: () => 0, _kn_peek_pending_rollback: () => -1, _kn_get_frame: () => _frameNum,
         _kn_sync_read: () => 1, HEAPU8: new Uint8Array(16) };
       const window = {
         EJS_emulator: {gameManager: {Module: mod}},
@@ -271,11 +279,16 @@ for (const transport of ['channel', 'socket']) {
       };
       const _recoveryTransfers = { run: (attempts, body) => body(attempts), release: () => {} };
       ${from('  const _feedWatchedFrame =', '  const _feedCInput =')}
+      ${from('  const _captureSentSnapshotInputs =', "  // True when this peer's live state")}
       ${from('  const pushSyncState = async (', '  const _syncTargetsFor =')}
       ${from('  const _syncTargetsFor =', '  const _sendSyncChunksTo =')}
       ${from('  const _sendSyncChunksTo =', '  // The answer to the newest request')}
-      async (transport, invalidate) => {
+      async (transport, invalidate, missingAtHandoff) => {
         sent.length = 0;
+        floor = 2000;
+        const history = _remoteInputs[1] = {};
+        for (let f = 2177; f <= 2186; f++) history[f] = {};
+        if (missingAtHandoff) delete history[2186];
         _syncSendChains.guest = new Promise((resolve) => { releaseChain = resolve; });
         const push = pushSyncState('guest', false, {transport, watchFor: ['guest'], requestIds: {guest: 3}});
         if (transport === 'channel') {
@@ -286,14 +299,28 @@ for (const transport of ['channel', 'socket']) {
         if (transport === 'socket') finishCompression({data:'x', compressedSize:1});
         releaseChain();
         const skipped = await push;
-        return JSON.stringify({ skipped, sent, delivered: _followUpWatches.get('guest')?.delivered });
+        if (missingAtHandoff) history[2186] = {};
+        const watch = _followUpWatches.get('guest');
+        return JSON.stringify({ skipped, sent, delivered: watch?.delivered,
+          confirmed: _sentSnapshotInputsConfirmed(watch) });
       }
       `,
-    );
+      );
     const valid = JSON.parse(await run(transport, false));
     assert.equal(valid.delivered, true);
     assert.ok(valid.sent.length > 0);
-    assert.deepEqual(JSON.parse(await run(transport, true)), { skipped: ['guest'], sent: [], delivered: false });
+    assert.equal(valid.confirmed, true);
+
+    const lateInput = JSON.parse(await run(transport, false, true));
+    assert.equal(lateInput.delivered, true);
+    assert.equal(lateInput.confirmed, false);
+
+    assert.deepEqual(JSON.parse(await run(transport, true)), {
+      skipped: ['guest'],
+      sent: [],
+      delivered: false,
+      confirmed: false,
+    });
   });
 }
 

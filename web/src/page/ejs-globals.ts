@@ -9,6 +9,8 @@ interface ControlBinding {
 /** EmulatorJS's default controls, per player and button index. */
 type DefaultControls = { [player: number]: { [button: number]: ControlBinding } };
 
+const EARLY_VIDEO_OPTION = 'mupen64plus-EarlyVideoPresentation';
+
 /** Player 1 on the keyboard and a standard gamepad; the other players unbound. A new object each time, as EmulatorJS may change it. */
 const defaultControls = () =>
   ({
@@ -68,6 +70,12 @@ export interface EjsPage {
   EJS_defaultOptions?: { [option: string]: string };
   EJS_forceLegacyCores?: boolean;
   EJS_defaultControls?: DefaultControls;
+  EJS_emulator?: {
+    gameManager?: {
+      Module?: { _kn_get_early_video_frames?: () => number };
+      setVariable?: (key: string, value: string) => void;
+    };
+  };
   __knInstallUnpackAlignmentShim?: () => void;
   WebGLRenderingContext?: { readonly prototype: GlPrototype } | undefined;
   WebGL2RenderingContext?: { readonly prototype: GlPrototype } | undefined;
@@ -107,6 +115,16 @@ export const installEjsGlobals = (page: EjsPage, search: string, gameId: string)
   page.EJS_defaultControls = defaultControls();
 };
 
+export const earlyVideoPresentationEnabled = (page: EjsPage): boolean =>
+  page.EJS_defaultOptions?.[EARLY_VIDEO_OPTION] === 'True';
+
+export const setEarlyVideoPresentation = (page: EjsPage, enabled: boolean): void => {
+  const value = enabled ? 'True' : 'False';
+  (page.EJS_defaultOptions ??= {})[EARLY_VIDEO_OPTION] = value;
+  const manager = page.EJS_emulator?.gameManager;
+  if (manager?.Module?._kn_get_early_video_frames) manager.setVariable?.(EARLY_VIDEO_OPTION, value);
+};
+
 export const applyEjsGraphicsProfile = (page: EjsPage, profile: string | null): void => {
   const options: [string, string][] = [];
   if (profile === 'texrect') {
@@ -124,6 +142,8 @@ export const applyEjsGraphicsProfile = (page: EjsPage, profile: string | null): 
     );
   } else if (profile === 'webgl1') {
     options.push(['webgl2Enabled', 'disabled']);
+  } else if (profile === 'early-video') {
+    setEarlyVideoPresentation(page, true);
   } else if (profile === 'angrylion') {
     options.push(['mupen64plus-rdp-plugin', 'angrylion']);
   } else if (profile === 'parallel') {

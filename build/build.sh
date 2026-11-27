@@ -519,6 +519,8 @@ open('mupen64plus-rsp-hle/src/hle.c','w').write(src)
             echo "    Applied GLideN64 replay RDP-skip patch" || \
             echo "    WARN: GLideN64 replay RDP-skip patch failed"
     fi
+    git apply "${PATCHES_DIR}/mupen64plus-early-video.patch"
+    echo "    Applied GLideN64 early video patch"
     if grep -q "kn_apply_controller_present" libretro/libretro.c && \
         ! grep -q "kn_controller_present_mask" libretro/libretro.c; then
         python3 -c "

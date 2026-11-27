@@ -744,3 +744,76 @@ module coordinated_capture_clock_fixed {
 module coordinated_capture_clock_confirmed {
   import coordinated_capture_clock(RECOVERY_CLOCK = true, CONFIRM_ON_CLOCK = true).*
 }
+
+// An answer can finish settling while newer input is still predicted.
+// Only settled inputs for the captured state can rule out its follow-up.
+module sent_snapshot_confirmation {
+  const USE_SNAPSHOT_INPUTS: bool
+
+  var owned: bool
+  var settled: bool
+  var changed: bool
+  var handedOff: bool
+  var settledAtHandoff: bool
+  var sent: bool
+  var skipped: bool
+
+  action init = all {
+    owned' = true, settled' = false, changed' = false,
+    handedOff' = false, settledAtHandoff' = false, sent' = false, skipped' = false,
+  }
+  action settle(differs: bool): bool = all {
+    not(settled), not(sent), not(skipped),
+    owned' = owned, settled' = true, changed' = differs,
+    handedOff' = handedOff, settledAtHandoff' = settledAtHandoff, sent' = sent, skipped' = skipped,
+  }
+  action handoff = all {
+    not(handedOff),
+    owned' = owned, settled' = settled, changed' = changed,
+    handedOff' = true, settledAtHandoff' = (owned and settled), sent' = sent, skipped' = skipped,
+  }
+  action replaceInputHistory = all {
+    not(sent), not(skipped),
+    owned' = false, settled' = settled, changed' = changed,
+    handedOff' = handedOff, settledAtHandoff' = settledAtHandoff, sent' = sent, skipped' = skipped,
+  }
+  // Newer inputs are still predicted. The send advances the floor, so a
+  // formerly missing input received later cannot establish confirmation.
+  action service(deadline: bool): bool = all {
+    handedOff, not(sent), not(skipped),
+    val skip = USE_SNAPSHOT_INPUTS and owned and settledAtHandoff and not(changed)
+    all {
+      owned' = owned, settled' = settled, changed' = changed,
+      handedOff' = handedOff, settledAtHandoff' = settledAtHandoff,
+      skipped' = skip, sent' = (deadline and not(skip)),
+    },
+  }
+  action step = any {
+    settle(false), settle(true), handoff, replaceInputHistory, service(false), service(true),
+    all {
+      sent or skipped,
+      owned' = owned, settled' = settled, changed' = changed,
+      handedOff' = handedOff, settledAtHandoff' = settledAtHandoff, sent' = sent, skipped' = skipped,
+    },
+  }
+
+  val onlyKnownUnchangedIsSkipped = skipped implies (owned and settledAtHandoff and not(changed))
+  val noFollowUpForAConfirmedSnapshot = sent implies not(owned and settledAtHandoff and not(changed))
+
+  run newerPredictionsDoNotDelayTheDecisionTest =
+    init.then(settle(false)).then(handoff).then(service(false)).expect(skipped == USE_SNAPSHOT_INPUTS)
+      .then(init).then(settle(false)).then(handoff).then(service(true)).expect(sent != USE_SNAPSHOT_INPUTS)
+
+  run keepsChangingOrUnprovenSnapshotsTest =
+    init.then(handoff).then(settle(false)).then(service(true)).expect(sent)
+      .then(init).then(settle(false)).then(handoff).then(replaceInputHistory).then(service(true)).expect(sent)
+      .then(init).then(settle(true)).then(handoff).then(service(true)).expect(sent)
+}
+
+module sent_snapshot_confirmation_before {
+  import sent_snapshot_confirmation(USE_SNAPSHOT_INPUTS = false).*
+}
+
+module sent_snapshot_confirmation_fixed {
+  import sent_snapshot_confirmation(USE_SNAPSHOT_INPUTS = true).*
+}

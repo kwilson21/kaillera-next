@@ -800,6 +800,29 @@ def test_host_delay_hidden_streaming(page, server_url):
     assert delay_visible_after is True, "host delay picker should show in lockstep"
 
 
+def test_faster_rendering_is_a_local_advanced_option(browser, server_url, room):
+    with browser.new_page() as host, browser.new_page() as guest:
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
+        host.locator("#host-controls .advanced-options > summary").click()
+        guest.locator("#player-controls .advanced-options > summary").click()
+
+        name = "Faster rendering (experimental)"
+        host_option = host.get_by_role("checkbox", name=name)
+        guest_option = guest.get_by_role("checkbox", name=name)
+        expect(host_option).to_be_visible()
+        expect(guest_option).to_be_visible()
+        expect(host_option).not_to_be_checked()
+        expect(guest_option).not_to_be_checked()
+
+        guest_option.check()
+        expect(host_option).not_to_be_checked()
+        assert guest.evaluate("KNCore.ejs.earlyVideoPresentationEnabled(window)")
+        assert not host.evaluate("KNCore.ejs.earlyVideoPresentationEnabled(window)")
+        guest_option.uncheck()
+        assert not guest.evaluate("KNCore.ejs.earlyVideoPresentationEnabled(window)")
+
+
 def test_host_still_has_delay_picker(page, server_url):
     """Host still sees delay picker elements after restructure."""
     page.goto(f"{server_url}/play.html?room=DLYS3{_R}&host=1&name=Host")

@@ -35,6 +35,7 @@ Last updated: 2026-11-02
   wake-lock permission handling, rollback exports, RSP audio skip, sync v3, hidden-state fingerprint, and the
   `kn_hash_registry` field-hash exports the desync detector requires; on by default,
   `KN_ENABLE_HASH_REGISTRY=0` builds without them)
+- **Faster rendering:** available under Advanced in the room lobby, off by default. The GLideN64 patch presents compatible completed buffers earlier.
 - **`ejs/build.json`:** records `{minimumEJSVersion, version}` for the packaged core data file
 
 ### `ejs/compression/{extract7z.js, extractzip.js, libunrar.{js,wasm}}`

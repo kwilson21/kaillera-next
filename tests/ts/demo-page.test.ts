@@ -1073,6 +1073,28 @@ test('the ROM cache: what a load keeps, the next visit restores, and Stop forget
   assert.match(restored.snapshot(), /Restoring saved\.z64|init\(/);
 });
 
+test('faster rendering is opt-in and applies only to a core that supports it', () => {
+  const events: [string, string][] = [];
+  const setVariable = (key: string, value: string) => events.push([key, value]);
+  const page: ejs.EjsPage = { EJS_emulator: { gameManager: { setVariable } } };
+  ejs.installEjsGlobals(page, '', 'test');
+  assert.equal(ejs.earlyVideoPresentationEnabled(page), false);
+  ejs.installEjsGlobals(page, '?kngfx=early-video', 'test');
+  assert.equal(ejs.earlyVideoPresentationEnabled(page), true);
+  assert.deepEqual(events, []);
+
+  const supportedPage: ejs.EjsPage = {
+    EJS_emulator: { gameManager: { setVariable, Module: { _kn_get_early_video_frames: () => 0 } } },
+  };
+  ejs.setEarlyVideoPresentation(supportedPage, true);
+  ejs.setEarlyVideoPresentation(supportedPage, false);
+  assert.equal(ejs.earlyVideoPresentationEnabled(supportedPage), false);
+  assert.deepEqual(events, [
+    ['mupen64plus-EarlyVideoPresentation', 'True'],
+    ['mupen64plus-EarlyVideoPresentation', 'False'],
+  ]);
+});
+
 test('every address: the EmulatorJS settings and controls, and the texture-upload shim installed again later', async () => {
   for (const search of SEARCHES) {
     await compareVisit({ search, local: [], session: [], closedLoop: false, seed: 1 }, [

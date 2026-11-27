@@ -114,8 +114,11 @@ def test_inputs_are_settled_only_for_a_state_that_was_sent():
     which had predicted them (specs/tick_deadlines.qnt,
     inputsAreSettledOnlyForADeliveredState)."""
     body = _send_body()
-    settle = body.index("_settleInputsBefore(target.slot, frame);")
-    assert body.count("_settleInputsBefore(") == 1
+    settle = body.index("_settleSentSnapshotInputs(t.sid, target.slot, frame);")
+    assert body.count("_settleSentSnapshotInputs(") == 1
+    assert "_settleInputsBefore(" not in body
+    handoff = _block(ENGINE.read_text(), "const _settleSentSnapshotInputs = (sid, slot, frame) => {")
+    assert handoff.index("_sentSnapshotInputsConfirmed(watch, true)") < handoff.index("_settleInputsBefore(slot, frame);")
     assert body.index("await window.KNCore.syncSend.sendPaced(") < settle
     assert "if (outcome === 'sent' && _syncTargetCurrent(t) && (!reconnectFenceCurrent || reconnectFenceCurrent())) {" in body[:settle]
     assert "SYNC-SEND-STALLED" in body[settle:]

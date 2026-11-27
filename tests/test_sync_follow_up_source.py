@@ -120,7 +120,9 @@ def test_the_skip_is_the_proved_rule_and_the_watch_starts_as_the_state_is_taken(
     # The watch is set before the state is read, not after it is sent.
     # Starts changed when a correction is owed at the take (OWED_AT_TAKE),
     # judged by the proved rule, never for a sealed capture.
-    assert "const watch = { frame, delay, changed: owed, delivered: false };" in push
+    capture = push.index("_captureSentSnapshotInputs(frame, delay)")
+    watch = push.index("const watch = { frame, delay, changed: owed, delivered: false, inputs };")
+    assert capture < watch
     assert "_followUpWatches.set(sid, watch);" in push
     assert "captureWatches.set(sid, watch);" in push
     assert "window.KNCore.syncFollowUp.correctionOwed(" in push
@@ -167,8 +169,8 @@ def test_a_follow_up_is_skipped_only_for_a_delivered_state_with_no_phantom():
     src = LOCKSTEP_JS.read_text()
     dispatch = src[src.index("const _dispatchScheduledSyncs = (isConfirmed) => {") :]
     dispatch = dispatch[: dispatch.index("\n  };\n")]
-    assert "!!r.watch?.delivered," in dispatch
-    assert "confirmedFor(r) && !anyPhantom," in dispatch
+    assert "!r.watch?.delivered" in dispatch
+    assert "snapshotConfirmed(r.watch) || (confirmedFor(r) && readyToSend(r))" in dispatch
     # Delivered: only a transfer that ended `sent` marks the watch.
     chunks = src[src.index("const sendSyncChunks = async (") :]
     chunks = chunks[: chunks.index("\n  };\n")]
@@ -310,7 +312,8 @@ def test_the_dispatcher_skips_a_follow_up_only_with_no_phantom_peer():
     dispatch = src[src.index("const _dispatchScheduledSyncs = (isConfirmed) => {") :]
     dispatch = dispatch[: dispatch.index("\n  };\n")]
     assert "const anyPhantom = Object.values(_peerPhantom).some(Boolean);" in dispatch
-    assert "confirmedFor(r) && !anyPhantom," in dispatch
+    guard = dispatch.index("if (anyPhantom || !r.followUp || !r.watch?.delivered || r.watch.changed)")
+    assert guard < dispatch.index("window.KNCore.syncFollowUp.followUpIsUnneeded(")
 
 
 def test_a_direct_answer_not_sent_or_reset_since_schedules_nothing():

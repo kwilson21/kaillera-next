@@ -1,0 +1,189 @@
+--- a/GLideN64/src/FrameBuffer.cpp
++++ b/GLideN64/src/FrameBuffer.cpp
+@@ -27,6 +27,25 @@
+ #include <Graphics/Parameters.h>
+ #include <Graphics/ColorBufferReader.h>
+ #include "DisplayWindow.h"
++
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++extern "C" int kn_headless;
++extern "C" bool kn_early_video_enabled;
++extern "C" uint32_t kn_video_epoch;
++extern "C" int kn_get_replay_depth(void);
++static u32 kn_early_video_frames = 0;
++
++static bool kn_can_present_early()
++{
++	return kn_early_video_enabled && !kn_headless && kn_get_replay_depth() == 0;
++}
++
++extern "C" EMSCRIPTEN_KEEPALIVE u32 kn_get_early_video_frames()
++{
++	return kn_early_video_frames;
++}
++#endif
+ 
+ using namespace std;
+ using namespace graphics;
+@@ -148,6 +167,9 @@
+ 
+ void FrameBuffer::init(u32 _address, u16 _format, u16 _size, u16 _width, bool _cfb)
+ {
++#ifdef __EMSCRIPTEN__
++	m_drawComplete = false;
++#endif
+ 	m_startAddress = _address;
+ 	m_width = _width;
+ 	m_height = _cfb ? VI.height : 1;
+@@ -661,6 +683,12 @@
+ 	gDP.colorImage.height = max(gDP.colorImage.height, static_cast<u32>(_maxY));
+ 	gDP.colorImage.height = min(gDP.colorImage.height, static_cast<u32>(gDP.scissor.lry));
+ 	if (m_pCurrent != nullptr) {
++#ifdef __EMSCRIPTEN__
++		if (kn_early_video_enabled) {
++			m_pCurrent->m_drawEpoch = kn_video_epoch;
++			m_pCurrent->m_drawComplete = false;
++		}
++#endif
+ 		if (m_pCurrent->m_isMainBuffer)
+ 			m_pCurrent->m_height = max(m_pCurrent->m_height, min(gDP.colorImage.height, VI.height));
+ 		else
+@@ -670,6 +698,16 @@
+ 		m_pCurrent->m_copiedToRdram = false;
+ 	}
+ }
++
++#ifdef __EMSCRIPTEN__
++void FrameBufferList::completeCurrentDraw()
++{
++	// A full sync may arrive without a new draw in this core frame.
++	if (kn_can_present_early() && m_pCurrent != nullptr &&
++		m_pCurrent->m_drawEpoch == kn_video_epoch)
++		m_pCurrent->m_drawComplete = true;
++}
++#endif
+ 
+ void FrameBufferList::clearBuffersChanged()
+ {
+@@ -1549,6 +1587,23 @@
+ 	}
+ 	PostProcessor & postProcessor = PostProcessor::get();
+ 	FrameBuffer * pFilteredBuffer = pBuffer;
++#ifdef __EMSCRIPTEN__
++	// Present only a complete full-frame color source with the VI buffer's layout.
++	if (kn_can_present_early() &&
++		(*REG.VI_STATUS & VI_STATUS_SERRATE_ENABLED) == 0 &&
++		pNextBuffer == nullptr && config.frameBufferEmulation.copyDepthToMainDepthBuffer == 0 &&
++		m_pCurrent != nullptr && m_pCurrent != pBuffer &&
++		m_pCurrent->m_isMainBuffer && !m_pCurrent->m_cfb && !m_pCurrent->m_isDepthBuffer &&
++		m_pCurrent->m_drawComplete && m_pCurrent->m_drawEpoch == kn_video_epoch &&
++		m_pCurrent->m_width == pBuffer->m_width && m_pCurrent->m_height == pBuffer->m_height &&
++		m_pCurrent->m_size == pBuffer->m_size && m_pCurrent->m_scale == pBuffer->m_scale &&
++		m_pCurrent->m_pTexture->format == pBuffer->m_pTexture->format &&
++		m_pCurrent->m_pTexture->width == pBuffer->m_pTexture->width &&
++		m_pCurrent->m_pTexture->height == pBuffer->m_pTexture->height) {
++		pFilteredBuffer = m_pCurrent;
++		++kn_early_video_frames;
++	}
++#endif
+ 	for (const auto & f : postProcessor.getPostprocessingList())
+ 		pFilteredBuffer = f(postProcessor, pFilteredBuffer);
+ 
+--- a/GLideN64/src/FrameBuffer.h
++++ b/GLideN64/src/FrameBuffer.h
+@@ -46,6 +46,10 @@
+ 	u32 m_originX = 0;
+ 	u32 m_originY = 0;
+ 	u32 m_swapCount = 0;
++#ifdef __EMSCRIPTEN__
++	u32 m_drawEpoch = 0;
++	bool m_drawComplete = false;
++#endif
+ 	float m_scale = 0.0f;
+ 	bool m_copiedToRdram = false;
+ 	bool m_fingerprint = false;
+@@ -133,6 +137,9 @@
+ 	void updateCurrentBufferEndAddress();
+ 	void renderBuffer();
+ 	void setBufferChanged(f32 _maxY);
++#ifdef __EMSCRIPTEN__
++	void completeCurrentDraw();
++#endif
+ 	void clearBuffersChanged();
+ 	void setCurrentDrawBuffer() const;
+ 	void fillRDRAM(s32 ulx, s32 uly, s32 lrx, s32 lry);
+--- a/GLideN64/src/gDP.cpp
++++ b/GLideN64/src/gDP.cpp
+@@ -1001,6 +1001,9 @@
+ 		dwnd().getDrawer().dropRenderState();
+ 
+ 		frameBufferList().updateCurrentBufferEndAddress();
++#ifdef __EMSCRIPTEN__
++		frameBufferList().completeCurrentDraw();
++#endif
+ 
+ 		FrameBuffer * pCurrentBuffer = frameBufferList().getCurrent();
+ 		if (pCurrentBuffer != nullptr)
+--- a/libretro/libretro.c
++++ b/libretro/libretro.c
+@@ -113,6 +113,8 @@
+ #include <emscripten.h>
+ int kn_headless = 0;
+ EMSCRIPTEN_KEEPALIVE void kn_set_headless(int enable) { kn_headless = enable; }
++bool kn_early_video_enabled = false;
++uint32_t kn_video_epoch = 0;
+ int kn_skip_rdp_replay = 0;
+ EMSCRIPTEN_KEEPALIVE void kn_set_skip_rdp_replay(int enable) { kn_skip_rdp_replay = enable; }
+ EMSCRIPTEN_KEEPALIVE int kn_get_skip_rdp_replay(void) { return kn_skip_rdp_replay; }
+@@ -1629,6 +1631,13 @@
+        }
+     }
+ 
++#ifdef __EMSCRIPTEN__
++    var.key = CORE_NAME "-EarlyVideoPresentation";
++    var.value = NULL;
++    kn_early_video_enabled = current_rdp_type == RDP_PLUGIN_GLIDEN64 && !EnableThreadedRenderer &&
++       environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && !strcmp(var.value, "True");
++#endif
++
+ #ifdef HAVE_PARALLEL_RDP
+     if (current_rdp_type == RDP_PLUGIN_PARALLEL)
+     {
+@@ -2125,6 +2134,11 @@
+     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
+        update_variables(false);
+ 
++#ifdef __EMSCRIPTEN__
++    if (kn_early_video_enabled)
++       ++kn_video_epoch;
++#endif
++
+     if(current_rdp_type == RDP_PLUGIN_GLIDEN64)
+     {
+        if(EnableThreadedRenderer)
+--- a/libretro/libretro_core_options.h
++++ b/libretro/libretro_core_options.h
+@@ -325,6 +325,22 @@
+         "False"
+ #endif // VC
+     },
++#ifdef __EMSCRIPTEN__
++    {
++        CORE_NAME "-EarlyVideoPresentation",
++        "Early Video Presentation (Experimental)",
++        NULL,
++        "Present a compatible color buffer as soon as it finishes drawing.",
++        "Present a compatible color buffer as soon as it finishes drawing.",
++        "gliden64",
++        {
++            {"False", "Disabled"},
++            {"True", "Enabled"},
++            { NULL, NULL },
++        },
++        "False"
++    },
++#endif
+     {
+         CORE_NAME "-EnableCopyAuxToRDRAM",
+         "Copy auxiliary buffers to RDRAM",
