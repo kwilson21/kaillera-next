@@ -1,16 +1,21 @@
-module checkpoint_recovery {
+module checkpoint_recovery_policy {
+  const SPAN_BUDGET: bool
+  pure val BASE_MS = 20000
+  pure val REPLAY_MS_PER_FRAME = 20
+  pure val MAX_SPAN = 2032
+  pure def deadline(span: int): int = BASE_MS + (if (SPAN_BUDGET) REPLAY_MS_PER_FRAME * span else 0)
   // Three players and two input tags stand for a frozen roster and replay interval.
   pure val players = Set(0, 1, 2)
   pure val required = Set((0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1))
   var s: { phase: str, generation: int, anchored: bool, stopped: Set[int],
-           journal: Set[(int, int)], installed: Set[int], released: Set[int] }
+           journal: Set[(int, int)], installed: Set[int], released: Set[int], span: int, now: int }
 
   action init = s' = { phase: "idle", generation: 1, anchored: false, stopped: Set(),
-                        journal: Set(), installed: Set(), released: Set() }
+                        journal: Set(), installed: Set(), released: Set(), span: 0, now: 0 }
   // The digest and receipt checks are modeled as predicates supplied by the adapter.
-  action begin(allAgreed: bool, sameScope: bool): bool =
-    s' = if (s.phase == "idle" and allAgreed and sameScope)
-      s.with("anchored", true).with("phase", "freezing") else s
+  action begin(allAgreed: bool, sameScope: bool, span: int): bool =
+    s' = if (s.phase == "idle" and allAgreed and sameScope and span > 0 and span <= MAX_SPAN)
+      s.with("anchored", true).with("phase", "freezing").with("span", span).with("now", 0) else s
 
   action freezeAck(slot: int, gen: int): bool =
     s' = if (s.phase == "freezing" and gen == s.generation and players.contains(slot))
@@ -39,35 +44,47 @@ module checkpoint_recovery {
     s' = if (s.phase == "freezing" or s.phase == "installing")
       s.with("generation", s.generation + 1).with("phase", "unresolved") else s
 
+  // Coordinator time is elapsed since admission. Replay does not restart the clock.
+  action advanceClock(at: int): bool = {
+    val now = if (at > s.now) at else s.now
+    val expired = (s.phase == "freezing" and now >= BASE_MS) or
+      (s.phase == "installing" and now >= deadline(s.span))
+    s' = if (expired) s.with("now", now).with("generation", s.generation + 1).with("phase", "unresolved")
+      else s.with("now", now)
+  }
+
   val safe = all {
     s.phase != "installing" or (s.anchored and s.stopped == players and s.journal == required),
     s.phase != "committed" or (s.anchored and s.stopped == players and s.journal == required and s.installed == players),
     s.released == Set() or s.phase == "committed",
+    s.phase != "freezing" or s.now < BASE_MS,
+    s.phase != "installing" or (s.now < deadline(s.span) and deadline(s.span) <= deadline(MAX_SPAN)),
   }
   // Check every action interleaving from an installation that can overlap expiry.
   action startInstall = s' = { phase: "installing", generation: 1, anchored: true,
-    stopped: players, journal: required, installed: Set(), released: Set() }
+    stopped: players, journal: required, installed: Set(), released: Set(), span: 1308, now: 0 }
   action nearReplay = s' = { phase: "freezing", generation: 1, anchored: true,
-    stopped: Set(0, 1), journal: required.exclude(Set((1, 1))), installed: Set(), released: Set() }
+    stopped: Set(0, 1), journal: required.exclude(Set((1, 1))), installed: Set(), released: Set(), span: 1308, now: 0 }
   action step = {
     nondet slot = players.oneOf()
     nondet gen = Set(0, 1, 2).oneOf()
     nondet ok = Bool.oneOf()
     nondet valid = Bool.oneOf()
+    nondet at = Set(BASE_MS - 1, BASE_MS, 25000, deadline(MAX_SPAN)).oneOf()
     any {
-      begin(ok, valid), freezeAck(slot, gen), supply(slot, 0, gen, ok), supply(slot, 1, gen, ok),
+      begin(ok, valid, 1308), advanceClock(at), freezeAck(slot, gen), supply(slot, 0, gen, ok), supply(slot, 1, gen, ok),
       replay, installedAck(slot, gen, ok, valid), commit, release(slot, gen), abort
     }
   }
-  action frozen = init.then(begin(true, true)).then(freezeAck(0, 1)).then(freezeAck(1, 1)).then(freezeAck(2, 1))
+  action frozen = init.then(begin(true, true, 1308)).then(freezeAck(0, 1)).then(freezeAck(1, 1)).then(freezeAck(2, 1))
   action almost = frozen.then(supply(0, 0, 1, true)).then(supply(0, 1, 1, true))
     .then(supply(1, 0, 1, true)).then(supply(2, 0, 1, true)).then(supply(2, 1, 1, true))
   action staged = almost.then(supply(1, 1, 1, true)).then(replay)
   action twoInstalled = staged.then(installedAck(0, 1, true, true)).then(installedAck(1, 1, true, true))
-  run requiredCheckpointTest = init.then(begin(false, true)).then(begin(true, false)).expect(s.phase == "idle")
+  run requiredCheckpointTest = init.then(begin(false, true, 1308)).then(begin(true, false, 1308)).expect(s.phase == "idle")
   run missingOwnerTest = almost.then(supply(1, 1, 1, false)).then(supply(1, 1, 0, true))
     .then(replay).expect(s.phase == "freezing" and safe)
-  run missingFreezeTest = init.then(begin(true, true)).then(freezeAck(0, 1)).then(freezeAck(1, 1))
+  run missingFreezeTest = init.then(begin(true, true, 1308)).then(freezeAck(0, 1)).then(freezeAck(1, 1))
     .then(freezeAck(2, 0)).then(supply(0, 0, 1, true)).then(supply(0, 1, 1, true))
     .then(supply(1, 0, 1, true)).then(supply(1, 1, 1, true)).then(supply(2, 0, 1, true))
     .then(supply(2, 1, 1, true)).then(replay)
@@ -82,6 +99,27 @@ module checkpoint_recovery {
   run commitAndReplayReleaseTest = twoInstalled.then(installedAck(2, 1, true, true)).then(commit)
     .then(release(0, 1)).then(release(0, 1)).then(abort).then(release(1, 1)).then(release(2, 1))
     .expect(s.released == players and safe)
+
+  run longReplayPastFixedDeadlineTest = twoInstalled.then(advanceClock(25000))
+    .then(installedAck(2, 1, true, true)).then(commit)
+    .then(release(0, 1)).then(release(1, 1)).then(release(2, 1))
+    .expect(if (SPAN_BUDGET) s.released == players and safe else s.phase == "unresolved" and s.released == Set())
+  run missingJournalKeepsOriginalDeadlineTest = almost.then(advanceClock(BASE_MS))
+    .then(supply(1, 1, 1, true)).then(replay).expect(s.phase == "unresolved" and s.released == Set())
+  run replayBudgetCannotBeRenewedTest = twoInstalled.then(advanceClock(deadline(1308) - 1))
+    .then(installedAck(2, 1, false, true)).then(advanceClock(deadline(1308)))
+    .then(installedAck(2, 1, true, true)).then(commit).then(release(0, 1))
+    .expect(s.phase == "unresolved" and s.released == Set())
+  run outOfJournalSpanTest = init.then(begin(true, true, MAX_SPAN + 1)).expect(s.phase == "idle")
+}
+
+// The historical policy violates longReplayPastFixedDeadlineTest's release condition.
+module checkpoint_replay_budget_before {
+  import checkpoint_recovery_policy(SPAN_BUDGET = false).*
+}
+
+module checkpoint_recovery {
+  import checkpoint_recovery_policy(SPAN_BUDGET = true).*
 }
 
 // Only the checkpoint protocol observes its deadline. Live execution

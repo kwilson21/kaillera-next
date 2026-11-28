@@ -257,6 +257,7 @@ const ROSTER_HOLD_SLOT = Number(process.env.ROSTER_HOLD_SLOT || 1);
 const RECOVERY_SLOT = Number(process.env.RECOVERY_SLOT || 1);
 const RECOVERY_HOLD_MS = Number(process.env.RECOVERY_HOLD_MS || 3000);
 const RECOVERY_AT = Number(process.env.RECOVERY_AT || 600);
+const CHECKPOINT_WAIT_MS = 70000; // Up to 60.64 s from admission, plus reconnect signaling.
 const RECOVERY_MODE = process.env.RECOVERY_MODE || 'hold';
 const RECOVERY_QUIET_MS = 10000;
 const DROP_LINK = process.env.DROP_LINK === '1';
@@ -1158,7 +1159,7 @@ if (RECOVERY_BYSTANDER) {
     );
     if (process.env.CHECKPOINT_FAULT) {
       await host.waitForFunction(() => window.NetplayRollback.exportSyncLog().includes('CHECKPOINT-UNRESOLVED'), null, {
-        timeout: 45000,
+        timeout: CHECKPOINT_WAIT_MS,
       });
       const collect = () =>
         Promise.all(
@@ -1167,6 +1168,7 @@ if (RECOVERY_BYSTANDER) {
               frame: window.NetplayRollback.getHudCounters().currentFrame,
               proof: window.__meshCheckpoint(),
               applied: window.NetplayRollback.exportSyncLog().includes('RECONNECT-ANSWER-APPLIED'),
+              unresolved: window.NetplayRollback.exportSyncLog().includes('CHECKPOINT-UNRESOLVED'),
             })),
           ),
         );
@@ -1181,17 +1183,20 @@ if (RECOVERY_BYSTANDER) {
         recovery.deadLink.guestDropped > 0 &&
         after.some((x) => x.proof.faults > 0) &&
         (process.env.CHECKPOINT_FAULT !== 'replace-roster' || after.some((x) => x.proof.replaced)) &&
+        (process.env.CHECKPOINT_FAULT !== 'missing-install' ||
+          after.every((x) => x.unresolved && x.proof.installs.length > 0)) &&
         after.every((x, i) => !x.applied && !x.proof.releases.length && x.frame === before[i].frame);
       console.log('checkpoint negative control', process.env.CHECKPOINT_FAULT, {
         pass,
         frames: after.map((x) => x.frame),
         injections: after.map((x) => x.proof.faults),
+        unresolved: after.map((x) => x.unresolved),
       });
       await browser.close();
       process.exit(pass ? 0 : 1);
     }
     if (recovery.reset && guestReset) {
-      const until = Date.now() + 40000; // protected attempt can explicitly expire at ~34 s
+      const until = Date.now() + CHECKPOINT_WAIT_MS;
       const legacyRequestPattern = new RegExp(
         `received sync-request-full from ${RegExp.escape(recovery.guestSid)}(?: |$)`,
       );
@@ -2254,6 +2259,21 @@ if (RECOVERY_BYSTANDER && RECOVERY_MODE === 'reconnect') {
     )
   )
     checkpointProblems.push('numbered freeze, install and release did not match');
+  if (request) {
+    recovery.checkpointInputs = joinInputAgreement({
+      pages: P.map((p, slot) => ({ name: `P${slot + 1}`, sync: p.sync })),
+      slots: P.map((_, slot) => slot),
+      from: request.r,
+      to: Infinity,
+    });
+    const { compared, differingCount, supersededCount } = recovery.checkpointInputs;
+    if (Object.values(compared).some((count) => count < MIN_BATTLE_FRAMES) || differingCount || supersededCount)
+      checkpointProblems.push('peers lacked matching finalized input coverage after checkpoint release');
+    P.forEach((p, slot) => {
+      if (!linesSince(p, slot).some((line) => line.includes(`\tCHECKPOINT-RELEASE r=${request.r} epoch=`)))
+        checkpointProblems.push(`P${slot + 1} did not resume the verified checkpoint`);
+    });
+  }
   recovery.checkpoint = observed.map((p, i) => {
     const install = p?.installs[0];
     let compared = 0,

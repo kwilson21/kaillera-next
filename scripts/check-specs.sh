@@ -846,7 +846,7 @@ $QUINT test "$PROOF" --main=reconnect_proof --backend="$BACKEND"
 
 CHECKPOINT=specs/checkpoint_recovery.qnt
 $QUINT typecheck "$CHECKPOINT"
-for variant in checkpoint_recovery checkpoint_clock_before checkpoint_clock_fixed; do
+for variant in checkpoint_recovery checkpoint_replay_budget_before checkpoint_clock_before checkpoint_clock_fixed; do
   $QUINT test "$CHECKPOINT" --main="$variant" --backend="$BACKEND"
 done
 

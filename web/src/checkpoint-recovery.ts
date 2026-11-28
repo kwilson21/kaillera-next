@@ -17,6 +17,8 @@ import {
 const PERIOD = 128;
 const MAX_DELAY = 16;
 const RECOVERY_POLL_MS = 16;
+const RECOVERY_BASE_MS = 20000;
+const REPLAY_BUDGET_MS_PER_FRAME = 20;
 type Member = Readonly<{ slot: number; sid: string }>;
 type Snapshot = {
   frame: number;
@@ -93,6 +95,7 @@ export class CheckpointRecovery {
   private firstInputs = new Map<number, Input>();
   private cursor = 0;
   private minTag = 0;
+  private freezeExpires = 0;
   private expires = 0;
   private lastDecisionAsk = 0;
   private lastCommit: Decision | null = null;
@@ -275,7 +278,9 @@ export class CheckpointRecovery {
   private begin(run: Run, anchor: Anchor) {
     this.run = run;
     this.chosen = anchor;
-    this.expires = performance.now() + 20000;
+    this.freezeExpires = performance.now() + RECOVERY_BASE_MS;
+    // Replay is sliced across clock wakes. Its bounded allowance is fixed by the admitted journal span.
+    this.expires = this.freezeExpires + (run.r - run.c) * REPLAY_BUDGET_MS_PER_FRAME;
     this.stopped.clear();
     this.ownerRows.clear();
     this.receipts.clear();
@@ -456,10 +461,11 @@ export class CheckpointRecovery {
       this.fail('membership or route changed');
       return;
     }
+    const deadline = this.phase === 'approaching' || this.phase === 'frozen' ? this.freezeExpires : this.expires;
     if (
       this.phase !== 'committed' &&
       (this.self === 0 || this.phase !== 'installed') &&
-      performance.now() >= this.expires
+      performance.now() >= deadline
     ) {
       this.fail('deadline');
       return;

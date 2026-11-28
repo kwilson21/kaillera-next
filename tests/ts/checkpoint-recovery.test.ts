@@ -17,7 +17,7 @@ type TestPeer = {
   logged: string[];
   wake: (() => void) | null;
 };
-async function match(allow: Filter = () => true, size = 3) {
+async function match(allow: Filter = () => true, size = 3, { span = 60, replayed = (_slot: number) => {} } = {}) {
   const members = Array.from({ length: size }, (_, slot) => ({ slot, sid: 'player-' + slot }));
   const scope = { match: 'session', mask: (1 << size) - 1, fingerprint: 'core-rom', members };
   const state = members.map((): TestPeer => ({
@@ -64,12 +64,13 @@ async function match(allow: Filter = () => true, size = 3) {
           );
           s.frame++;
           s.steps++;
+          replayed(slot);
           return true;
         },
         prepare: (r) => r === s.frame,
-        first: () => value(slot, 60),
+        first: () => value(slot, span),
         resume: (r, inputs, run) => {
-          assert.equal(r, 60);
+          assert.equal(r, span);
           assert.equal(run.request, 7);
           assert.equal(inputs.size, size);
           s.resumed++;
@@ -120,7 +121,7 @@ async function match(allow: Filter = () => true, size = 3) {
   peers.forEach((p) => p.sample(0));
   await advance(() => state.every((s) => s.logged.some((l) => l.includes('CHECKPOINT-AGREED'))));
   peers.forEach((peer, slot) => {
-    for (let tag = 0; tag < 60; tag++) {
+    for (let tag = 0; tag < span; tag++) {
       peer.journal.witness(slot, tag, value(slot, tag));
       peer.journal.executed(
         tag,
@@ -129,9 +130,12 @@ async function match(allow: Filter = () => true, size = 3) {
       );
     }
   });
+  state.forEach((s) => {
+    s.frame = span - 60;
+  });
   assert.equal(peers[0]?.request(1, 7), true);
   state.forEach((s) => {
-    s.frame = 60;
+    s.frame = span;
   });
   return { peers, state, traffic, advance, deliver };
 }
@@ -256,4 +260,45 @@ test('a stopped frame pump expires before the planned checkpoint boundary', asyn
   assert.equal(peers[0]?.phase, 'unresolved');
   assert.equal(host.restores, 0);
   assert.equal(host.wake, null);
+});
+
+test('an admitted long replay can finish after the original deadline on a slower peer', async (t) => {
+  let elapsed = 0;
+  t.mock.method(performance, 'now', () => elapsed);
+  const span = 1308;
+  const m = await match(undefined, 3, {
+    span,
+    replayed: (slot) => {
+      if (slot === 2) elapsed++;
+    },
+  });
+  await m.advance(
+    () =>
+      m.peers[2]?.phase === 'replaying' &&
+      m.state.slice(0, 2).every((s) => s.logged.some((line) => line.startsWith('CHECKPOINT-INSTALLED'))),
+  );
+  assert.ok(m.state.every((s) => s.resumed === 0));
+  elapsed = 20000;
+  m.state[2]?.wake?.();
+  assert.equal(m.peers[2]?.phase, 'replaying');
+  await m.advance(() => m.state.every((s) => s.resumed === 1));
+  assert.ok(m.state.every((s) => s.restores === 1 && s.steps === span));
+});
+
+test('the coordinator expires a missing install receipt at the fixed outer bound', async (t) => {
+  let elapsed = 0;
+  t.mock.method(performance, 'now', () => elapsed);
+  const span = 2032;
+  const m = await match((from, msg) => from !== 2 || msg.op !== 'installed', 3, { span });
+  await m.advance(() => m.state.every((s) => s.logged.some((line) => line.startsWith('CHECKPOINT-INSTALLED'))));
+  elapsed = 60639;
+  m.state[0]?.wake?.();
+  assert.equal(m.peers[0]?.phase, 'installed');
+  elapsed = 60640;
+  const ack = m.traffic.find((p) => p.from === 2 && p.msg.op === 'installed' && p.msg.targetSid === 'player-0');
+  assert.ok(ack);
+  m.deliver(ack.from, ack.msg);
+  await m.advance(() => m.peers.every((p) => p.phase === 'unresolved'));
+  assert.ok(m.state.every((s) => s.resumed === 0));
+  assert.ok(!m.traffic.some((p) => p.msg.op === 'release'));
 });
